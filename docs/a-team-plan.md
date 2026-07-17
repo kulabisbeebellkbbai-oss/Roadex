@@ -20,6 +20,7 @@ The first release focuses on authenticated browser access to a server-side mock/
 - Define and implement server-side Codex session management with streaming output.
 - Add authentication, authorization, user/session isolation, audit logging, and security review gates before real Codex process control.
 - Use A-Team-driven development roles for planning, implementation, security review, and verification.
+- Keep security architecture and review gates independently owned by a dedicated Security Architect role.
 - Defer client device/peripheral bridge until core portal and security controls are verified.
 
 ## Constraints
@@ -73,12 +74,29 @@ Responsibilities:
 - Own APIs, data models, persistence, integrations, deployment shape, and operational safety.
 - Keep side effects explicit and add validation around boundary-crossing behavior.
 - Document local run, test, and deployment commands.
+- Coordinate with the Security Architect before implementing process execution, workspace access, authentication, or device bridge features.
 
 Standards:
 
 - Typed interfaces.
 - Least privilege.
 - Observable failures.
+
+### Stockwell
+
+Role: Security Architect and Review Lead
+
+Responsibilities:
+
+- Own Roadex threat modeling, trust boundaries, and security review gates.
+- Review authentication, authorization, workspace isolation, audit logging, and process execution controls before implementation proceeds.
+- Block client device access or real Codex process spawning until required security tests and approvals exist.
+
+Standards:
+
+- Threat model before sensitive implementation.
+- Deny-by-default permission boundaries.
+- Security tests for every privileged capability.
 
 ### Murdock
 
@@ -95,6 +113,7 @@ Standards:
 - Automated tests where practical.
 - Manual smoke evidence.
 - Bug reports with exact paths.
+- Security regression evidence for privileged boundaries.
 
 ## Draft Assignments
 
@@ -133,6 +152,18 @@ Acceptance criteria:
 - Inputs are validated.
 - Failures are typed.
 - Run commands are documented.
+
+### Define Security Review Gates
+
+Owner: Stockwell
+
+Brief: Create the Roadex threat model, privileged-action gates, and verification requirements before auth, session execution, or device access work proceeds.
+
+Acceptance criteria:
+
+- Trust boundaries are documented.
+- Privileged actions have explicit approval gates.
+- Security tests are named before implementation.
 
 ### Verify Release Slice
 
