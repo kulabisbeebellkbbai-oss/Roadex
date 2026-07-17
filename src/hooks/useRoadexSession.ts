@@ -25,6 +25,7 @@ export type RoadexSessionState = {
   auditEvents: AuditEvent[];
   error?: string;
   sendPrompt: (prompt: string) => Promise<void>;
+  openWorkspace: (workspaceId: string) => Promise<void>;
   retry: () => Promise<void>;
 };
 
@@ -84,6 +85,26 @@ export function useRoadexSession(): RoadexSessionState {
     [session, token],
   );
 
+  const openWorkspace = useCallback(
+    async (workspaceId: string) => {
+      setConnectionState('loading');
+      setError(undefined);
+      try {
+        const result = await createSession(token, { workspaceId });
+        const nextSession =
+          result.sessions.find((candidate) => candidate.workspace.id === workspaceId) ?? result.sessions[0];
+        setSession(nextSession);
+        setAuditEvents(result.auditEvents);
+        setTranscript(result.streamPreview.filter((event) => !nextSession || event.sessionId === nextSession.id));
+        setConnectionState('connected');
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : 'Workspace attach failed.');
+        setConnectionState('error');
+      }
+    },
+    [token],
+  );
+
   const retry = useCallback(async () => {
     if (!workspaces[0]) {
       await attach();
@@ -112,12 +133,14 @@ export function useRoadexSession(): RoadexSessionState {
       auditEvents,
       error,
       sendPrompt,
+      openWorkspace,
       retry,
     }),
     [
       auditEvents,
       connectionState,
       error,
+      openWorkspace,
       retry,
       sendPrompt,
       session,

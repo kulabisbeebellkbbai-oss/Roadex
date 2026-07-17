@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { mockUser } from '../src/server/authService';
 import { createStreamEvent } from '../src/server/mockRunner';
+import { createMemoryPersistence } from '../src/server/statePersistence';
 import {
+  bootstrap,
   createInitialState,
   createMockSession,
   createSessionFromApi,
@@ -84,7 +86,7 @@ describe('createMockSession', () => {
 
 describe('Roadex session service', () => {
   it('creates a session from a server-owned workspace id and records audit', async () => {
-    const state = createInitialState(fakeRunner());
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
     const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
 
     expect(response).toMatchObject({
@@ -98,7 +100,7 @@ describe('Roadex session service', () => {
   });
 
   it('rejects unknown workspace ids instead of accepting browser-supplied roots', async () => {
-    const state = createInitialState(fakeRunner());
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
     const response = await createSessionFromApi(state, mockUser, { workspaceId: '../roadex' });
 
     expect(response).toMatchObject({
@@ -112,7 +114,7 @@ describe('Roadex session service', () => {
   });
 
   it('rejects requested device bridge access and records denial', async () => {
-    const state = createInitialState(fakeRunner());
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
     const response = await createSessionFromApi(state, mockUser, {
       workspaceId: 'roadex',
       requestedDeviceBridge: true,
@@ -129,7 +131,7 @@ describe('Roadex session service', () => {
   });
 
   it('submits prompts to the real runner abstraction and streams only for the owning user', async () => {
-    const state = createInitialState(fakeRunner());
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
     const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
 
     expect(response.ok).toBe(true);
@@ -146,7 +148,7 @@ describe('Roadex session service', () => {
   });
 
   it('blocks additional prompts after a failed runner while keeping failure events readable', async () => {
-    const state = createInitialState(fakeRunner('failed'));
+    const state = createInitialState(fakeRunner('failed'), createMemoryPersistence());
     const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
 
     expect(response.ok).toBe(true);
@@ -158,5 +160,60 @@ describe('Roadex session service', () => {
     expect(response.session.lifecycle).toBe('blocked');
     expect(streamEventsForSession(state, mockUser, response.session.id)?.length).toBeGreaterThan(0);
     await expect(submitPrompt(state, mockUser, response.session.id, 'second prompt')).resolves.toBeUndefined();
+  });
+
+  it('loads persisted sessions, stream events, and audit events after service restart', async () => {
+    const persistence = createMemoryPersistence();
+    const state = createInitialState(fakeRunner(), persistence);
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    await submitPrompt(state, mockUser, response.session.id, 'persist me');
+    const reloaded = createInitialState(fakeRunner(), persistence);
+    const bootstrapped = await bootstrap(reloaded, mockUser);
+
+    expect(bootstrapped.sessions).toHaveLength(1);
+    expect(bootstrapped.sessions[0]).toMatchObject({
+      id: response.session.id,
+      workspace: {
+        id: 'roadex',
+      },
+    });
+    expect(bootstrapped.streamPreview.some((event) => event.message.includes('persist me'))).toBe(true);
+    expect(bootstrapped.auditEvents.some((event) => event.action === 'session.prompt')).toBe(true);
+  });
+
+  it('supports multiple server-approved workspaces by id only', async () => {
+    const original = process.env.ROADEX_WORKSPACES_JSON;
+    process.env.ROADEX_WORKSPACES_JSON = JSON.stringify([
+      { id: 'roadex', name: 'Roadex Portal', root: process.cwd() },
+      { id: 'gateway', name: 'Protected Gateway', root: '/home/god/Documents/Codex Workspace/Protected Service Gateway' },
+    ]);
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const defaultBootstrap = await bootstrap(state, mockUser);
+      const response = await createSessionFromApi(state, mockUser, { workspaceId: 'gateway' });
+      const nextBootstrap = await bootstrap(state, mockUser);
+
+      expect(defaultBootstrap.workspaces.map((workspace) => workspace.id)).toEqual(['roadex', 'gateway']);
+      expect(response).toMatchObject({
+        ok: true,
+        session: {
+          workspace: {
+            id: 'gateway',
+            root: '/home/god/Documents/Codex Workspace/Protected Service Gateway',
+          },
+        },
+      });
+      expect(nextBootstrap.sessions.map((session) => session.workspace.id)).toEqual(['roadex', 'gateway']);
+    } finally {
+      if (original === undefined) {
+        delete process.env.ROADEX_WORKSPACES_JSON;
+      } else {
+        process.env.ROADEX_WORKSPACES_JSON = original;
+      }
+    }
   });
 });

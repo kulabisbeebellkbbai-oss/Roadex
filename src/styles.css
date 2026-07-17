@@ -536,6 +536,22 @@ button {
   background: #f6f7f7;
 }
 
+.inline-action {
+  justify-self: end;
+  border: 1px solid #b8c4cf;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #26323c;
+  padding: 7px 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.inline-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .session-row p {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -731,6 +747,10 @@ button {
   }
 
   .signal {
+    justify-self: start;
+  }
+
+  .inline-action {
     justify-self: start;
   }
 }

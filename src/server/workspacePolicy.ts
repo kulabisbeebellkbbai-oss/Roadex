@@ -1,12 +1,35 @@
+import { isAbsolute, resolve } from 'node:path';
 import type { UserProfile, WorkspaceRef } from '../shared/sessionContracts.js';
 
-export const approvedWorkspaces: WorkspaceRef[] = [
-  {
-    id: 'roadex',
-    name: 'Roadex Portal',
-    root: process.env.ROADEX_WORKSPACE_ROOT ?? process.cwd(),
-  },
-];
+const defaultWorkspace = (): WorkspaceRef => ({
+  id: 'roadex',
+  name: 'Roadex Portal',
+  root: process.env.ROADEX_WORKSPACE_ROOT ?? process.cwd(),
+});
+
+export function getApprovedWorkspaces(): WorkspaceRef[] {
+  const raw = process.env.ROADEX_WORKSPACES_JSON;
+  if (!raw) return [defaultWorkspace()];
+  try {
+    const parsed = JSON.parse(raw) as WorkspaceRef[];
+    const workspaces = parsed.map(normalizeWorkspace).filter((workspace): workspace is WorkspaceRef => Boolean(workspace));
+    return workspaces.length > 0 ? workspaces : [defaultWorkspace()];
+  } catch {
+    return [defaultWorkspace()];
+  }
+}
+
+function normalizeWorkspace(candidate: WorkspaceRef): WorkspaceRef | undefined {
+  if (!candidate || typeof candidate.id !== 'string' || typeof candidate.root !== 'string') return undefined;
+  if (!/^[a-zA-Z0-9_-]+$/.test(candidate.id)) return undefined;
+  if (!isAbsolute(candidate.root)) return undefined;
+  const root = resolve(candidate.root);
+  return {
+    id: candidate.id,
+    name: candidate.name || candidate.id,
+    root,
+  };
+}
 
 export type WorkspaceDecision =
   | {
@@ -26,7 +49,7 @@ export function resolveWorkspaceForUser(user: UserProfile, workspaceId: string):
     };
   }
 
-  const workspace = approvedWorkspaces.find((candidate) => candidate.id === workspaceId);
+  const workspace = getApprovedWorkspaces().find((candidate) => candidate.id === workspaceId);
   if (!workspace) {
     return {
       ok: false,

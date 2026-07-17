@@ -10,6 +10,12 @@ export function createAuditLog(): AuditLog {
   };
 }
 
+export function createAuditLogFromEvents(events: AuditEvent[]): AuditLog {
+  return {
+    events: [...events],
+  };
+}
+
 export function appendAudit(
   log: AuditLog,
   user: UserProfile,

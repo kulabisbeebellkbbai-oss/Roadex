@@ -212,7 +212,18 @@ function App() {
                     <span>{workspace.id}</span>
                   </div>
                   <p title={workspace.root}>{workspace.root}</p>
-                  <span className="signal">Authorized</span>
+                  {session?.workspace.id === workspace.id ? (
+                    <span className="signal">Active</span>
+                  ) : (
+                    <button
+                      className="inline-action"
+                      disabled={roadex.connectionState === 'loading' || roadex.connectionState === 'streaming'}
+                      onClick={() => void roadex.openWorkspace(workspace.id)}
+                      type="button"
+                    >
+                      Open
+                    </button>
+                  )}
                 </div>
               ))}
             </div>

@@ -1,9 +1,14 @@
-import { appendAudit, createAuditLog, type AuditLog } from './auditLog.js';
+import { appendAudit, createAuditLogFromEvents, type AuditLog } from './auditLog.js';
 import { createCodexRunner, type SessionRunner } from './codexRunner.js';
 import { denyDeviceBridge } from './deviceBridgePolicy.js';
 import { createRunnerIntro, createStreamEvent } from './mockRunner.js';
-import { addStreamEvents, createSessionStore, getOwnedSession, type SessionStore } from './sessionStore.js';
-import { approvedWorkspaces, resolveWorkspaceForUser } from './workspacePolicy.js';
+import { addStreamEvents, createSessionStoreFromState, getOwnedSession, type SessionStore } from './sessionStore.js';
+import {
+  createJsonFilePersistence,
+  serializeState,
+  type StatePersistence,
+} from './statePersistence.js';
+import { getApprovedWorkspaces, resolveWorkspaceForUser } from './workspacePolicy.js';
 import {
   firstMilestoneGates,
   type AuditEvent,
@@ -20,22 +25,41 @@ export type RoadexState = {
   sessions: SessionStore;
   audit: AuditLog;
   runner: SessionRunner;
+  persistence: StatePersistence;
 };
 
-export function createInitialState(runner: SessionRunner = createCodexRunner()): RoadexState {
+export function createInitialState(
+  runner: SessionRunner = createCodexRunner(),
+  persistence: StatePersistence = createJsonFilePersistence(),
+): RoadexState {
+  const persisted = persistence.load();
   return {
-    sessions: createSessionStore(),
-    audit: createAuditLog(),
+    sessions: createSessionStoreFromState({
+      sessions: persisted.sessions,
+      streamEvents: persisted.streamEvents,
+    }),
+    audit: createAuditLogFromEvents(persisted.auditEvents),
     runner,
+    persistence,
   };
 }
 
 export async function bootstrap(state: RoadexState, user: UserProfile): Promise<RoadexBootstrap> {
-  const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+  const userSessions = state.sessions.sessions.filter(
+    (session) => session.userId === user.id && session.lifecycle !== 'closed',
+  );
+  if (userSessions.length === 0) {
+    const defaultWorkspace = getApprovedWorkspaces()[0];
+    if (defaultWorkspace) {
+      await createSessionFromApi(state, user, { workspaceId: defaultWorkspace.id });
+    }
+  }
   return {
     user,
-    workspaces: approvedWorkspaces,
-    sessions: response.ok ? [response.session] : [],
+    workspaces: getApprovedWorkspaces(),
+    sessions: state.sessions.sessions.filter(
+      (session) => session.userId === user.id && session.lifecycle !== 'closed',
+    ),
     auditEvents: state.audit.events.slice(-8).reverse(),
     streamPreview: state.sessions.streamEvents.slice(-8),
   };
@@ -49,14 +73,17 @@ export function createSessionFromApi(
   const workspaceDecision = resolveWorkspaceForUser(user, request.workspaceId);
   if (!workspaceDecision.ok) {
     appendAudit(state.audit, user, 'security.denied', 'workspace', 'denied', workspaceDecision.reason);
+    saveState(state);
     return Promise.resolve(deny('workspace', workspaceDecision.reason));
   }
 
   if (request.requestedDeviceBridge) {
     const denied = denyDeviceBridge(state.audit, user);
     if (denied.ok) {
+      saveState(state);
       return Promise.resolve(deny('device-bridge', 'Client device bridge is not available.'));
     }
+    saveState(state);
     return Promise.resolve(deny(denied.gate, denied.reason));
   }
 
@@ -68,6 +95,7 @@ export function createSessionFromApi(
   );
   if (existing) {
     appendAudit(state.audit, user, 'session.attach', existing.id, 'allowed', 'Attached existing Codex session.');
+    saveState(state);
     return Promise.resolve({ ok: true, session: existing });
   }
 
@@ -88,6 +116,7 @@ export function createSessionFromApi(
     'allowed',
     `Created Codex session for ${workspaceDecision.workspace.name}.`,
   );
+  saveState(state);
 
   return Promise.resolve({ ok: true, session });
 }
@@ -101,16 +130,19 @@ export async function submitPrompt(
   const session = getOwnedSession(state.sessions, user.id, sessionId);
   if (!session || session.lifecycle === 'closed' || session.lifecycle === 'blocked') {
     appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Session is unavailable to this user.');
+    saveState(state);
     return undefined;
   }
 
   const cleanPrompt = prompt.trim();
   if (!cleanPrompt) {
     appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Prompt cannot be empty.');
+    saveState(state);
     return undefined;
   }
   if (cleanPrompt.length > 16_000) {
     appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Prompt exceeds server limit.');
+    saveState(state);
     return undefined;
   }
 
@@ -133,6 +165,7 @@ export async function submitPrompt(
     session.lifecycle = 'blocked';
     appendAudit(state.audit, user, 'session.runner_failed', sessionId, 'denied', result.reason);
   }
+  saveState(state);
 
   return { events, auditEvent: started };
 }
@@ -145,10 +178,12 @@ export function streamEventsForSession(
   const session = getOwnedSession(state.sessions, user.id, sessionId);
   if (!session || session.lifecycle === 'closed') {
     appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'SSE stream denied.');
+    saveState(state);
     return undefined;
   }
 
   appendAudit(state.audit, user, 'session.stream_open', sessionId, 'allowed', 'Opened scoped SSE stream.');
+  saveState(state);
   return state.sessions.streamEvents.filter((event) => event.sessionId === sessionId);
 }
 
@@ -184,4 +219,15 @@ function deny(gate: string, reason: string): SessionResponse {
     gate,
     reason,
   };
+}
+
+function saveState(state: RoadexState): void {
+  if (state.audit.events.length > 500) {
+    state.audit.events.splice(0, state.audit.events.length - 500);
+  }
+  state.persistence.save(serializeState({
+    sessions: state.sessions.sessions,
+    streamEvents: state.sessions.streamEvents,
+    auditEvents: state.audit.events,
+  }));
 }

@@ -32,6 +32,10 @@ codex exec --json --sandbox workspace-write -C <approved-workspace> <prompt>
 
 The default approved workspace is the Roadex server working directory. Set `ROADEX_WORKSPACE_ROOT` to point the demo workspace somewhere else, and set `ROADEX_CODEX_BIN` if the service should use a specific Codex binary.
 
+For multiple server-approved projects, set `ROADEX_WORKSPACES_JSON` to a JSON array of `{ "id", "name", "root" }` records. Roadex accepts only those IDs from the browser; roots are never accepted from client requests.
+
+Runtime session, transcript, and audit metadata are written to `data/roadex-state.json` by default. The `data/` directory is ignored and must not be committed.
+
 ## Protected Gateway
 
 The production Roadex server is intended to run on loopback only at `127.0.0.1:8780`.

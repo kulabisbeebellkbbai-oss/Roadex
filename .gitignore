@@ -12,6 +12,7 @@
 *secret*
 
 # Local databases and generated state
+data/
 *.sqlite
 *.sqlite3
 *.db
