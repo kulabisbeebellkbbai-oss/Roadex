@@ -59,7 +59,8 @@ export type PromptAcceptedResponse = {
 };
 
 export type CancelSessionResponse = {
-  cancelled: true;
+  cancelled: boolean;
+  status: 'cancel-requested' | 'not-running';
   auditEvent: AuditEvent;
 };
 

@@ -28,6 +28,7 @@ export type RoadexState = {
   runner: SessionRunner;
   persistence: StatePersistence;
   activeRuns: Map<string, AbortController>;
+  cancelAttempts: Map<string, number>;
   maxActiveRuns: number;
 };
 
@@ -45,6 +46,7 @@ export function createInitialState(
     runner,
     persistence,
     activeRuns: new Map(),
+    cancelAttempts: new Map(),
     maxActiveRuns: Number(process.env.ROADEX_MAX_ACTIVE_RUNS ?? 2),
   };
 }
@@ -215,17 +217,47 @@ export function cancelSessionRun(
   sessionId: string,
 ): CancelSessionResponse | undefined {
   const session = getOwnedSession(state.sessions, user.id, sessionId);
-  const activeRun = state.activeRuns.get(sessionId);
-  if (!session || !activeRun) {
-    appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'No active runner is available to cancel.');
+  if (!session) {
+    appendAudit(
+      state.audit,
+      user,
+      'security.denied',
+      sessionId,
+      'denied',
+      `Cancel denied: actor=${user.id} session=${sessionId} reason=session_not_owned_or_missing.`,
+    );
+    recordCancelAttempt(state, user, sessionId, 'session_not_owned_or_missing');
     saveState(state);
     return undefined;
   }
 
+  const activeRun = state.activeRuns.get(sessionId);
+  if (!activeRun) {
+    const auditEvent = appendAudit(
+      state.audit,
+      user,
+      'session.cancel',
+      sessionId,
+      'denied',
+      `Cancel ignored: actor=${user.id} session=${sessionId} active_runner=false result=not_running.`,
+    );
+    recordCancelAttempt(state, user, sessionId, 'not_running');
+    saveState(state);
+    return { cancelled: false, status: 'not-running', auditEvent };
+  }
+
   activeRun.abort();
-  const auditEvent = appendAudit(state.audit, user, 'session.cancel', sessionId, 'allowed', 'Cancel requested.');
+  state.cancelAttempts.delete(cancelAttemptKey(user, sessionId));
+  const auditEvent = appendAudit(
+    state.audit,
+    user,
+    'session.cancel',
+    sessionId,
+    'allowed',
+    `Cancel requested: actor=${user.id} session=${sessionId} active_runner=true result=abort_signal_sent.`,
+  );
   saveState(state);
-  return { cancelled: true, auditEvent };
+  return { cancelled: true, status: 'cancel-requested', auditEvent };
 }
 
 export function streamEventsForSession(
@@ -288,4 +320,24 @@ function saveState(state: RoadexState): void {
     streamEvents: state.sessions.streamEvents,
     auditEvents: state.audit.events,
   }));
+}
+
+function recordCancelAttempt(state: RoadexState, user: UserProfile, sessionId: string, reason: string): void {
+  const key = cancelAttemptKey(user, sessionId);
+  const attempts = (state.cancelAttempts.get(key) ?? 0) + 1;
+  state.cancelAttempts.set(key, attempts);
+  if (attempts >= 3) {
+    appendAudit(
+      state.audit,
+      user,
+      'security.denied',
+      sessionId,
+      'denied',
+      `Cancel alert: actor=${user.id} session=${sessionId} attempts=${attempts} reason=${reason}.`,
+    );
+  }
+}
+
+function cancelAttemptKey(user: UserProfile, sessionId: string): string {
+  return `${user.id}:${sessionId}`;
 }

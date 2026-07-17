@@ -275,6 +275,67 @@ describe('Roadex session service', () => {
     );
   });
 
+  it('returns a not-running cancel result for an owned inactive session', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    const cancel = cancelSessionRun(state, mockUser, response.session.id);
+
+    expect(cancel).toMatchObject({
+      cancelled: false,
+      status: 'not-running',
+      auditEvent: {
+        action: 'session.cancel',
+        outcome: 'denied',
+      },
+    });
+    expect(cancel?.auditEvent.summary).toContain('active_runner=false');
+  });
+
+  it('denies wrong-owner cancellation and records actor/session detail', async () => {
+    const state = createInitialState(controllableRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    submitPrompt(state, mockUser, response.session.id, 'long run');
+    await flushRunner();
+
+    const intruder = { ...mockUser, id: 'other-user' };
+    expect(cancelSessionRun(state, intruder, response.session.id)).toBeUndefined();
+    expect(state.audit.events.at(-1)).toMatchObject({
+      action: 'security.denied',
+      actorId: 'other-user',
+      resource: response.session.id,
+      outcome: 'denied',
+    });
+    expect(state.audit.events.at(-1)?.summary).toContain('session_not_owned_or_missing');
+  });
+
+  it('adds an alert-style audit event for repeated inactive cancel attempts', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    cancelSessionRun(state, mockUser, response.session.id);
+    cancelSessionRun(state, mockUser, response.session.id);
+    cancelSessionRun(state, mockUser, response.session.id);
+
+    expect(state.audit.events.at(-1)).toMatchObject({
+      action: 'security.denied',
+      resource: response.session.id,
+      outcome: 'denied',
+    });
+    expect(state.audit.events.at(-1)?.summary).toContain('Cancel alert');
+    expect(state.audit.events.at(-1)?.summary).toContain('attempts=3');
+  });
+
   it('enforces the active runner concurrency limit', async () => {
     const original = process.env.ROADEX_WORKSPACES_JSON;
     process.env.ROADEX_WORKSPACES_JSON = JSON.stringify([

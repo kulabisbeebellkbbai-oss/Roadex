@@ -25,6 +25,7 @@ export type RoadexSessionState = {
   transcript: StreamEvent[];
   auditEvents: AuditEvent[];
   error?: string;
+  notice?: string;
   sendPrompt: (prompt: string) => Promise<void>;
   cancelPrompt: () => Promise<void>;
   openWorkspace: (workspaceId: string) => Promise<void>;
@@ -40,6 +41,7 @@ export function useRoadexSession(): RoadexSessionState {
   const [transcript, setTranscript] = useState<StreamEvent[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [error, setError] = useState<string>();
+  const [notice, setNotice] = useState<string>();
 
   const refreshStream = useCallback(
     async (targetSession: RoadexSession | undefined = session) => {
@@ -54,6 +56,7 @@ export function useRoadexSession(): RoadexSessionState {
   const attach = useCallback(async () => {
     setConnectionState('loading');
     setError(undefined);
+    setNotice(undefined);
     try {
       const result = await loginAndBootstrap();
       const activeSession = result.bootstrap.sessions[0];
@@ -97,6 +100,7 @@ export function useRoadexSession(): RoadexSessionState {
       if (!session) return;
       setConnectionState('streaming');
       setError(undefined);
+      setNotice(undefined);
       try {
         const response = await submitPrompt(token, session.id, prompt);
         await pollSessionUntilReady(session.id);
@@ -115,10 +119,12 @@ export function useRoadexSession(): RoadexSessionState {
     try {
       const response = await cancelSession(token, session.id);
       setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
+      setNotice(response.cancelled ? 'Cancel requested for the active Codex run.' : 'No Codex run is active for this session.');
       await refreshStream(session);
       setConnectionState('connected');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Cancel request failed.');
+      setNotice(undefined);
       setConnectionState('error');
     }
   }, [refreshStream, session, token]);
@@ -127,6 +133,7 @@ export function useRoadexSession(): RoadexSessionState {
     async (workspaceId: string) => {
       setConnectionState('loading');
       setError(undefined);
+      setNotice(undefined);
       try {
         const result = await createSession(token, { workspaceId });
         const nextSession =
@@ -170,6 +177,7 @@ export function useRoadexSession(): RoadexSessionState {
       transcript,
       auditEvents,
       error,
+      notice,
       sendPrompt,
       cancelPrompt,
       openWorkspace,
@@ -180,6 +188,7 @@ export function useRoadexSession(): RoadexSessionState {
       cancelPrompt,
       connectionState,
       error,
+      notice,
       openWorkspace,
       retry,
       sendPrompt,

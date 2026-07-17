@@ -114,6 +114,13 @@ function App() {
           </section>
         ) : null}
 
+        {roadex.notice && !roadex.error ? (
+          <section className="notice-banner" role="status">
+            <CheckCircle2 size={20} />
+            <span>{roadex.notice}</span>
+          </section>
+        ) : null}
+
         <section className="dashboard-grid live-grid" aria-label="Roadex dashboard">
           <article className="codex-panel">
             <div className="panel-heading">

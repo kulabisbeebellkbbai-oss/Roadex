@@ -281,6 +281,18 @@ button {
   background: #fff5f5;
 }
 
+.notice-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  border: 1px solid #b8d5c5;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #1e5c38;
+  background: #eef8f2;
+}
+
 .error-banner button {
   margin-left: auto;
   color: #7a1f1f;

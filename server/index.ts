@@ -95,7 +95,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       sendJson(res, 404, { error: { code: 'not_found', message: 'No active session runner found.' } });
       return;
     }
-    sendJson(res, 202, result);
+    sendJson(res, result.cancelled ? 202 : 409, result);
     return;
   }
 

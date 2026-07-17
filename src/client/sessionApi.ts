@@ -105,6 +105,9 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   const payload = (await response.json()) as T | ApiError;
   if (!response.ok || isApiError(payload)) {
+    if (response.status === 409 && !isApiError(payload)) {
+      return payload as T;
+    }
     const message = isApiError(payload) ? payload.error.message : `Request failed with status ${response.status}`;
     throw new Error(message);
   }
