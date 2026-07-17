@@ -1,0 +1,15 @@
+[Unit]
+Description=Roadex browser portal
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/god/Documents/Codex Workspace/Roadex
+Environment=HOST=127.0.0.1
+Environment=PORT=8780
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -22,6 +22,17 @@ The first implementation milestone is a secure responsive portal shell. Server-s
 - `npm run test` - run the Vitest test suite.
 - `npm start` - run the compiled server after `npm run build`.
 
+## Protected Gateway
+
+The production Roadex server is intended to run on loopback only at `127.0.0.1:8780`.
+Remote browser access is through the Protected Service Gateway at:
+
+```text
+https://10.50.0.100:9443/Roadex
+```
+
+Use `ops/roadex.service` as the user systemd unit template after `npm run build`.
+
 ## Current Status
 
 The repository contains the first browser portal shell and project/security planning docs. Client device and peripheral access are intentionally deferred until the core portal, session model, and security controls are working and verified.
