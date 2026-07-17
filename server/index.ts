@@ -4,6 +4,7 @@ import { extname, join, normalize } from 'node:path';
 import { authenticate, gatewayAuthRequired, mockAuthToken, mockUser } from '../src/server/authService.js';
 import {
   bootstrap,
+  cancelSessionRun,
   createInitialState,
   createSessionFromApi,
   streamEventsForSession,
@@ -81,7 +82,20 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Session not found.' } });
       return;
     }
-    sendJson(res, 202, { accepted: true, events: result.events, auditEvent: result.auditEvent });
+    sendJson(res, 202, result);
+    return;
+  }
+
+  const cancelMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/cancel$/);
+  if (cancelMatch && req.method === 'POST') {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const result = cancelSessionRun(state, auth.user, decodeURIComponent(cancelMatch[1]));
+    if (!result) {
+      sendJson(res, 404, { error: { code: 'not_found', message: 'No active session runner found.' } });
+      return;
+    }
+    sendJson(res, 202, result);
     return;
   }
 

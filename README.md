@@ -36,6 +36,8 @@ For multiple server-approved projects, set `ROADEX_WORKSPACES_JSON` to a JSON ar
 
 Runtime session, transcript, and audit metadata are written to `data/roadex-state.json` by default. The `data/` directory is ignored and must not be committed.
 
+Prompt submission is asynchronous: `POST /api/sessions/:id/prompts` accepts work and the transcript is read from `GET /api/sessions/:id/stream` while Codex runs. The local API also supports `POST /api/sessions/:id/cancel`; exposing that cancel route through the Protected Service Gateway requires a separate gateway allowlist approval.
+
 ## Protected Gateway
 
 The production Roadex server is intended to run on loopback only at `127.0.0.1:8780`.

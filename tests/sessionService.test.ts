@@ -7,11 +7,12 @@ import {
   createInitialState,
   createMockSession,
   createSessionFromApi,
+  cancelSessionRun,
   streamEventsForSession,
   submitPrompt,
 } from '../src/server/sessionService';
-import type { RoadexSession, WorkspaceRef } from '../src/shared/sessionContracts';
-import type { SessionRunner } from '../src/server/codexRunner';
+import type { WorkspaceRef } from '../src/shared/sessionContracts';
+import type { RunnerPromptRequest, SessionRunner } from '../src/server/codexRunner';
 
 const workspace: WorkspaceRef = {
   id: 'roadex',
@@ -33,12 +34,42 @@ function fakeRunner(result: 'ok' | 'failed' = 'ok'): SessionRunner {
         gates: [],
       };
     },
-    async runPrompt({ session, prompt }: { session: RoadexSession; prompt: string }) {
+    async runPrompt({ session, prompt, onEvent, signal }: RunnerPromptRequest) {
       const events = [createStreamEvent(session.id, 'assistant', `Codex read: ${prompt}`)];
+      for (const event of events) {
+        if (signal?.aborted) break;
+        onEvent?.(event);
+      }
       if (result === 'failed') {
         return { ok: false, events, reason: 'runner_failed' };
       }
       return { ok: true, events, exitCode: 0 };
+    },
+  };
+}
+
+function controllableRunner(): SessionRunner {
+  return {
+    createSession({ userId, workspace: selectedWorkspace }) {
+      return {
+        id: `codex-${selectedWorkspace.id}`,
+        userId,
+        workspace: selectedWorkspace,
+        lifecycle: 'ready',
+        runnerMode: 'codex',
+        transport: 'sse',
+        deviceBridge: 'disabled',
+        gates: [],
+      };
+    },
+    async runPrompt({ session, onEvent, signal }: RunnerPromptRequest) {
+      onEvent?.(createStreamEvent(session.id, 'assistant', 'runner started'));
+      await new Promise<void>((resolve) => {
+        signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      const event = createStreamEvent(session.id, 'system', 'cancel observed');
+      onEvent?.(event);
+      return { ok: false, events: [event], reason: 'runner_cancelled' };
     },
   };
 }
@@ -137,10 +168,12 @@ describe('Roadex session service', () => {
     expect(response.ok).toBe(true);
     if (!response.ok) return;
 
-    const promptResult = await submitPrompt(state, mockUser, response.session.id, 'hello roadex');
-    expect(promptResult?.events.map((event) => event.kind)).toContain('assistant');
+    const promptResult = submitPrompt(state, mockUser, response.session.id, 'hello roadex');
+    expect(promptResult).toMatchObject({ accepted: true });
+    await flushRunner();
 
     const events = streamEventsForSession(state, mockUser, response.session.id);
+    expect(events?.map((event) => event.kind)).toContain('assistant');
     expect(events?.some((event) => event.message.includes('hello roadex'))).toBe(true);
 
     const intruder = { ...mockUser, id: 'other-user' };
@@ -154,12 +187,16 @@ describe('Roadex session service', () => {
     expect(response.ok).toBe(true);
     if (!response.ok) return;
 
-    const promptResult = await submitPrompt(state, mockUser, response.session.id, 'break safely');
+    const promptResult = submitPrompt(state, mockUser, response.session.id, 'break safely');
+    expect(promptResult).toMatchObject({ accepted: true });
+    await flushRunner();
 
-    expect(promptResult?.events.map((event) => event.message)).toContain('Codex read: break safely');
+    expect(streamEventsForSession(state, mockUser, response.session.id)?.map((event) => event.message)).toContain(
+      'Codex read: break safely',
+    );
     expect(response.session.lifecycle).toBe('blocked');
     expect(streamEventsForSession(state, mockUser, response.session.id)?.length).toBeGreaterThan(0);
-    await expect(submitPrompt(state, mockUser, response.session.id, 'second prompt')).resolves.toBeUndefined();
+    expect(submitPrompt(state, mockUser, response.session.id, 'second prompt')).toBeUndefined();
   });
 
   it('loads persisted sessions, stream events, and audit events after service restart', async () => {
@@ -170,7 +207,8 @@ describe('Roadex session service', () => {
     expect(response.ok).toBe(true);
     if (!response.ok) return;
 
-    await submitPrompt(state, mockUser, response.session.id, 'persist me');
+    submitPrompt(state, mockUser, response.session.id, 'persist me');
+    await flushRunner();
     const reloaded = createInitialState(fakeRunner(), persistence);
     const bootstrapped = await bootstrap(reloaded, mockUser);
 
@@ -216,4 +254,57 @@ describe('Roadex session service', () => {
       }
     }
   });
+
+  it('cancels an active runner and returns the session to ready', async () => {
+    const state = createInitialState(controllableRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    submitPrompt(state, mockUser, response.session.id, 'long run');
+    await flushRunner();
+
+    expect(response.session.lifecycle).toBe('streaming');
+    expect(cancelSessionRun(state, mockUser, response.session.id)).toMatchObject({ cancelled: true });
+    await flushRunner();
+
+    expect(response.session.lifecycle).toBe('ready');
+    expect(streamEventsForSession(state, mockUser, response.session.id)?.some((event) => event.message.includes('cancel'))).toBe(
+      true,
+    );
+  });
+
+  it('enforces the active runner concurrency limit', async () => {
+    const original = process.env.ROADEX_WORKSPACES_JSON;
+    process.env.ROADEX_WORKSPACES_JSON = JSON.stringify([
+      { id: 'roadex', name: 'Roadex Portal', root: process.cwd() },
+      { id: 'gateway', name: 'Gateway', root: '/home/god/Documents/Codex Workspace/Protected Service Gateway' },
+    ]);
+    try {
+      const state = createInitialState(controllableRunner(), createMemoryPersistence());
+      state.maxActiveRuns = 1;
+      const first = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+      const second = await createSessionFromApi(state, mockUser, { workspaceId: 'gateway' });
+
+      expect(first.ok).toBe(true);
+      expect(second.ok).toBe(true);
+      if (!first.ok || !second.ok) return;
+
+      expect(submitPrompt(state, mockUser, first.session.id, 'first')).toMatchObject({ accepted: true });
+      await flushRunner();
+      expect(submitPrompt(state, mockUser, second.session.id, 'second')).toBeUndefined();
+    } finally {
+      if (original === undefined) {
+        delete process.env.ROADEX_WORKSPACES_JSON;
+      } else {
+        process.env.ROADEX_WORKSPACES_JSON = original;
+      }
+    }
+  });
 });
+
+async function flushRunner(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}

@@ -1,4 +1,9 @@
-import type { AuditEvent, RoadexBootstrap, StreamEvent, UserProfile } from './sessionContracts.js';
+import type {
+  CancelSessionResponse,
+  PromptAcceptedResponse,
+  RoadexBootstrap,
+  UserProfile,
+} from './sessionContracts.js';
 
 export type ApiError = {
   error: {
@@ -19,11 +24,9 @@ export type PromptRequest = {
   prompt: string;
 };
 
-export type PromptResponse = {
-  accepted: true;
-  events: StreamEvent[];
-  auditEvent: AuditEvent;
-};
+export type PromptResponse = PromptAcceptedResponse;
+
+export type CancelResponse = CancelSessionResponse;
 
 export function isApiError(value: unknown): value is ApiError {
   return (

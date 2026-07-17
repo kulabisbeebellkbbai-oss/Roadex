@@ -11,7 +11,6 @@ import {
 import { getApprovedWorkspaces, resolveWorkspaceForUser } from './workspacePolicy.js';
 import {
   firstMilestoneGates,
-  type AuditEvent,
   type CreateSessionRequest,
   type RoadexBootstrap,
   type RoadexSession,
@@ -19,6 +18,8 @@ import {
   type SessionResponse,
   type StreamEvent,
   type UserProfile,
+  type CancelSessionResponse,
+  type PromptAcceptedResponse,
 } from '../shared/sessionContracts.js';
 
 export type RoadexState = {
@@ -26,6 +27,8 @@ export type RoadexState = {
   audit: AuditLog;
   runner: SessionRunner;
   persistence: StatePersistence;
+  activeRuns: Map<string, AbortController>;
+  maxActiveRuns: number;
 };
 
 export function createInitialState(
@@ -41,6 +44,8 @@ export function createInitialState(
     audit: createAuditLogFromEvents(persisted.auditEvents),
     runner,
     persistence,
+    activeRuns: new Map(),
+    maxActiveRuns: Number(process.env.ROADEX_MAX_ACTIVE_RUNS ?? 2),
   };
 }
 
@@ -121,15 +126,20 @@ export function createSessionFromApi(
   return Promise.resolve({ ok: true, session });
 }
 
-export async function submitPrompt(
+export function submitPrompt(
   state: RoadexState,
   user: UserProfile,
   sessionId: string,
   prompt: string,
-): Promise<{ events: StreamEvent[]; auditEvent: AuditEvent } | undefined> {
+): PromptAcceptedResponse | undefined {
   const session = getOwnedSession(state.sessions, user.id, sessionId);
-  if (!session || session.lifecycle === 'closed' || session.lifecycle === 'blocked') {
+  if (!session || session.lifecycle === 'closed' || session.lifecycle === 'blocked' || session.lifecycle === 'streaming') {
     appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Session is unavailable to this user.');
+    saveState(state);
+    return undefined;
+  }
+  if (state.activeRuns.size >= state.maxActiveRuns) {
+    appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Runner concurrency limit reached.');
     saveState(state);
     return undefined;
   }
@@ -155,19 +165,67 @@ export async function submitPrompt(
     'allowed',
     'Accepted prompt for Codex runner.',
   );
-  const result = await state.runner.runPrompt({ session, prompt: cleanPrompt });
-  const events = result.events;
-  addStreamEvents(state.sessions, events);
-  if (result.ok) {
-    session.lifecycle = 'ready';
-    appendAudit(state.audit, user, 'session.runner_complete', sessionId, 'allowed', 'Codex runner completed.');
-  } else {
-    session.lifecycle = 'blocked';
-    appendAudit(state.audit, user, 'session.runner_failed', sessionId, 'denied', result.reason);
-  }
+  const controller = new AbortController();
+  state.activeRuns.set(session.id, controller);
+  void state.runner
+    .runPrompt({
+      session,
+      prompt: cleanPrompt,
+      signal: controller.signal,
+      onEvent: (event) => {
+        addStreamEvents(state.sessions, [event]);
+        saveState(state);
+      },
+    })
+    .then((result) => {
+      if (result.ok) {
+        session.lifecycle = 'ready';
+        appendAudit(state.audit, user, 'session.runner_complete', sessionId, 'allowed', 'Codex runner completed.');
+      } else if (result.reason === 'runner_cancelled') {
+        session.lifecycle = 'ready';
+        appendAudit(state.audit, user, 'session.cancel', sessionId, 'allowed', 'Codex runner was cancelled.');
+      } else {
+        session.lifecycle = 'blocked';
+        appendAudit(state.audit, user, 'session.runner_failed', sessionId, 'denied', result.reason);
+      }
+    })
+    .catch((error: unknown) => {
+      session.lifecycle = 'blocked';
+      appendAudit(
+        state.audit,
+        user,
+        'session.runner_failed',
+        sessionId,
+        'denied',
+        error instanceof Error ? error.message : 'runner_exception',
+      );
+    })
+    .finally(() => {
+      state.activeRuns.delete(session.id);
+      saveState(state);
+    });
   saveState(state);
 
-  return { events, auditEvent: started };
+  return { accepted: true, auditEvent: started };
+}
+
+export function cancelSessionRun(
+  state: RoadexState,
+  user: UserProfile,
+  sessionId: string,
+): CancelSessionResponse | undefined {
+  const session = getOwnedSession(state.sessions, user.id, sessionId);
+  const activeRun = state.activeRuns.get(sessionId);
+  if (!session || !activeRun) {
+    appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'No active runner is available to cancel.');
+    saveState(state);
+    return undefined;
+  }
+
+  activeRun.abort();
+  const auditEvent = appendAudit(state.audit, user, 'session.cancel', sessionId, 'allowed', 'Cancel requested.');
+  saveState(state);
+  return { cancelled: true, auditEvent };
 }
 
 export function streamEventsForSession(

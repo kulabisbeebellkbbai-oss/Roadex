@@ -37,6 +37,7 @@ export type AuditEvent = {
     | 'session.prompt'
     | 'session.runner_complete'
     | 'session.runner_failed'
+    | 'session.cancel'
     | 'session.stream_open'
     | 'security.denied';
   resource: string;
@@ -50,6 +51,16 @@ export type StreamEvent = {
   kind: 'system' | 'assistant' | 'audit';
   message: string;
   at: string;
+};
+
+export type PromptAcceptedResponse = {
+  accepted: true;
+  auditEvent: AuditEvent;
+};
+
+export type CancelSessionResponse = {
+  cancelled: true;
+  auditEvent: AuditEvent;
 };
 
 export type RoadexSession = {

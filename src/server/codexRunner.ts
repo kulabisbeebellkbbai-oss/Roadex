@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createStreamEvent } from './mockRunner.js';
 import type { RoadexSession, StreamEvent, WorkspaceRef } from '../shared/sessionContracts.js';
@@ -6,6 +7,8 @@ import type { RoadexSession, StreamEvent, WorkspaceRef } from '../shared/session
 export type RunnerPromptRequest = {
   session: RoadexSession;
   prompt: string;
+  onEvent?: (event: StreamEvent) => void;
+  signal?: AbortSignal;
 };
 
 export type RunnerPromptResult =
@@ -78,10 +81,12 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
       };
     },
 
-    runPrompt({ session, prompt }) {
+    runPrompt({ session, prompt, onEvent, signal }) {
       return runCodexPrompt({
         executable,
+        onEvent,
         prompt,
+        signal,
         sessionId: session.id,
         timeoutMs,
         workspaceRoot: session.workspace.root,
@@ -92,16 +97,22 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
 
 type RunCodexPromptOptions = {
   executable: string;
+  onEvent?: (event: StreamEvent) => void;
   prompt: string;
+  signal?: AbortSignal;
   sessionId: string;
   timeoutMs: number;
   workspaceRoot: string;
 };
 
 async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPromptResult> {
-  const events: StreamEvent[] = [
-    createStreamEvent(options.sessionId, 'system', 'Starting Codex CLI runner.'),
-  ];
+  const events: StreamEvent[] = [];
+  const pushEvent = (kind: StreamEvent['kind'], message: string): void => {
+    const event = createStreamEvent(options.sessionId, kind, message);
+    events.push(event);
+    options.onEvent?.(event);
+  };
+  pushEvent('system', 'Starting Codex CLI runner.');
   const child = spawn(
     options.executable,
     buildCodexExecArgs(options.workspaceRoot, options.prompt),
@@ -112,20 +123,27 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
     },
   );
 
-  let stdout = '';
   let stderr = '';
+  let stdoutBuffer = '';
   let timedOut = false;
+  let aborted = false;
   const timeout = setTimeout(() => {
     timedOut = true;
-    child.kill('SIGTERM');
+    stopChild(child);
   }, options.timeoutMs);
+  const abort = () => {
+    aborted = true;
+    stopChild(child);
+  };
+  options.signal?.addEventListener('abort', abort, { once: true });
 
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   child.stdout.on('data', (chunk: string) => {
-    stdout += chunk;
-    for (const message of parseCodexJsonl(chunk)) {
-      events.push(createStreamEvent(options.sessionId, 'assistant', message));
+    const parsed = parseCodexJsonlStream(stdoutBuffer + chunk);
+    stdoutBuffer = parsed.remainder;
+    for (const message of parsed.messages) {
+      pushEvent('assistant', message);
     }
   });
   child.stderr.on('data', (chunk: string) => {
@@ -135,32 +153,47 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
   const exitCode = await new Promise<number | null>((resolve, reject) => {
     child.on('error', reject);
     child.on('close', resolve);
-  }).finally(() => clearTimeout(timeout));
+  }).finally(() => {
+    clearTimeout(timeout);
+    options.signal?.removeEventListener('abort', abort);
+  });
 
-  const finalMessages = parseCodexJsonl(stdout);
-  if (events.length === 1 && finalMessages.length > 0) {
-    for (const message of finalMessages) {
-      events.push(createStreamEvent(options.sessionId, 'assistant', message));
+  if (stdoutBuffer.trim()) {
+    for (const message of parseCodexJsonl(stdoutBuffer)) {
+      pushEvent('assistant', message);
     }
   }
 
+  if (aborted) {
+    pushEvent('system', 'Codex runner was cancelled.');
+    return { ok: false, events, reason: 'runner_cancelled', exitCode: exitCode ?? undefined };
+  }
+
   if (timedOut) {
-    events.push(createStreamEvent(options.sessionId, 'system', 'Codex runner timed out and was stopped.'));
+    pushEvent('system', 'Codex runner timed out and was stopped.');
     return { ok: false, events, reason: 'runner_timeout', exitCode: exitCode ?? undefined };
   }
 
   if (exitCode !== 0) {
     const cleanError = sanitizeRunnerText(stderr.trim() || `Codex exited with status ${exitCode ?? 'unknown'}.`);
-    events.push(createStreamEvent(options.sessionId, 'system', cleanError));
+    pushEvent('system', cleanError);
     return { ok: false, events, reason: 'runner_failed', exitCode: exitCode ?? undefined };
   }
 
   if (events.length === 1) {
-    events.push(createStreamEvent(options.sessionId, 'assistant', 'Codex completed without streamed output.'));
+    pushEvent('assistant', 'Codex completed without streamed output.');
   }
 
-  events.push(createStreamEvent(options.sessionId, 'system', 'Codex runner completed.'));
+  pushEvent('system', 'Codex runner completed.');
   return { ok: true, events, exitCode: exitCode ?? 0 };
+}
+
+function stopChild(child: ChildProcess): void {
+  if (child.killed) return;
+  child.kill('SIGTERM');
+  setTimeout(() => {
+    if (!child.killed) child.kill('SIGKILL');
+  }, 2_000).unref();
 }
 
 export function buildCodexExecArgs(workspaceRoot: string, prompt: string): string[] {
@@ -182,6 +215,19 @@ export function parseCodexJsonl(chunk: string): string[] {
     .filter(Boolean)
     .map(parseCodexEvent)
     .filter((message): message is string => Boolean(message));
+}
+
+export function parseCodexJsonlStream(chunk: string): { messages: string[]; remainder: string } {
+  const lines = chunk.split(/\r?\n/);
+  const remainder = lines.pop() ?? '';
+  return {
+    messages: lines
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map(parseCodexEvent)
+      .filter((message): message is string => Boolean(message)),
+    remainder,
+  };
 }
 
 function parseCodexEvent(line: string): string | undefined {

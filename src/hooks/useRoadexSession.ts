@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  cancelSession,
   createSession,
   loginAndBootstrap,
   readSessionStream,
@@ -25,6 +26,7 @@ export type RoadexSessionState = {
   auditEvents: AuditEvent[];
   error?: string;
   sendPrompt: (prompt: string) => Promise<void>;
+  cancelPrompt: () => Promise<void>;
   openWorkspace: (workspaceId: string) => Promise<void>;
   retry: () => Promise<void>;
 };
@@ -38,6 +40,16 @@ export function useRoadexSession(): RoadexSessionState {
   const [transcript, setTranscript] = useState<StreamEvent[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [error, setError] = useState<string>();
+
+  const refreshStream = useCallback(
+    async (targetSession: RoadexSession | undefined = session) => {
+      if (!targetSession) return [];
+      const events = await readSessionStream(token, targetSession.id);
+      setTranscript(events);
+      return events;
+    },
+    [session, token],
+  );
 
   const attach = useCallback(async () => {
     setConnectionState('loading');
@@ -66,6 +78,20 @@ export function useRoadexSession(): RoadexSessionState {
     void attach();
   }, [attach]);
 
+  const pollSessionUntilReady = useCallback(
+    async (sessionId: string) => {
+      for (let attempt = 0; attempt < 180; attempt += 1) {
+        const events = await readSessionStream(token, sessionId);
+        setTranscript(events);
+        if (events.some((event) => event.message === 'Codex runner completed.' || event.message.includes('cancelled'))) {
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+    },
+    [token],
+  );
+
   const sendPrompt = useCallback(
     async (prompt: string) => {
       if (!session) return;
@@ -73,8 +99,7 @@ export function useRoadexSession(): RoadexSessionState {
       setError(undefined);
       try {
         const response = await submitPrompt(token, session.id, prompt);
-        const events = await readSessionStream(token, session.id);
-        setTranscript(events);
+        await pollSessionUntilReady(session.id);
         setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
         setConnectionState('connected');
       } catch (caught) {
@@ -82,8 +107,21 @@ export function useRoadexSession(): RoadexSessionState {
         setConnectionState('error');
       }
     },
-    [session, token],
+    [pollSessionUntilReady, session, token],
   );
+
+  const cancelPrompt = useCallback(async () => {
+    if (!session) return;
+    try {
+      const response = await cancelSession(token, session.id);
+      setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
+      await refreshStream(session);
+      setConnectionState('connected');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Cancel request failed.');
+      setConnectionState('error');
+    }
+  }, [refreshStream, session, token]);
 
   const openWorkspace = useCallback(
     async (workspaceId: string) => {
@@ -133,11 +171,13 @@ export function useRoadexSession(): RoadexSessionState {
       auditEvents,
       error,
       sendPrompt,
+      cancelPrompt,
       openWorkspace,
       retry,
     }),
     [
       auditEvents,
+      cancelPrompt,
       connectionState,
       error,
       openWorkspace,

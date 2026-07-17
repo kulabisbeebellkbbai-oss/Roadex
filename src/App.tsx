@@ -167,6 +167,14 @@ function App() {
               <button disabled={composerDisabled || !prompt.trim()} type="submit">
                 <ChevronRight size={20} />
               </button>
+              <button
+                aria-label="Cancel running prompt"
+                disabled={roadex.connectionState !== 'streaming'}
+                onClick={() => void roadex.cancelPrompt()}
+                type="button"
+              >
+                <CirclePause size={20} />
+              </button>
             </form>
           </article>
 
