@@ -180,6 +180,7 @@ export function submitPrompt(
     })
     .then((result) => {
       if (session.lifecycle === 'closed') return;
+      updateCodexThreadId(session, result.codexThreadId);
       if (result.ok) {
         session.lifecycle = 'ready';
         touchSession(session);
@@ -392,4 +393,10 @@ function isVisibleSession(session: RoadexSession): boolean {
 
 function touchSession(session: RoadexSession): void {
   session.updatedAt = new Date().toISOString();
+}
+
+function updateCodexThreadId(session: RoadexSession, codexThreadId: string | undefined): void {
+  if (!codexThreadId || session.codexThreadId === codexThreadId) return;
+  session.codexThreadId = codexThreadId;
+  touchSession(session);
 }

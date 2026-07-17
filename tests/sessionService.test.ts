@@ -21,7 +21,7 @@ const workspace: WorkspaceRef = {
   root: process.cwd(),
 };
 
-function fakeRunner(result: 'ok' | 'failed' = 'ok'): SessionRunner {
+function fakeRunner(result: 'ok' | 'failed' = 'ok', codexThreadId?: string): SessionRunner {
   let sessions = 0;
   return {
     createSession({ userId, workspace: selectedWorkspace }) {
@@ -47,9 +47,9 @@ function fakeRunner(result: 'ok' | 'failed' = 'ok'): SessionRunner {
         onEvent?.(event);
       }
       if (result === 'failed') {
-        return { ok: false, events, reason: 'runner_failed' };
+        return { ok: false, events, reason: 'runner_failed', codexThreadId };
       }
-      return { ok: true, events, exitCode: 0 };
+      return { ok: true, events, exitCode: 0, codexThreadId };
     },
   };
 }
@@ -81,6 +81,38 @@ function controllableRunner(): SessionRunner {
       const event = createStreamEvent(session.id, 'system', 'cancel observed');
       onEvent?.(event);
       return { ok: false, events: [event], reason: 'runner_cancelled' };
+    },
+  };
+}
+
+function threadRecordingRunner(observedThreads: Array<string | undefined>): SessionRunner {
+  let sessions = 0;
+  let prompts = 0;
+  return {
+    createSession({ userId, workspace: selectedWorkspace }) {
+      sessions += 1;
+      const now = new Date().toISOString();
+      return {
+        id: `codex-${selectedWorkspace.id}-${sessions}`,
+        userId,
+        workspace: selectedWorkspace,
+        lifecycle: 'ready',
+        runnerMode: 'codex',
+        transport: 'sse',
+        deviceBridge: 'disabled',
+        gates: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+    },
+    async runPrompt({ session, prompt, onEvent }: RunnerPromptRequest) {
+      prompts += 1;
+      observedThreads.push(session.codexThreadId);
+      const events = [createStreamEvent(session.id, 'assistant', `Codex read: ${prompt}`)];
+      for (const event of events) {
+        onEvent?.(event);
+      }
+      return { ok: true, events, exitCode: 0, codexThreadId: `thread-${prompts}` };
     },
   };
 }
@@ -252,6 +284,45 @@ describe('Roadex session service', () => {
     });
     expect(bootstrapped.streamPreview.some((event) => event.message.includes('persist me'))).toBe(true);
     expect(bootstrapped.auditEvents.some((event) => event.action === 'session.prompt')).toBe(true);
+  });
+
+  it('persists Codex thread ids so later prompts can resume the same thread after restart', async () => {
+    const persistence = createMemoryPersistence();
+    const state = createInitialState(fakeRunner('ok', 'thread-roadex-1'), persistence);
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    submitPrompt(state, mockUser, response.session.id, 'remember this thread');
+    await flushRunner();
+
+    expect(response.session.codexThreadId).toBe('thread-roadex-1');
+
+    const reloaded = createInitialState(fakeRunner(), persistence);
+    const bootstrapped = await bootstrap(reloaded, mockUser);
+
+    expect(bootstrapped.sessions[0]).toMatchObject({
+      id: response.session.id,
+      codexThreadId: 'thread-roadex-1',
+    });
+  });
+
+  it('passes the stored Codex thread id into later prompts for continuity', async () => {
+    const observedThreads: Array<string | undefined> = [];
+    const state = createInitialState(threadRecordingRunner(observedThreads), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    submitPrompt(state, mockUser, response.session.id, 'first');
+    await flushRunner();
+    submitPrompt(state, mockUser, response.session.id, 'second');
+    await flushRunner();
+
+    expect(observedThreads).toEqual([undefined, 'thread-1']);
+    expect(response.session.codexThreadId).toBe('thread-2');
   });
 
   it('supports multiple server-approved workspaces by id only', async () => {

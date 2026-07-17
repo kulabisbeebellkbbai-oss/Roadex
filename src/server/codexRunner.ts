@@ -16,12 +16,14 @@ export type RunnerPromptResult =
       ok: true;
       events: StreamEvent[];
       exitCode: number;
+      codexThreadId?: string;
     }
   | {
       ok: false;
       events: StreamEvent[];
       reason: string;
       exitCode?: number;
+      codexThreadId?: string;
     };
 
 export type SessionRunner = {
@@ -91,6 +93,7 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
         prompt,
         signal,
         sessionId: session.id,
+        codexThreadId: session.codexThreadId,
         timeoutMs,
         workspaceRoot: session.workspace.root,
       });
@@ -104,12 +107,14 @@ type RunCodexPromptOptions = {
   prompt: string;
   signal?: AbortSignal;
   sessionId: string;
+  codexThreadId?: string;
   timeoutMs: number;
   workspaceRoot: string;
 };
 
 async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPromptResult> {
   const events: StreamEvent[] = [];
+  let codexThreadId: string | undefined = options.codexThreadId;
   const pushEvent = (kind: StreamEvent['kind'], message: string): void => {
     const event = createStreamEvent(options.sessionId, kind, message);
     events.push(event);
@@ -118,7 +123,7 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
   pushEvent('system', 'Starting Codex CLI runner.');
   const child = spawn(
     options.executable,
-    buildCodexExecArgs(options.workspaceRoot, options.prompt),
+    buildCodexExecArgs(options.workspaceRoot, options.prompt, options.codexThreadId),
     {
       cwd: options.workspaceRoot,
       env: runnerEnvironment(),
@@ -145,8 +150,9 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
   child.stdout.on('data', (chunk: string) => {
     const parsed = parseCodexJsonlStream(stdoutBuffer + chunk);
     stdoutBuffer = parsed.remainder;
-    for (const message of parsed.messages) {
-      pushEvent('assistant', message);
+    codexThreadId = parsed.codexThreadId ?? codexThreadId;
+    for (const event of parsed.events) {
+      if (event.message) pushEvent('assistant', event.message);
     }
   });
   child.stderr.on('data', (chunk: string) => {
@@ -162,25 +168,27 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
   });
 
   if (stdoutBuffer.trim()) {
-    for (const message of parseCodexJsonl(stdoutBuffer)) {
-      pushEvent('assistant', message);
+    const parsed = parseCodexJsonlEvents(stdoutBuffer);
+    codexThreadId = parsed.codexThreadId ?? codexThreadId;
+    for (const event of parsed.events) {
+      if (event.message) pushEvent('assistant', event.message);
     }
   }
 
   if (aborted) {
     pushEvent('system', 'Codex runner was cancelled.');
-    return { ok: false, events, reason: 'runner_cancelled', exitCode: exitCode ?? undefined };
+    return { ok: false, events, reason: 'runner_cancelled', exitCode: exitCode ?? undefined, codexThreadId };
   }
 
   if (timedOut) {
     pushEvent('system', 'Codex runner timed out and was stopped.');
-    return { ok: false, events, reason: 'runner_timeout', exitCode: exitCode ?? undefined };
+    return { ok: false, events, reason: 'runner_timeout', exitCode: exitCode ?? undefined, codexThreadId };
   }
 
   if (exitCode !== 0) {
     const cleanError = sanitizeRunnerText(stderr.trim() || `Codex exited with status ${exitCode ?? 'unknown'}.`);
     pushEvent('system', cleanError);
-    return { ok: false, events, reason: 'runner_failed', exitCode: exitCode ?? undefined };
+    return { ok: false, events, reason: 'runner_failed', exitCode: exitCode ?? undefined, codexThreadId };
   }
 
   if (events.length === 1) {
@@ -188,7 +196,7 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
   }
 
   pushEvent('system', 'Codex runner completed.');
-  return { ok: true, events, exitCode: exitCode ?? 0 };
+  return { ok: true, events, exitCode: exitCode ?? 0, codexThreadId };
 }
 
 function stopChild(child: ChildProcess): void {
@@ -199,48 +207,79 @@ function stopChild(child: ChildProcess): void {
   }, 2_000).unref();
 }
 
-export function buildCodexExecArgs(workspaceRoot: string, prompt: string): string[] {
-  return [
+export function buildCodexExecArgs(workspaceRoot: string, prompt: string, codexThreadId?: string): string[] {
+  const base = [
     'exec',
     '--json',
     '--sandbox',
     'workspace-write',
     '-C',
     workspaceRoot,
-    prompt,
   ];
+  if (codexThreadId) {
+    return [...base, 'resume', codexThreadId, prompt];
+  }
+  return [...base, prompt];
 }
 
 export function parseCodexJsonl(chunk: string): string[] {
-  return chunk
+  return parseCodexJsonlEvents(chunk).events
+    .map((event) => event.message)
+    .filter((message): message is string => Boolean(message));
+}
+
+export type ParsedCodexEvent = {
+  message?: string;
+  codexThreadId?: string;
+};
+
+export function parseCodexJsonlEvents(chunk: string): { events: ParsedCodexEvent[]; codexThreadId?: string } {
+  const events = chunk
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
     .map(parseCodexEvent)
-    .filter((message): message is string => Boolean(message));
+    .filter((event): event is ParsedCodexEvent => Boolean(event && (event.message || event.codexThreadId)));
+  return {
+    events,
+    codexThreadId: [...events].reverse().find((event) => event.codexThreadId)?.codexThreadId,
+  };
 }
 
-export function parseCodexJsonlStream(chunk: string): { messages: string[]; remainder: string } {
+export function parseCodexJsonlStream(chunk: string): { events: ParsedCodexEvent[]; remainder: string; codexThreadId?: string } {
   const lines = chunk.split(/\r?\n/);
   const remainder = lines.pop() ?? '';
+  const parsed = parseCodexJsonlEvents(lines.join('\n'));
   return {
-    messages: lines
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map(parseCodexEvent)
-      .filter((message): message is string => Boolean(message)),
+    ...parsed,
     remainder,
   };
 }
 
-function parseCodexEvent(line: string): string | undefined {
+function parseCodexEvent(line: string): ParsedCodexEvent | undefined {
   try {
     const parsed = JSON.parse(line) as unknown;
+    const codexThreadId = extractThreadId(parsed);
     const message = extractMessage(parsed);
-    return message ? sanitizeRunnerText(message) : undefined;
+    return message || codexThreadId
+      ? {
+          message: message ? sanitizeRunnerText(message) : undefined,
+          codexThreadId,
+        }
+      : undefined;
   } catch {
-    return sanitizeRunnerText(line);
+    return { message: sanitizeRunnerText(line) };
   }
+}
+
+function extractThreadId(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  for (const key of ['thread_id', 'threadId', 'conversation_id', 'conversationId']) {
+    if (typeof record[key] === 'string') return record[key];
+  }
+  if (record.item) return extractThreadId(record.item);
+  return undefined;
 }
 
 function extractMessage(value: unknown): string | undefined {

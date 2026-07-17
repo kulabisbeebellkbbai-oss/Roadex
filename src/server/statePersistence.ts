@@ -70,6 +70,7 @@ function sanitizeState(state: Partial<PersistedRoadexState>, now = Date.now()): 
       deviceBridge: 'disabled',
       createdAt: session.createdAt ?? timestamp,
       updatedAt: session.updatedAt ?? session.createdAt ?? timestamp,
+      codexThreadId: cleanOptionalString(session.codexThreadId),
     })),
     streamEvents: state.streamEvents ?? [],
     auditEvents: state.auditEvents ?? [],
@@ -113,6 +114,11 @@ function sessionTimestamp(session: RoadexSession): number {
 function numberFromEnv(key: string, fallback: number): number {
   const value = Number(process.env[key]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function cleanOptionalString(value: string | undefined): string | undefined {
+  const cleaned = value?.trim();
+  return cleaned ? cleaned : undefined;
 }
 
 function emptyState(): PersistedRoadexState {

@@ -81,6 +81,7 @@ export type RoadexSession = {
   gates: SecurityGate[];
   createdAt: string;
   updatedAt: string;
+  codexThreadId?: string;
 };
 
 export type SessionRequest = {

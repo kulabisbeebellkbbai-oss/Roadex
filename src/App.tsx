@@ -102,6 +102,7 @@ function App() {
             <span>{session?.lifecycle ?? 'loading'}</span>
             <span>{session?.transport ?? 'sse'}</span>
             <span>{session?.runnerMode ?? 'mock'} runner</span>
+            <span>{session?.codexThreadId ? 'thread linked' : 'new thread'}</span>
           </div>
         </section>
 
