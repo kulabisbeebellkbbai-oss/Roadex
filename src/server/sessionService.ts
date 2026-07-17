@@ -30,6 +30,7 @@ export type RoadexState = {
   persistence: StatePersistence;
   activeRuns: Map<string, AbortController>;
   cancelAttempts: Map<string, number>;
+  streamSubscribers: Map<string, Set<(event: StreamEvent) => void>>;
   maxActiveRuns: number;
 };
 
@@ -48,6 +49,7 @@ export function createInitialState(
     persistence,
     activeRuns: new Map(),
     cancelAttempts: new Map(),
+    streamSubscribers: new Map(),
     maxActiveRuns: Number(process.env.ROADEX_MAX_ACTIVE_RUNS ?? 2),
   };
 }
@@ -174,8 +176,7 @@ export function submitPrompt(
       prompt: cleanPrompt,
       signal: controller.signal,
       onEvent: (event) => {
-        addStreamEvents(state.sessions, [event]);
-        saveState(state);
+        addAndPublishStreamEvents(state, [event]);
       },
     })
     .then((result) => {
@@ -319,6 +320,29 @@ export function streamEventsForSession(
   return state.sessions.streamEvents.filter((event) => event.sessionId === sessionId);
 }
 
+export function subscribeToSessionStream(
+  state: RoadexState,
+  user: UserProfile,
+  sessionId: string,
+  onEvent: (event: StreamEvent) => void,
+): { snapshot: StreamEvent[]; unsubscribe: () => void } | undefined {
+  const snapshot = streamEventsForSession(state, user, sessionId);
+  if (!snapshot) return undefined;
+
+  const subscribers = state.streamSubscribers.get(sessionId) ?? new Set<(event: StreamEvent) => void>();
+  subscribers.add(onEvent);
+  state.streamSubscribers.set(sessionId, subscribers);
+  return {
+    snapshot,
+    unsubscribe() {
+      subscribers.delete(onEvent);
+      if (subscribers.size === 0) {
+        state.streamSubscribers.delete(sessionId);
+      }
+    },
+  };
+}
+
 export function createMockSession(request: SessionRequest): SessionResponse {
   if (!request.userId) {
     return deny('auth', 'Authentication is required before a Roadex session can be created.');
@@ -361,6 +385,18 @@ function saveState(state: RoadexState): void {
     streamEvents: state.sessions.streamEvents,
     auditEvents: state.audit.events,
   }));
+}
+
+function addAndPublishStreamEvents(state: RoadexState, events: StreamEvent[]): void {
+  addStreamEvents(state.sessions, events);
+  for (const event of events) {
+    const subscribers = state.streamSubscribers.get(event.sessionId);
+    if (!subscribers) continue;
+    for (const subscriber of subscribers) {
+      subscriber(event);
+    }
+  }
+  saveState(state);
 }
 
 function recordCancelAttempt(state: RoadexState, user: UserProfile, sessionId: string, reason: string): void {

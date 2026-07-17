@@ -95,6 +95,57 @@ export async function readSessionStream(token: string | undefined, sessionId: st
     .map((line) => JSON.parse(line.slice(6)) as StreamEvent);
 }
 
+export function subscribeSessionStream(
+  token: string | undefined,
+  sessionId: string,
+  onEvent: (event: StreamEvent) => void,
+  onError: (error: Error) => void,
+): () => void {
+  const controller = new AbortController();
+  void readLiveSessionStream(token, sessionId, onEvent, controller.signal).catch((error: unknown) => {
+    if (!controller.signal.aborted) {
+      onError(error instanceof Error ? error : new Error('Live stream failed.'));
+    }
+  });
+  return () => controller.abort();
+}
+
+async function readLiveSessionStream(
+  token: string | undefined,
+  sessionId: string,
+  onEvent: (event: StreamEvent) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/stream?live=1`, {
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    signal,
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`Live stream request failed with status ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (!signal.aborted) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    buffer += decoder.decode(value, { stream: true });
+    const chunks = buffer.split('\n\n');
+    buffer = chunks.pop() ?? '';
+    for (const chunk of chunks) {
+      const data = chunk
+        .split('\n')
+        .find((line) => line.startsWith('data: '));
+      if (data) {
+        onEvent(JSON.parse(data.slice(6)) as StreamEvent);
+      }
+    }
+  }
+}
+
 type RequestOptions = {
   method?: string;
   token?: string;

@@ -8,6 +8,7 @@ import {
   closeSession,
   createInitialState,
   createSessionFromApi,
+  subscribeToSessionStream,
   streamEventsForSession,
   submitPrompt,
 } from '../src/server/sessionService.js';
@@ -117,7 +118,28 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (streamMatch && req.method === 'GET') {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const events = streamEventsForSession(state, auth.user, decodeURIComponent(streamMatch[1]));
+    const sessionId = decodeURIComponent(streamMatch[1]);
+    if (url.searchParams.get('live') === '1') {
+      const subscription = subscribeToSessionStream(state, auth.user, sessionId, (event) => writeSseEvent(res, event));
+      if (!subscription) {
+        sendJson(res, 404, { error: { code: 'not_found', message: 'Session not found.' } });
+        return;
+      }
+      writeSseHeaders(res);
+      for (const event of subscription.snapshot) {
+        writeSseEvent(res, event);
+      }
+      const keepalive = setInterval(() => {
+        res.write(`: keepalive\n\n`);
+      }, 25_000);
+      req.on('close', () => {
+        clearInterval(keepalive);
+        subscription.unsubscribe();
+      });
+      return;
+    }
+
+    const events = streamEventsForSession(state, auth.user, sessionId);
     if (!events) {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Session not found.' } });
       return;
@@ -164,16 +186,24 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
 }
 
 function writeSse(res: ServerResponse, events: unknown[]): void {
+  writeSseHeaders(res);
+  for (const event of events) {
+    writeSseEvent(res, event);
+  }
+  res.end();
+}
+
+function writeSseHeaders(res: ServerResponse): void {
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
     'cache-control': 'no-store',
     connection: 'keep-alive',
   });
-  for (const event of events) {
-    res.write(`event: roadex\n`);
-    res.write(`data: ${JSON.stringify(event)}\n\n`);
-  }
-  res.end();
+}
+
+function writeSseEvent(res: ServerResponse, event: unknown): void {
+  res.write(`event: roadex\n`);
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
 async function tryServeStatic(pathname: string, res: ServerResponse): Promise<boolean> {

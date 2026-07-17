@@ -5,6 +5,7 @@ import {
   createSession,
   loginAndBootstrap,
   readSessionStream,
+  subscribeSessionStream,
   submitPrompt,
 } from '../client/sessionApi';
 import type {
@@ -83,19 +84,23 @@ export function useRoadexSession(): RoadexSessionState {
     void attach();
   }, [attach]);
 
-  const pollSessionUntilReady = useCallback(
-    async (sessionId: string) => {
-      for (let attempt = 0; attempt < 180; attempt += 1) {
-        const events = await readSessionStream(token, sessionId);
-        setTranscript(events);
-        if (events.some((event) => event.message === 'Codex runner completed.' || event.message.includes('cancelled'))) {
-          return;
+  useEffect(() => {
+    if (!session) return undefined;
+    return subscribeSessionStream(
+      token,
+      session.id,
+      (event) => {
+        setTranscript((existing) => mergeStreamEvents(existing, [event]));
+        if (isTerminalRunnerEvent(event)) {
+          setConnectionState('connected');
         }
-        await new Promise((resolve) => setTimeout(resolve, 750));
-      }
-    },
-    [token],
-  );
+      },
+      (streamError) => {
+        setError(streamError.message);
+        setConnectionState('error');
+      },
+    );
+  }, [session, token]);
 
   const sendPrompt = useCallback(
     async (prompt: string) => {
@@ -105,15 +110,13 @@ export function useRoadexSession(): RoadexSessionState {
       setNotice(undefined);
       try {
         const response = await submitPrompt(token, session.id, prompt);
-        await pollSessionUntilReady(session.id);
         setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
-        setConnectionState('connected');
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : 'Prompt submission failed.');
         setConnectionState('error');
       }
     },
-    [pollSessionUntilReady, session, token],
+    [session, token],
   );
 
   const cancelPrompt = useCallback(async () => {
@@ -230,5 +233,21 @@ export function useRoadexSession(): RoadexSessionState {
       user,
       workspaces,
     ],
+  );
+}
+
+function mergeStreamEvents(existing: StreamEvent[], next: StreamEvent[]): StreamEvent[] {
+  const eventsById = new Map(existing.map((event) => [event.id, event]));
+  for (const event of next) {
+    eventsById.set(event.id, event);
+  }
+  return [...eventsById.values()];
+}
+
+function isTerminalRunnerEvent(event: StreamEvent): boolean {
+  return (
+    event.message === 'Codex runner completed.' ||
+    event.message.includes('Codex runner was cancelled.') ||
+    event.message.includes('Codex runner timed out')
   );
 }

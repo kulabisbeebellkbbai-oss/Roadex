@@ -10,6 +10,7 @@ import {
   createSessionFromApi,
   cancelSessionRun,
   streamEventsForSession,
+  subscribeToSessionStream,
   submitPrompt,
 } from '../src/server/sessionService';
 import type { WorkspaceRef } from '../src/shared/sessionContracts';
@@ -221,6 +222,45 @@ describe('Roadex session service', () => {
 
     const intruder = { ...mockUser, id: 'other-user' };
     expect(streamEventsForSession(state, intruder, response.session.id)).toBeUndefined();
+  });
+
+  it('publishes runner events to live subscribers for the owning session', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    const received: string[] = [];
+    const subscription = subscribeToSessionStream(state, mockUser, response.session.id, (event) => {
+      received.push(event.message);
+    });
+
+    expect(subscription?.snapshot.length).toBeGreaterThan(0);
+    expect(submitPrompt(state, mockUser, response.session.id, 'live please')).toMatchObject({ accepted: true });
+    await flushRunner();
+
+    subscription?.unsubscribe();
+    expect(received.some((message) => message.includes('live please'))).toBe(true);
+  });
+
+  it('stops publishing live events after unsubscribe', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    const received: string[] = [];
+    const subscription = subscribeToSessionStream(state, mockUser, response.session.id, (event) => {
+      received.push(event.message);
+    });
+    subscription?.unsubscribe();
+
+    submitPrompt(state, mockUser, response.session.id, 'after unsubscribe');
+    await flushRunner();
+
+    expect(received.some((message) => message.includes('after unsubscribe'))).toBe(false);
   });
 
   it('blocks additional prompts after a failed runner while keeping failure events readable', async () => {
