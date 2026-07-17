@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { navItems, portalTargets, safeguards, sessionSummaries } from '../src/roadexModel';
+import {
+  activeSession,
+  navItems,
+  portalTargets,
+  safeguards,
+  sessionSummaries,
+} from '../src/roadexModel';
 
 describe('roadex portal model', () => {
   it('keeps security and deferred device access visible in the first app milestone', () => {
@@ -13,5 +19,15 @@ describe('roadex portal model', () => {
         expect.objectContaining({ value: 'Deferred until review' }),
       ]),
     );
+  });
+
+  it('surfaces the mock server session contract for the active workspace', () => {
+    expect(activeSession).toMatchObject({
+      lifecycle: 'ready',
+      runnerMode: 'mock',
+      transport: 'sse',
+      deviceBridge: 'disabled',
+    });
+    expect(activeSession.gates.some((gate) => gate.id === 'device-bridge')).toBe(true);
   });
 });

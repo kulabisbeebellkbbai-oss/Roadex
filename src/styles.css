@@ -458,7 +458,8 @@ button {
 }
 
 .safeguard-list li,
-.timeline-note {
+.timeline-note,
+.safeguard-note {
   display: flex;
   gap: 10px;
   align-items: flex-start;
@@ -477,6 +478,12 @@ button {
   border-radius: 8px;
   color: var(--warning);
   background: #fff8e9;
+}
+
+.safeguard-note {
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
 .sr-only {

@@ -6,6 +6,7 @@ import {
   TerminalSquare,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import { firstMilestoneGates, type RoadexSession, type WorkspaceRef } from './shared/sessionContracts';
 
 export type NavItem = {
   label: string;
@@ -19,6 +20,14 @@ export type SessionSummary = {
   state: string;
   signal: string;
 };
+
+export const activeWorkspace: WorkspaceRef = {
+  id: 'roadex',
+  name: 'Roadex Portal',
+  root: '/srv/roadex/projects/roadex',
+};
+
+export const activeSession: RoadexSession = getActiveMockSession();
 
 export const navItems: NavItem[] = [
   { label: 'Sessions', icon: TerminalSquare, active: true },
@@ -55,3 +64,19 @@ export const portalTargets = [
   { label: 'Trust boundary', value: 'Server-side execution' },
   { label: 'Client devices', value: 'Deferred until review' },
 ];
+
+function getActiveMockSession(): RoadexSession {
+  return {
+    id: `mock-${activeWorkspace.id}`,
+    userId: 'demo-user',
+    workspace: activeWorkspace,
+    lifecycle: 'ready',
+    runnerMode: 'mock',
+    transport: 'sse',
+    deviceBridge: 'disabled',
+    gates: firstMilestoneGates.map((gate) => ({
+      ...gate,
+      state: gate.id === 'device-bridge' ? 'deferred' : 'passed',
+    })),
+  };
+}

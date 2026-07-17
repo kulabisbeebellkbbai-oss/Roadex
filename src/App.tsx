@@ -1,6 +1,7 @@
 import {
   Activity,
   Bot,
+  CirclePause,
   CheckCircle2,
   ChevronRight,
   Clock3,
@@ -16,7 +17,7 @@ import {
   TerminalSquare,
   UserRoundCheck,
 } from 'lucide-react';
-import { navItems, safeguards, sessionSummaries } from './roadexModel';
+import { activeSession, navItems, sessionSummaries } from './roadexModel';
 
 function App() {
   return (
@@ -99,13 +100,15 @@ function App() {
                 <span className="section-label">Active session</span>
                 <h2>Codex conversation stream</h2>
               </div>
-              <span className="status-dot">Ready</span>
+              <span className="status-dot">{activeSession.lifecycle}</span>
             </div>
 
             <div className="transcript">
               <div className="message system">
                 <Server size={18} />
-                <p>Roadex session attached to server workspace.</p>
+                <p>
+                  Roadex mock session attached to {activeSession.workspace.root}.
+                </p>
               </div>
               <div className="message user">
                 <UserRoundCheck size={18} />
@@ -114,8 +117,9 @@ function App() {
               <div className="message assistant">
                 <Bot size={18} />
                 <p>
-                  Core portal first: responsive shell, secure session model,
-                  audit trail, then Codex process integration.
+                  Runner mode is {activeSession.runnerMode}; transport is{' '}
+                  {activeSession.transport}. Real Codex process integration is
+                  blocked until the security gates pass.
                 </p>
               </div>
             </div>
@@ -192,13 +196,20 @@ function App() {
               <KeyRound size={20} />
             </div>
             <ul className="safeguard-list">
-              {safeguards.map((item) => (
-                <li key={item}>
-                  <CheckCircle2 size={18} />
-                  <span>{item}</span>
+              {activeSession.gates.map((gate) => (
+                <li key={gate.id}>
+                  {gate.state === 'deferred' ? (
+                    <CirclePause size={18} />
+                  ) : (
+                    <CheckCircle2 size={18} />
+                  )}
+                  <span>{gate.label}: {gate.state}</span>
                 </li>
               ))}
             </ul>
+            <div className="safeguard-note">
+              Controls are tracked in the first portal model.
+            </div>
           </article>
 
           <article className="section-card device-card">
