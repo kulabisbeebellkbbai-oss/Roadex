@@ -1,0 +1,32 @@
+.agents/
+.codex/
+
+# Local secrets and personal exports
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*
+*secret*
+
+# Local databases and generated state
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Common build outputs
+dist/
+build/
+coverage/
+node_modules/
+__pycache__/
+*.pyc
