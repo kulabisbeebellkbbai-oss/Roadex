@@ -22,6 +22,15 @@ Roadex exposes powerful server-side Codex capabilities through a browser. The in
 - Make sensitive actions explicit in the interface instead of silently forwarding them.
 - Defer client peripheral access until after the portal and session isolation model are verified.
 
+## Implemented Mock Controls
+
+- `POST /api/auth/mock-login` issues an explicit mock bearer token.
+- Session bootstrap, create, prompt, and stream routes require the mock bearer token.
+- Workspace selection uses server-approved workspace ids instead of browser-supplied roots.
+- Prompt submission is routed to a mock runner only.
+- Device bridge requests are denied and audited.
+- SSE output is scoped to the authenticated session owner.
+
 ## Verification Checklist
 
 - Authentication blocks anonymous session creation.

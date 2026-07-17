@@ -1,5 +1,7 @@
+import { FormEvent, useState } from 'react';
 import {
   Activity,
+  AlertTriangle,
   Bot,
   CirclePause,
   CheckCircle2,
@@ -12,14 +14,31 @@ import {
   MonitorSmartphone,
   PlugZap,
   RadioTower,
-  Server,
   ShieldCheck,
   TerminalSquare,
-  UserRoundCheck,
 } from 'lucide-react';
-import { activeSession, navItems, sessionSummaries } from './roadexModel';
+import { useRoadexSession } from './hooks/useRoadexSession';
+import { navItems } from './roadexModel';
 
 function App() {
+  const roadex = useRoadexSession();
+  const [prompt, setPrompt] = useState('');
+  const session = roadex.session;
+  const composerDisabled =
+    roadex.connectionState === 'loading' ||
+    roadex.connectionState === 'streaming' ||
+    roadex.connectionState === 'error' ||
+    !session ||
+    session.lifecycle !== 'ready';
+
+  async function handlePrompt(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (composerDisabled || !prompt.trim()) return;
+    const nextPrompt = prompt;
+    setPrompt('');
+    await roadex.sendPrompt(nextPrompt);
+  }
+
   return (
     <main className="app-shell">
       <aside className="sidebar" aria-label="Roadex navigation">
@@ -56,90 +75,102 @@ function App() {
       </aside>
 
       <section className="workspace">
-        <header className="topbar">
+        <header className="topbar session-topbar">
           <button className="icon-button" type="button" aria-label="Open menu">
             <Menu size={20} />
           </button>
           <div className="topbar-title">
-            <span>Server workspace</span>
-            <strong>/srv/roadex/projects/roadex</strong>
+            <span>{roadex.user?.displayName ?? 'Attaching mock user'}</span>
+            <strong title={session?.workspace.root}>
+              {session?.workspace.root ?? '/srv/roadex/projects/...'}
+            </strong>
           </div>
           <div className="session-pill">
             <Activity size={16} />
-            <span>Connected</span>
+            <span>{roadex.connectionState}</span>
           </div>
         </header>
 
-        <section className="hero">
-          <div className="hero-copy">
-            <span className="eyebrow">Browser-first Codex access</span>
-            <h1>Run server-side Codex sessions from any device.</h1>
-            <p>
-              Roadex gives users a responsive portal for Codex-like work on a
-              server: streamed conversation, terminal-style context, project
-              visibility, and security controls before sensitive capabilities
-              are enabled.
-            </p>
+        <section className="session-header">
+          <div>
+            <span className="eyebrow">Live mock Roadex session</span>
+            <h1>{session?.workspace.name ?? 'Attaching session'}</h1>
           </div>
-          <div className="hero-actions">
-            <button className="primary-action" type="button">
-              <TerminalSquare size={18} />
-              <span>Open Session</span>
-            </button>
-            <button className="secondary-action" type="button">
-              <ShieldCheck size={18} />
-              <span>Review Gates</span>
-            </button>
+          <div className="session-facts" aria-label="Session facts">
+            <span>{session?.id ?? 'pending'}</span>
+            <span>{session?.lifecycle ?? 'loading'}</span>
+            <span>{session?.transport ?? 'sse'}</span>
+            <span>{session?.runnerMode ?? 'mock'} runner</span>
           </div>
         </section>
 
-        <section className="dashboard-grid" aria-label="Roadex dashboard">
+        {roadex.error ? (
+          <section className="error-banner" role="alert">
+            <AlertTriangle size={20} />
+            <span>{roadex.error}</span>
+            <button type="button" onClick={roadex.retry}>
+              Retry
+            </button>
+          </section>
+        ) : null}
+
+        <section className="dashboard-grid live-grid" aria-label="Roadex dashboard">
           <article className="codex-panel">
             <div className="panel-heading">
               <div>
-                <span className="section-label">Active session</span>
-                <h2>Codex conversation stream</h2>
+                <span className="section-label">Active stream</span>
+                <h2>Transcript</h2>
               </div>
-              <span className="status-dot">{activeSession.lifecycle}</span>
+              <span className="status-dot">{session?.lifecycle ?? 'loading'}</span>
             </div>
 
-            <div className="transcript">
-              <div className="message system">
-                <Server size={18} />
-                <p>
-                  Roadex mock session attached to {activeSession.workspace.root}.
-                </p>
-              </div>
-              <div className="message user">
-                <UserRoundCheck size={18} />
-                <p>Build the browser portal before enabling client devices.</p>
-              </div>
-              <div className="message assistant">
-                <Bot size={18} />
-                <p>
-                  Runner mode is {activeSession.runnerMode}; transport is{' '}
-                  {activeSession.transport}. Real Codex process integration is
-                  blocked until the security gates pass.
-                </p>
-              </div>
+            <div className="transcript" aria-live="polite">
+              {roadex.connectionState === 'loading' ? (
+                <>
+                  <div className="message skeleton" />
+                  <div className="message skeleton" />
+                  <div className="message skeleton" />
+                </>
+              ) : null}
+
+              {roadex.transcript.map((event) => (
+                <div className={`message ${event.kind}`} key={event.id}>
+                  {event.kind === 'assistant' ? <Bot size={18} /> : <TerminalSquare size={18} />}
+                  <p>{event.message}</p>
+                </div>
+              ))}
+
+              {roadex.transcript.length === 0 && roadex.connectionState === 'connected' ? (
+                <div className="message system">
+                  <TerminalSquare size={18} />
+                  <p>Mock session is ready. Send a prompt to test server-side streaming.</p>
+                </div>
+              ) : null}
             </div>
 
-            <form className="prompt-row">
+            <form className="prompt-row" onSubmit={handlePrompt}>
               <label className="sr-only" htmlFor="prompt">
                 Prompt
               </label>
               <input
+                disabled={composerDisabled}
                 id="prompt"
-                placeholder="Send a prompt to the server-side Codex session"
+                onChange={(event) => setPrompt(event.target.value)}
+                placeholder={
+                  roadex.connectionState === 'streaming'
+                    ? 'Streaming mock response...'
+                    : 'Send a prompt to the server-side mock Codex session'
+                }
                 type="text"
+                value={prompt}
               />
-              <button type="button">
+              <button disabled={composerDisabled || !prompt.trim()} type="submit">
                 <ChevronRight size={20} />
               </button>
             </form>
           </article>
 
-          <aside className="side-stack">
+          <aside className="side-stack operational-rail">
             <article className="metric-card">
               <MonitorSmartphone size={22} />
               <div>
@@ -174,14 +205,14 @@ function App() {
               <Laptop size={20} />
             </div>
             <div className="session-list">
-              {sessionSummaries.map((session) => (
-                <div className="session-row" key={session.project}>
+              {roadex.workspaces.map((workspace) => (
+                <div className="session-row" key={workspace.id}>
                   <div>
-                    <strong>{session.project}</strong>
-                    <span>{session.branch}</span>
+                    <strong>{workspace.name}</strong>
+                    <span>{workspace.id}</span>
                   </div>
-                  <p>{session.state}</p>
-                  <span className="signal">{session.signal}</span>
+                  <p title={workspace.root}>{workspace.root}</p>
+                  <span className="signal">Authorized</span>
                 </div>
               ))}
             </div>
@@ -196,7 +227,7 @@ function App() {
               <KeyRound size={20} />
             </div>
             <ul className="safeguard-list">
-              {activeSession.gates.map((gate) => (
+              {(session?.gates ?? []).map((gate) => (
                 <li key={gate.id}>
                   {gate.state === 'deferred' ? (
                     <CirclePause size={18} />
@@ -207,28 +238,28 @@ function App() {
                 </li>
               ))}
             </ul>
-            <div className="safeguard-note">
-              Controls are tracked in the first portal model.
-            </div>
+            <div className="safeguard-note">Real Codex and device bridge remain disabled.</div>
           </article>
 
           <article className="section-card device-card">
             <div className="panel-heading compact">
               <div>
-                <span className="section-label">Later phase</span>
-                <h2>Device bridge</h2>
+                <span className="section-label">Audit</span>
+                <h2>Latest events</h2>
               </div>
               <RadioTower size={20} />
             </div>
-            <p>
-              Local peripherals remain outside the first app milestone. The
-              bridge will need explicit user consent, platform capability
-              checks, scoped forwarding, and audited approval before an ESP32 or
-              similar device can be exposed to a server-side Codex session.
-            </p>
+            <div className="audit-list">
+              {roadex.auditEvents.map((event) => (
+                <div className="audit-row" key={event.id}>
+                  <strong>{event.action}</strong>
+                  <span>{event.summary}</span>
+                </div>
+              ))}
+            </div>
             <div className="timeline-note">
               <Clock3 size={18} />
-              <span>Enable only after the portal and security model are verified.</span>
+              <span>Device bridge approval is a later security-reviewed phase.</span>
             </div>
           </article>
         </section>

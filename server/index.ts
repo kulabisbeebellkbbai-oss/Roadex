@@ -1,0 +1,169 @@
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { extname, join, normalize } from 'node:path';
+import { authenticate, mockAuthToken, mockUser } from '../src/server/authService.js';
+import {
+  bootstrap,
+  createInitialState,
+  createSessionFromApi,
+  streamEventsForSession,
+  submitPrompt,
+} from '../src/server/sessionService.js';
+import type { CreateSessionRequest } from '../src/shared/sessionContracts.js';
+
+const host = process.env.HOST ?? '127.0.0.1';
+const port = Number(process.env.PORT ?? 8780);
+const state = createInitialState();
+
+if (host !== '127.0.0.1' && host !== 'localhost') {
+  throw new Error('Roadex API must bind to loopback until deployment gateway review is complete.');
+}
+
+const server = createServer(async (req, res) => {
+  try {
+    await route(req, res);
+  } catch (error) {
+    console.error(error);
+    sendJson(res, 500, { error: { code: 'internal_error', message: 'Unexpected server error.' } });
+  }
+});
+
+server.listen(port, host, () => {
+  console.log(`Roadex API listening at http://${host}:${port}`);
+});
+
+async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+
+  if (url.pathname === '/api/health') {
+    sendJson(res, 200, { ok: true, service: 'roadex-api' });
+    return;
+  }
+
+  if (url.pathname === '/api/auth/mock-login' && req.method === 'POST') {
+    sendJson(res, 200, { user: mockUser, token: mockAuthToken });
+    return;
+  }
+
+  if (url.pathname === '/api/bootstrap') {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    sendJson(res, 200, bootstrap(state, auth.user));
+    return;
+  }
+
+  if (url.pathname === '/api/sessions' && req.method === 'POST') {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const body = await readJson<CreateSessionRequest>(req);
+    const response = createSessionFromApi(state, auth.user, body);
+    sendJson(res, response.ok ? 201 : 403, response);
+    return;
+  }
+
+  const promptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/prompts$/);
+  if (promptMatch && req.method === 'POST') {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const body = await readJson<{ prompt?: string }>(req);
+    const result = submitPrompt(state, auth.user, decodeURIComponent(promptMatch[1]), body.prompt ?? '');
+    if (!result) {
+      sendJson(res, 404, { error: { code: 'not_found', message: 'Session not found.' } });
+      return;
+    }
+    sendJson(res, 202, { accepted: true, events: result.events, auditEvent: result.auditEvent });
+    return;
+  }
+
+  const streamMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/stream$/);
+  if (streamMatch && req.method === 'GET') {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const events = streamEventsForSession(state, auth.user, decodeURIComponent(streamMatch[1]));
+    if (!events) {
+      sendJson(res, 404, { error: { code: 'not_found', message: 'Session not found.' } });
+      return;
+    }
+    writeSse(res, events);
+    return;
+  }
+
+  if (req.method === 'GET') {
+    const served = await tryServeStatic(url.pathname, res);
+    if (served) return;
+  }
+
+  sendJson(res, 404, { error: { code: 'not_found', message: 'Route not found.' } });
+}
+
+function requireAuth(
+  req: IncomingMessage,
+  res: ServerResponse,
+): ReturnType<typeof authenticate> & { ok: true } | undefined {
+  const result = authenticate(req.headers.authorization);
+  if (!result.ok) {
+    sendJson(res, 401, { error: { code: 'unauthorized', message: result.reason, gate: 'auth' } });
+    return undefined;
+  }
+  return result;
+}
+
+async function readJson<T>(req: IncomingMessage): Promise<T> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  const raw = Buffer.concat(chunks).toString('utf8').trim();
+  return (raw ? JSON.parse(raw) : {}) as T;
+}
+
+function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  });
+  res.end(JSON.stringify(payload));
+}
+
+function writeSse(res: ServerResponse, events: unknown[]): void {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'keep-alive',
+  });
+  for (const event of events) {
+    res.write(`event: roadex\n`);
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  }
+  res.end();
+}
+
+async function tryServeStatic(pathname: string, res: ServerResponse): Promise<boolean> {
+  const cleanPath = normalize(pathname === '/' ? '/index.html' : pathname).replace(/^(\.\.[/\\])+/, '');
+  if (cleanPath.startsWith('..')) return false;
+
+  const filePath = join(process.cwd(), 'dist', cleanPath);
+  try {
+    const data = await readFile(filePath);
+    res.writeHead(200, { 'content-type': contentType(filePath) });
+    res.end(data);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function contentType(path: string): string {
+  switch (extname(path)) {
+    case '.html':
+      return 'text/html; charset=utf-8';
+    case '.js':
+      return 'text/javascript; charset=utf-8';
+    case '.css':
+      return 'text/css; charset=utf-8';
+    case '.svg':
+      return 'image/svg+xml';
+    default:
+      return 'application/octet-stream';
+  }
+}

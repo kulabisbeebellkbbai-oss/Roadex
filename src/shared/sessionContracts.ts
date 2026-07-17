@@ -19,6 +19,37 @@ export type WorkspaceRef = {
   root: string;
 };
 
+export type UserProfile = {
+  id: string;
+  displayName: string;
+  authMode: 'mock';
+  roles: Array<'user' | 'admin' | 'security-reviewer'>;
+};
+
+export type AuditEvent = {
+  id: string;
+  at: string;
+  actorId: string;
+  action:
+    | 'auth.mock_user_loaded'
+    | 'session.create'
+    | 'session.attach'
+    | 'session.prompt'
+    | 'session.stream_open'
+    | 'security.denied';
+  resource: string;
+  outcome: 'allowed' | 'denied';
+  summary: string;
+};
+
+export type StreamEvent = {
+  id: string;
+  sessionId: string;
+  kind: 'system' | 'assistant' | 'audit';
+  message: string;
+  at: string;
+};
+
 export type RoadexSession = {
   id: string;
   userId: string;
@@ -34,6 +65,19 @@ export type SessionRequest = {
   userId?: string;
   workspace: WorkspaceRef;
   requestedDeviceBridge?: boolean;
+};
+
+export type CreateSessionRequest = {
+  workspaceId: string;
+  requestedDeviceBridge?: boolean;
+};
+
+export type RoadexBootstrap = {
+  user: UserProfile;
+  workspaces: WorkspaceRef[];
+  sessions: RoadexSession[];
+  auditEvents: AuditEvent[];
+  streamPreview: StreamEvent[];
 };
 
 export type SessionResponse =

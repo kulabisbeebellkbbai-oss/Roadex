@@ -14,10 +14,13 @@ The first implementation milestone is a secure responsive portal shell. Server-s
 ## Commands
 
 - `npm install` - install frontend dependencies.
-- `npm run dev` - start the Vite development server.
+- `npm run dev` - start the Vite development server and loopback Roadex API.
+- `npm run dev:web` - start only the browser development server.
+- `npm run dev:api` - start only the loopback Roadex API.
 - `npm run build` - type-check and build the production bundle.
 - `npm run lint` - run ESLint against the TypeScript source.
 - `npm run test` - run the Vitest test suite.
+- `npm start` - run the compiled server after `npm run build`.
 
 ## Current Status
 

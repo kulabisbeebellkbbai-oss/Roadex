@@ -25,6 +25,7 @@ Thumbs.db
 
 # Common build outputs
 dist/
+dist-server/
 build/
 coverage/
 node_modules/

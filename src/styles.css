@@ -152,6 +152,10 @@ button {
   margin-bottom: 18px;
 }
 
+.session-topbar {
+  margin-bottom: 12px;
+}
+
 .icon-button {
   flex: 0 0 auto;
   color: var(--ink);
@@ -196,7 +200,8 @@ button {
   margin-left: auto;
 }
 
-.hero {
+.hero,
+.session-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 24px;
@@ -206,6 +211,11 @@ button {
   border-radius: 8px;
   background: var(--surface-strong);
   box-shadow: var(--shadow);
+}
+
+.session-header {
+  align-items: center;
+  padding: 20px;
 }
 
 .eyebrow,
@@ -220,16 +230,61 @@ button {
 }
 
 .hero h1,
+.session-header h1,
 .panel-heading h2 {
   margin: 0;
   color: var(--ink);
   letter-spacing: 0;
 }
 
-.hero h1 {
+.hero h1,
+.session-header h1 {
   max-width: 780px;
   font-size: clamp(2rem, 5vw, 4.4rem);
   line-height: 0.98;
+}
+
+.session-header h1 {
+  font-size: clamp(1.8rem, 4vw, 3.2rem);
+}
+
+.session-facts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.session-facts span,
+.error-banner button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #ffffff;
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #e6b7b7;
+  border-radius: 8px;
+  color: #7a1f1f;
+  background: #fff5f5;
+}
+
+.error-banner button {
+  margin-left: auto;
+  color: #7a1f1f;
+  border-color: #e6b7b7;
 }
 
 .hero p {
@@ -276,6 +331,10 @@ button {
 .lower-grid {
   display: grid;
   gap: 18px;
+  margin-top: 18px;
+}
+
+.live-grid {
   margin-top: 18px;
 }
 
@@ -353,6 +412,28 @@ button {
   background: #f3fbf7;
 }
 
+.message.audit {
+  border-color: #dcd0ea;
+  background: #faf7ff;
+}
+
+.message.skeleton {
+  min-height: 52px;
+  background:
+    linear-gradient(90deg, #f2f5f3 25%, #e7ece9 37%, #f2f5f3 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.3s ease infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
+}
+
 .prompt-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 48px;
@@ -368,6 +449,12 @@ button {
   border-radius: 8px;
   color: var(--ink);
   background: #ffffff;
+}
+
+.prompt-row input:disabled,
+.prompt-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 .prompt-row button {
@@ -449,6 +536,12 @@ button {
   background: #f6f7f7;
 }
 
+.session-row p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .safeguard-list {
   display: grid;
   gap: 12px;
@@ -484,6 +577,31 @@ button {
   margin-top: 14px;
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+.audit-list {
+  display: grid;
+  gap: 10px;
+}
+
+.audit-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.audit-row strong {
+  color: var(--ink);
+  font-size: 0.86rem;
+}
+
+.audit-row span {
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.35;
 }
 
 .sr-only {
@@ -579,14 +697,20 @@ button {
     display: none;
   }
 
-  .hero {
+  .hero,
+  .session-header {
     grid-template-columns: 1fr;
     padding: 20px;
   }
 
-  .hero h1 {
+  .hero h1,
+  .session-header h1 {
     font-size: 2.25rem;
     line-height: 1.02;
+  }
+
+  .session-facts {
+    justify-content: flex-start;
   }
 
   .hero-actions {
@@ -621,12 +745,14 @@ button {
   }
 
   .hero,
+  .session-header,
   .codex-panel,
   .section-card {
     padding: 14px;
   }
 
-  .hero h1 {
+  .hero h1,
+  .session-header h1 {
     font-size: 1.9rem;
   }
 

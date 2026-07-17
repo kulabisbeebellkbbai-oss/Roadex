@@ -3,7 +3,7 @@
 Generated through The A-Team service on `http://127.0.0.1:8795/`.
 
 - Team id: `ep2qSVAScvWh`
-- Status: `draft`
+- Status: `approved`
 - Project type: `software`
 
 ## Summary
@@ -179,4 +179,4 @@ Acceptance criteria:
 
 ## Approval Gate
 
-This team is a draft until the user approves or requests revisions. Development after this point should be assigned and reviewed through the approved A-Team plan.
+This team is approved. Development after this point must be assigned and reviewed through this A-Team plan.
