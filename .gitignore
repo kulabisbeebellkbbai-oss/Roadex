@@ -30,3 +30,7 @@ coverage/
 node_modules/
 __pycache__/
 *.pyc
+
+# Local browser verification output
+.playwright-mcp/
+roadex-*.png

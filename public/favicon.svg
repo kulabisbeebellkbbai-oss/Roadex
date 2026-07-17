@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Roadex">
+  <rect width="64" height="64" rx="10" fill="#101815"/>
+  <path d="M18 44V20h17c7 0 11 4 11 10 0 4-2 7-6 9l7 5h-11l-6-5h-4v5H18Zm8-12h9c2 0 4-1 4-3s-2-3-4-3h-9v6Z" fill="#f6fbf8"/>
+  <path d="M16 50h32" stroke="#38b89f" stroke-width="4" stroke-linecap="round"/>
+</svg>
