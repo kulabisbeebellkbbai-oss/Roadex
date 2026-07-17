@@ -8,11 +8,18 @@ import type { CreateSessionRequest, StreamEvent } from '../shared/sessionContrac
 import { isApiError } from '../shared/apiContracts';
 
 export type RoadexApiSession = {
-  token: string;
+  token?: string;
   bootstrap: BootstrapResponse;
 };
 
 export async function loginAndBootstrap(): Promise<RoadexApiSession> {
+  const protectedBootstrap = await requestOptional<BootstrapResponse>('/api/bootstrap');
+  if (protectedBootstrap.ok) {
+    return {
+      bootstrap: protectedBootstrap.payload,
+    };
+  }
+
   const login = await request<MockLoginResponse>('/api/auth/mock-login', {
     method: 'POST',
   });
@@ -27,7 +34,7 @@ export async function loginAndBootstrap(): Promise<RoadexApiSession> {
 }
 
 export async function createSession(
-  token: string,
+  token: string | undefined,
   requestBody: CreateSessionRequest,
 ): Promise<BootstrapResponse> {
   await request('/api/sessions', {
@@ -40,7 +47,7 @@ export async function createSession(
 }
 
 export async function submitPrompt(
-  token: string,
+  token: string | undefined,
   sessionId: string,
   prompt: string,
 ): Promise<PromptResponse> {
@@ -51,10 +58,10 @@ export async function submitPrompt(
   });
 }
 
-export async function readSessionStream(token: string, sessionId: string): Promise<StreamEvent[]> {
+export async function readSessionStream(token: string | undefined, sessionId: string): Promise<StreamEvent[]> {
   const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/stream`, {
     headers: {
-      Authorization: `Bearer ${token}`,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
   });
 
@@ -95,4 +102,23 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
 
   return payload;
+}
+
+async function requestOptional<T>(path: string, options: RequestOptions = {}): Promise<
+  | {
+      ok: true;
+      payload: T;
+    }
+  | {
+      ok: false;
+    }
+> {
+  try {
+    return {
+      ok: true,
+      payload: await request<T>(path, options),
+    };
+  } catch {
+    return { ok: false };
+  }
 }

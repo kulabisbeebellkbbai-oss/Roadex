@@ -67,7 +67,7 @@ export function useRoadexSession(): RoadexSessionState {
 
   const sendPrompt = useCallback(
     async (prompt: string) => {
-      if (!token || !session) return;
+      if (!session) return;
       setConnectionState('streaming');
       setError(undefined);
       try {
@@ -85,7 +85,7 @@ export function useRoadexSession(): RoadexSessionState {
   );
 
   const retry = useCallback(async () => {
-    if (!token || !workspaces[0]) {
+    if (!workspaces[0]) {
       await attach();
       return;
     }

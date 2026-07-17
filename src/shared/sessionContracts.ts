@@ -22,7 +22,7 @@ export type WorkspaceRef = {
 export type UserProfile = {
   id: string;
   displayName: string;
-  authMode: 'mock';
+  authMode: 'mock' | 'protected-gateway';
   roles: Array<'user' | 'admin' | 'security-reviewer'>;
 };
 

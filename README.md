@@ -43,6 +43,10 @@ https://10.50.0.100:9443/Roadex
 
 Use `ops/roadex.service` as the user systemd unit template after `npm run build`.
 
+When Roadex is behind the Protected Service Gateway, both services should load the same ignored
+`ROADEX_GATEWAY_SHARED_SECRET` from `local-secrets/roadex-gateway.env`. With that secret configured,
+Roadex rejects mock login and accepts only gateway-stamped identity headers.
+
 ## Current Status
 
 The repository contains the browser portal shell, protected-gateway deployment notes, and a real server-side Codex prompt runner. Client device and peripheral access are intentionally deferred until the core portal, session model, and security controls are working and verified.

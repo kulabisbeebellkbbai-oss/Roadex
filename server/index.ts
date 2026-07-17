@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
-import { authenticate, mockAuthToken, mockUser } from '../src/server/authService.js';
+import { authenticate, gatewayAuthRequired, mockAuthToken, mockUser } from '../src/server/authService.js';
 import {
   bootstrap,
   createInitialState,
@@ -41,6 +41,16 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
 
   if (url.pathname === '/api/auth/mock-login' && req.method === 'POST') {
+    if (gatewayAuthRequired()) {
+      sendJson(res, 403, {
+        error: {
+          code: 'mock_auth_disabled',
+          message: 'Mock Roadex login is disabled when protected gateway auth is configured.',
+          gate: 'auth',
+        },
+      });
+      return;
+    }
     sendJson(res, 200, { user: mockUser, token: mockAuthToken });
     return;
   }
@@ -100,7 +110,7 @@ function requireAuth(
   req: IncomingMessage,
   res: ServerResponse,
 ): ReturnType<typeof authenticate> & { ok: true } | undefined {
-  const result = authenticate(req.headers.authorization);
+  const result = authenticate(req.headers);
   if (!result.ok) {
     sendJson(res, 401, { error: { code: 'unauthorized', message: result.reason, gate: 'auth' } });
     return undefined;

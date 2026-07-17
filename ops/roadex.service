@@ -7,6 +7,7 @@ Type=simple
 WorkingDirectory=/home/god/Documents/Codex Workspace/Roadex
 Environment=HOST=127.0.0.1
 Environment=PORT=8780
+EnvironmentFile=-/home/god/Documents/Codex Workspace/Roadex/local-secrets/roadex-gateway.env
 ExecStart=/usr/bin/npm start
 Restart=on-failure
 RestartSec=5
