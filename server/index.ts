@@ -5,6 +5,7 @@ import { authenticate, gatewayAuthRequired, mockAuthToken, mockUser } from '../s
 import {
   bootstrap,
   cancelSessionRun,
+  closeSession,
   createInitialState,
   createSessionFromApi,
   streamEventsForSession,
@@ -96,6 +97,19 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return;
     }
     sendJson(res, result.cancelled ? 202 : 409, result);
+    return;
+  }
+
+  const closeMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/close$/);
+  if (closeMatch && req.method === 'POST') {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const result = closeSession(state, auth.user, decodeURIComponent(closeMatch[1]));
+    if (!result) {
+      sendJson(res, 404, { error: { code: 'not_found', message: 'Session not found.' } });
+      return;
+    }
+    sendJson(res, 202, result);
     return;
   }
 

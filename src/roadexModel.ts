@@ -66,6 +66,7 @@ export const portalTargets = [
 ];
 
 function getActiveSession(): RoadexSession {
+  const now = new Date().toISOString();
   return {
     id: `codex-${activeWorkspace.id}`,
     userId: 'demo-user',
@@ -78,5 +79,7 @@ function getActiveSession(): RoadexSession {
       ...gate,
       state: gate.id === 'device-bridge' ? 'deferred' : 'passed',
     })),
+    createdAt: now,
+    updatedAt: now,
   };
 }

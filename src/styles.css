@@ -448,7 +448,7 @@ button {
 
 .prompt-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 48px;
+  grid-template-columns: minmax(0, 1fr) 48px 48px 48px;
   gap: 8px;
   margin-top: 14px;
 }

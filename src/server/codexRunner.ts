@@ -44,6 +44,7 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
 
   return {
     createSession({ userId, workspace }) {
+      const now = new Date().toISOString();
       return {
         id: `codex-${workspace.id}-${randomUUID()}`,
         userId,
@@ -78,6 +79,8 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
             description: 'USB and local peripherals stay disabled until security review.',
           },
         ],
+        createdAt: now,
+        updatedAt: now,
       };
     },
 

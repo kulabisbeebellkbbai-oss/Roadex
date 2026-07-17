@@ -2,6 +2,7 @@ import { FormEvent, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  Archive,
   Bot,
   CirclePause,
   CheckCircle2,
@@ -181,6 +182,14 @@ function App() {
                 type="button"
               >
                 <CirclePause size={20} />
+              </button>
+              <button
+                aria-label="Archive session"
+                disabled={!session || roadex.connectionState === 'loading'}
+                onClick={() => void roadex.closeCurrentSession()}
+                type="button"
+              >
+                <Archive size={20} />
               </button>
             </form>
           </article>

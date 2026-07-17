@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   cancelSession,
+  closeSession,
   createSession,
   loginAndBootstrap,
   readSessionStream,
@@ -28,6 +29,7 @@ export type RoadexSessionState = {
   notice?: string;
   sendPrompt: (prompt: string) => Promise<void>;
   cancelPrompt: () => Promise<void>;
+  closeCurrentSession: () => Promise<void>;
   openWorkspace: (workspaceId: string) => Promise<void>;
   retry: () => Promise<void>;
 };
@@ -129,6 +131,34 @@ export function useRoadexSession(): RoadexSessionState {
     }
   }, [refreshStream, session, token]);
 
+  const closeCurrentSession = useCallback(async () => {
+    if (!session) return;
+    setConnectionState('loading');
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      const response = await closeSession(token, session.id);
+      const result = await loginAndBootstrap();
+      const activeSession = result.bootstrap.sessions[0];
+      setToken(result.token);
+      setUser(result.bootstrap.user);
+      setWorkspaces(result.bootstrap.workspaces);
+      setSession(activeSession);
+      setAuditEvents([response.auditEvent, ...result.bootstrap.auditEvents].slice(0, 8));
+      setTranscript(result.bootstrap.streamPreview.filter((event) => !activeSession || event.sessionId === activeSession.id));
+      if (activeSession) {
+        const events = await readSessionStream(result.token, activeSession.id);
+        setTranscript(events);
+      }
+      setNotice('Session archived.');
+      setConnectionState('connected');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Session archive failed.');
+      setNotice(undefined);
+      setConnectionState('error');
+    }
+  }, [session, token]);
+
   const openWorkspace = useCallback(
     async (workspaceId: string) => {
       setConnectionState('loading');
@@ -180,12 +210,14 @@ export function useRoadexSession(): RoadexSessionState {
       notice,
       sendPrompt,
       cancelPrompt,
+      closeCurrentSession,
       openWorkspace,
       retry,
     }),
     [
       auditEvents,
       cancelPrompt,
+      closeCurrentSession,
       connectionState,
       error,
       notice,

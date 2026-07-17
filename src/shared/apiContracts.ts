@@ -1,5 +1,6 @@
 import type {
   CancelSessionResponse,
+  CloseSessionResponse,
   PromptAcceptedResponse,
   RoadexBootstrap,
   UserProfile,
@@ -27,6 +28,8 @@ export type PromptRequest = {
 export type PromptResponse = PromptAcceptedResponse;
 
 export type CancelResponse = CancelSessionResponse;
+
+export type CloseResponse = CloseSessionResponse;
 
 export function isApiError(value: unknown): value is ApiError {
   return (

@@ -38,6 +38,7 @@ export type AuditEvent = {
     | 'session.runner_complete'
     | 'session.runner_failed'
     | 'session.cancel'
+    | 'session.close'
     | 'session.stream_open'
     | 'security.denied';
   resource: string;
@@ -64,6 +65,11 @@ export type CancelSessionResponse = {
   auditEvent: AuditEvent;
 };
 
+export type CloseSessionResponse = {
+  closed: true;
+  auditEvent: AuditEvent;
+};
+
 export type RoadexSession = {
   id: string;
   userId: string;
@@ -73,6 +79,8 @@ export type RoadexSession = {
   transport: 'sse' | 'websocket';
   deviceBridge: 'disabled' | 'review-required' | 'enabled';
   gates: SecurityGate[];
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type SessionRequest = {

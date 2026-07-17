@@ -19,6 +19,7 @@ import {
   type StreamEvent,
   type UserProfile,
   type CancelSessionResponse,
+  type CloseSessionResponse,
   type PromptAcceptedResponse,
 } from '../shared/sessionContracts.js';
 
@@ -52,9 +53,7 @@ export function createInitialState(
 }
 
 export async function bootstrap(state: RoadexState, user: UserProfile): Promise<RoadexBootstrap> {
-  const userSessions = state.sessions.sessions.filter(
-    (session) => session.userId === user.id && session.lifecycle !== 'closed',
-  );
+  const userSessions = state.sessions.sessions.filter((session) => isVisibleSessionForUser(session, user));
   if (userSessions.length === 0) {
     const defaultWorkspace = getApprovedWorkspaces()[0];
     if (defaultWorkspace) {
@@ -64,9 +63,7 @@ export async function bootstrap(state: RoadexState, user: UserProfile): Promise<
   return {
     user,
     workspaces: getApprovedWorkspaces(),
-    sessions: state.sessions.sessions.filter(
-      (session) => session.userId === user.id && session.lifecycle !== 'closed',
-    ),
+    sessions: state.sessions.sessions.filter((session) => isVisibleSessionForUser(session, user)),
     auditEvents: state.audit.events.slice(-8).reverse(),
     streamPreview: state.sessions.streamEvents.slice(-8),
   };
@@ -98,9 +95,10 @@ export function createSessionFromApi(
     (session) =>
       session.userId === user.id &&
       session.workspace.id === workspaceDecision.workspace.id &&
-      session.lifecycle !== 'closed',
+      isVisibleSession(session),
   );
   if (existing) {
+    touchSession(existing);
     appendAudit(state.audit, user, 'session.attach', existing.id, 'allowed', 'Attached existing Codex session.');
     saveState(state);
     return Promise.resolve({ ok: true, session: existing });
@@ -159,6 +157,7 @@ export function submitPrompt(
   }
 
   session.lifecycle = 'streaming';
+  touchSession(session);
   const started = appendAudit(
     state.audit,
     user,
@@ -180,19 +179,25 @@ export function submitPrompt(
       },
     })
     .then((result) => {
+      if (session.lifecycle === 'closed') return;
       if (result.ok) {
         session.lifecycle = 'ready';
+        touchSession(session);
         appendAudit(state.audit, user, 'session.runner_complete', sessionId, 'allowed', 'Codex runner completed.');
       } else if (result.reason === 'runner_cancelled') {
         session.lifecycle = 'ready';
+        touchSession(session);
         appendAudit(state.audit, user, 'session.cancel', sessionId, 'allowed', 'Codex runner was cancelled.');
       } else {
         session.lifecycle = 'blocked';
+        touchSession(session);
         appendAudit(state.audit, user, 'session.runner_failed', sessionId, 'denied', result.reason);
       }
     })
     .catch((error: unknown) => {
+      if (session.lifecycle === 'closed') return;
       session.lifecycle = 'blocked';
+      touchSession(session);
       appendAudit(
         state.audit,
         user,
@@ -209,6 +214,41 @@ export function submitPrompt(
   saveState(state);
 
   return { accepted: true, auditEvent: started };
+}
+
+export function closeSession(
+  state: RoadexState,
+  user: UserProfile,
+  sessionId: string,
+): CloseSessionResponse | undefined {
+  const session = getOwnedSession(state.sessions, user.id, sessionId);
+  if (!session) {
+    appendAudit(
+      state.audit,
+      user,
+      'security.denied',
+      sessionId,
+      'denied',
+      `Close denied: actor=${user.id} session=${sessionId} reason=session_not_owned_or_missing.`,
+    );
+    saveState(state);
+    return undefined;
+  }
+
+  const activeRun = state.activeRuns.get(sessionId);
+  activeRun?.abort();
+  session.lifecycle = 'closed';
+  touchSession(session);
+  const auditEvent = appendAudit(
+    state.audit,
+    user,
+    'session.close',
+    sessionId,
+    'allowed',
+    `Closed session: actor=${user.id} session=${sessionId} active_runner=${Boolean(activeRun)} result=archived.`,
+  );
+  saveState(state);
+  return { closed: true, auditEvent };
 }
 
 export function cancelSessionRun(
@@ -248,6 +288,7 @@ export function cancelSessionRun(
 
   activeRun.abort();
   state.cancelAttempts.delete(cancelAttemptKey(user, sessionId));
+  touchSession(session);
   const auditEvent = appendAudit(
     state.audit,
     user,
@@ -298,6 +339,8 @@ export function createMockSession(request: SessionRequest): SessionResponse {
       ...gate,
       state: gate.id === 'device-bridge' ? 'deferred' : 'passed',
     })),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   };
 
   return { ok: true, session };
@@ -312,9 +355,6 @@ function deny(gate: string, reason: string): SessionResponse {
 }
 
 function saveState(state: RoadexState): void {
-  if (state.audit.events.length > 500) {
-    state.audit.events.splice(0, state.audit.events.length - 500);
-  }
   state.persistence.save(serializeState({
     sessions: state.sessions.sessions,
     streamEvents: state.sessions.streamEvents,
@@ -340,4 +380,16 @@ function recordCancelAttempt(state: RoadexState, user: UserProfile, sessionId: s
 
 function cancelAttemptKey(user: UserProfile, sessionId: string): string {
   return `${user.id}:${sessionId}`;
+}
+
+function isVisibleSessionForUser(session: RoadexSession, user: UserProfile): boolean {
+  return session.userId === user.id && isVisibleSession(session);
+}
+
+function isVisibleSession(session: RoadexSession): boolean {
+  return session.lifecycle !== 'closed' && session.lifecycle !== 'blocked';
+}
+
+function touchSession(session: RoadexSession): void {
+  session.updatedAt = new Date().toISOString();
 }

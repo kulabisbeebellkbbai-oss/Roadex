@@ -2,6 +2,7 @@ import type {
   ApiError,
   BootstrapResponse,
   CancelResponse,
+  CloseResponse,
   MockLoginResponse,
   PromptResponse,
 } from '../shared/apiContracts';
@@ -61,6 +62,13 @@ export async function submitPrompt(
 
 export async function cancelSession(token: string | undefined, sessionId: string): Promise<CancelResponse> {
   return request<CancelResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+    method: 'POST',
+    token,
+  });
+}
+
+export async function closeSession(token: string | undefined, sessionId: string): Promise<CloseResponse> {
+  return request<CloseResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
     method: 'POST',
     token,
   });

@@ -4,6 +4,7 @@ import { createStreamEvent } from '../src/server/mockRunner';
 import { createMemoryPersistence } from '../src/server/statePersistence';
 import {
   bootstrap,
+  closeSession,
   createInitialState,
   createMockSession,
   createSessionFromApi,
@@ -21,10 +22,13 @@ const workspace: WorkspaceRef = {
 };
 
 function fakeRunner(result: 'ok' | 'failed' = 'ok'): SessionRunner {
+  let sessions = 0;
   return {
     createSession({ userId, workspace: selectedWorkspace }) {
+      sessions += 1;
+      const now = new Date().toISOString();
       return {
-        id: `codex-${selectedWorkspace.id}`,
+        id: `codex-${selectedWorkspace.id}-${sessions}`,
         userId,
         workspace: selectedWorkspace,
         lifecycle: 'ready',
@@ -32,6 +36,8 @@ function fakeRunner(result: 'ok' | 'failed' = 'ok'): SessionRunner {
         transport: 'sse',
         deviceBridge: 'disabled',
         gates: [],
+        createdAt: now,
+        updatedAt: now,
       };
     },
     async runPrompt({ session, prompt, onEvent, signal }: RunnerPromptRequest) {
@@ -49,10 +55,13 @@ function fakeRunner(result: 'ok' | 'failed' = 'ok'): SessionRunner {
 }
 
 function controllableRunner(): SessionRunner {
+  let sessions = 0;
   return {
     createSession({ userId, workspace: selectedWorkspace }) {
+      sessions += 1;
+      const now = new Date().toISOString();
       return {
-        id: `codex-${selectedWorkspace.id}`,
+        id: `codex-${selectedWorkspace.id}-${sessions}`,
         userId,
         workspace: selectedWorkspace,
         lifecycle: 'ready',
@@ -60,6 +69,8 @@ function controllableRunner(): SessionRunner {
         transport: 'sse',
         deviceBridge: 'disabled',
         gates: [],
+        createdAt: now,
+        updatedAt: now,
       };
     },
     async runPrompt({ session, onEvent, signal }: RunnerPromptRequest) {
@@ -199,6 +210,26 @@ describe('Roadex session service', () => {
     expect(submitPrompt(state, mockUser, response.session.id, 'second prompt')).toBeUndefined();
   });
 
+  it('hides blocked sessions from bootstrap and creates a replacement active session after restart', async () => {
+    const persistence = createMemoryPersistence();
+    const runner = fakeRunner('failed');
+    const state = createInitialState(runner, persistence);
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    submitPrompt(state, mockUser, response.session.id, 'fail and replace');
+    await flushRunner();
+
+    const reloaded = createInitialState(runner, persistence);
+    const bootstrapped = await bootstrap(reloaded, mockUser);
+
+    expect(bootstrapped.sessions).toHaveLength(1);
+    expect(bootstrapped.sessions[0].id).not.toBe(response.session.id);
+    expect(bootstrapped.sessions[0].lifecycle).toBe('ready');
+  });
+
   it('loads persisted sessions, stream events, and audit events after service restart', async () => {
     const persistence = createMemoryPersistence();
     const state = createInitialState(fakeRunner(), persistence);
@@ -293,6 +324,51 @@ describe('Roadex session service', () => {
       },
     });
     expect(cancel?.auditEvent.summary).toContain('active_runner=false');
+  });
+
+  it('archives an owned session and removes it from active bootstrap results', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    const close = closeSession(state, mockUser, response.session.id);
+    const bootstrapped = await bootstrap(state, mockUser);
+
+    expect(close).toMatchObject({
+      closed: true,
+      auditEvent: {
+        action: 'session.close',
+        outcome: 'allowed',
+      },
+    });
+    expect(response.session.lifecycle).toBe('closed');
+    expect(bootstrapped.sessions.some((session) => session.id === response.session.id)).toBe(false);
+    expect(bootstrapped.sessions[0]).toMatchObject({
+      lifecycle: 'ready',
+      workspace: {
+        id: 'roadex',
+      },
+    });
+  });
+
+  it('denies wrong-owner session archive attempts', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    const intruder = { ...mockUser, id: 'other-user' };
+    expect(closeSession(state, intruder, response.session.id)).toBeUndefined();
+    expect(response.session.lifecycle).toBe('ready');
+    expect(state.audit.events.at(-1)).toMatchObject({
+      action: 'security.denied',
+      actorId: 'other-user',
+      resource: response.session.id,
+      outcome: 'denied',
+    });
   });
 
   it('denies wrong-owner cancellation and records actor/session detail', async () => {
