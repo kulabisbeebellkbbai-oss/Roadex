@@ -7,7 +7,7 @@ describe('workspace policy', () => {
     expect(resolveWorkspaceForUser(mockUser, 'roadex')).toMatchObject({
       ok: true,
       workspace: {
-        root: '/srv/roadex/projects/roadex',
+        root: process.cwd(),
       },
     });
   });

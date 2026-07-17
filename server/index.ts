@@ -48,7 +48,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (url.pathname === '/api/bootstrap') {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    sendJson(res, 200, bootstrap(state, auth.user));
+    sendJson(res, 200, await bootstrap(state, auth.user));
     return;
   }
 
@@ -56,7 +56,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const auth = requireAuth(req, res);
     if (!auth) return;
     const body = await readJson<CreateSessionRequest>(req);
-    const response = createSessionFromApi(state, auth.user, body);
+    const response = await createSessionFromApi(state, auth.user, body);
     sendJson(res, response.ok ? 201 : 403, response);
     return;
   }
@@ -66,7 +66,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const auth = requireAuth(req, res);
     if (!auth) return;
     const body = await readJson<{ prompt?: string }>(req);
-    const result = submitPrompt(state, auth.user, decodeURIComponent(promptMatch[1]), body.prompt ?? '');
+    const result = await submitPrompt(state, auth.user, decodeURIComponent(promptMatch[1]), body.prompt ?? '');
     if (!result) {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Session not found.' } });
       return;

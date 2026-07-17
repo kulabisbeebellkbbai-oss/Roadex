@@ -3,11 +3,11 @@ import type { StreamEvent } from '../shared/sessionContracts.js';
 
 export function createRunnerIntro(sessionId: string): StreamEvent[] {
   return [
-    createStreamEvent(sessionId, 'system', 'Mock Roadex session is attached.'),
+    createStreamEvent(sessionId, 'system', 'Roadex session is attached.'),
     createStreamEvent(
       sessionId,
       'assistant',
-      'Real Codex process control remains disabled until security gates pass.',
+      'Device bridge remains disabled until security gates pass.',
     ),
   ];
 }

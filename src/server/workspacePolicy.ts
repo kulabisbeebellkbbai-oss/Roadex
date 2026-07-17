@@ -4,7 +4,7 @@ export const approvedWorkspaces: WorkspaceRef[] = [
   {
     id: 'roadex',
     name: 'Roadex Portal',
-    root: '/srv/roadex/projects/roadex',
+    root: process.env.ROADEX_WORKSPACE_ROOT ?? process.cwd(),
   },
 ];
 

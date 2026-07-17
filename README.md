@@ -2,7 +2,7 @@
 
 Roadex is a browser-first portal for server-hosted Codex sessions. It is intended to feel like using Codex locally on the server while the user connects from a desktop, tablet, or mobile browser.
 
-The first implementation milestone is a secure responsive portal shell. Server-side Codex process control, workspace streaming, authentication, and device bridging will be added behind explicit security review gates.
+The current implementation provides a secure responsive portal shell plus a server-side Codex runner for approved workspaces. Authentication is still mock/demo-only, and client device bridging remains behind a later security review gate.
 
 ## Structure
 
@@ -22,6 +22,16 @@ The first implementation milestone is a secure responsive portal shell. Server-s
 - `npm run test` - run the Vitest test suite.
 - `npm start` - run the compiled server after `npm run build`.
 
+## Codex Runner
+
+Roadex starts Codex through the local CLI with:
+
+```text
+codex exec --json --sandbox workspace-write -C <approved-workspace> <prompt>
+```
+
+The default approved workspace is the Roadex server working directory. Set `ROADEX_WORKSPACE_ROOT` to point the demo workspace somewhere else, and set `ROADEX_CODEX_BIN` if the service should use a specific Codex binary.
+
 ## Protected Gateway
 
 The production Roadex server is intended to run on loopback only at `127.0.0.1:8780`.
@@ -35,4 +45,4 @@ Use `ops/roadex.service` as the user systemd unit template after `npm run build`
 
 ## Current Status
 
-The repository contains the first browser portal shell and project/security planning docs. Client device and peripheral access are intentionally deferred until the core portal, session model, and security controls are working and verified.
+The repository contains the browser portal shell, protected-gateway deployment notes, and a real server-side Codex prompt runner. Client device and peripheral access are intentionally deferred until the core portal, session model, and security controls are working and verified.

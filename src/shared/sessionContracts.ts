@@ -35,6 +35,8 @@ export type AuditEvent = {
     | 'session.create'
     | 'session.attach'
     | 'session.prompt'
+    | 'session.runner_complete'
+    | 'session.runner_failed'
     | 'session.stream_open'
     | 'security.denied';
   resource: string;

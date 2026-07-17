@@ -21,10 +21,10 @@ describe('roadex portal model', () => {
     );
   });
 
-  it('surfaces the mock server session contract for the active workspace', () => {
+  it('surfaces the Codex server session contract for the active workspace', () => {
     expect(activeSession).toMatchObject({
       lifecycle: 'ready',
-      runnerMode: 'mock',
+      runnerMode: 'codex',
       transport: 'sse',
       deviceBridge: 'disabled',
     });

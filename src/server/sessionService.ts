@@ -1,6 +1,7 @@
 import { appendAudit, createAuditLog, type AuditLog } from './auditLog.js';
+import { createCodexRunner, type SessionRunner } from './codexRunner.js';
 import { denyDeviceBridge } from './deviceBridgePolicy.js';
-import { createPromptResponse, createRunnerIntro } from './mockRunner.js';
+import { createRunnerIntro, createStreamEvent } from './mockRunner.js';
 import { addStreamEvents, createSessionStore, getOwnedSession, type SessionStore } from './sessionStore.js';
 import { approvedWorkspaces, resolveWorkspaceForUser } from './workspacePolicy.js';
 import {
@@ -18,17 +19,19 @@ import {
 export type RoadexState = {
   sessions: SessionStore;
   audit: AuditLog;
+  runner: SessionRunner;
 };
 
-export function createInitialState(): RoadexState {
+export function createInitialState(runner: SessionRunner = createCodexRunner()): RoadexState {
   return {
     sessions: createSessionStore(),
     audit: createAuditLog(),
+    runner,
   };
 }
 
-export function bootstrap(state: RoadexState, user: UserProfile): RoadexBootstrap {
-  const response = createSessionFromApi(state, user, { workspaceId: 'roadex' });
+export async function bootstrap(state: RoadexState, user: UserProfile): Promise<RoadexBootstrap> {
+  const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
   return {
     user,
     workspaces: approvedWorkspaces,
@@ -42,75 +45,96 @@ export function createSessionFromApi(
   state: RoadexState,
   user: UserProfile,
   request: CreateSessionRequest,
-): SessionResponse {
+): Promise<SessionResponse> {
   const workspaceDecision = resolveWorkspaceForUser(user, request.workspaceId);
   if (!workspaceDecision.ok) {
     appendAudit(state.audit, user, 'security.denied', 'workspace', 'denied', workspaceDecision.reason);
-    return deny('workspace', workspaceDecision.reason);
+    return Promise.resolve(deny('workspace', workspaceDecision.reason));
   }
 
   if (request.requestedDeviceBridge) {
     const denied = denyDeviceBridge(state.audit, user);
     if (denied.ok) {
-      return deny('device-bridge', 'Client device bridge is not available.');
+      return Promise.resolve(deny('device-bridge', 'Client device bridge is not available.'));
     }
-    return deny(denied.gate, denied.reason);
+    return Promise.resolve(deny(denied.gate, denied.reason));
   }
 
-  const response = createMockSession({
+  const existing = state.sessions.sessions.find(
+    (session) =>
+      session.userId === user.id &&
+      session.workspace.id === workspaceDecision.workspace.id &&
+      session.lifecycle !== 'closed',
+  );
+  if (existing) {
+    appendAudit(state.audit, user, 'session.attach', existing.id, 'allowed', 'Attached existing Codex session.');
+    return Promise.resolve({ ok: true, session: existing });
+  }
+
+  const session = state.runner.createSession({
     userId: user.id,
     workspace: workspaceDecision.workspace,
   });
-
-  if (!response.ok) {
-    appendAudit(state.audit, user, 'security.denied', response.gate, 'denied', response.reason);
-    return response;
-  }
-
-  const existing = getOwnedSession(state.sessions, user.id, response.session.id);
-  if (existing) {
-    appendAudit(state.audit, user, 'session.attach', existing.id, 'allowed', 'Attached existing mock session.');
-    return { ok: true, session: existing };
-  }
-
-  state.sessions.sessions.push(response.session);
-  addStreamEvents(state.sessions, createRunnerIntro(response.session.id));
+  state.sessions.sessions.push(session);
+  addStreamEvents(state.sessions, [
+    ...createRunnerIntro(session.id),
+    createStreamEvent(session.id, 'system', 'Real Codex runner is enabled for prompts in this server workspace.'),
+  ]);
   appendAudit(
     state.audit,
     user,
     'session.create',
-    response.session.id,
+    session.id,
     'allowed',
-    `Created mock session for ${workspaceDecision.workspace.name}.`,
+    `Created Codex session for ${workspaceDecision.workspace.name}.`,
   );
 
-  return { ok: true, session: response.session };
+  return Promise.resolve({ ok: true, session });
 }
 
-export function submitPrompt(
+export async function submitPrompt(
   state: RoadexState,
   user: UserProfile,
   sessionId: string,
   prompt: string,
-): { events: StreamEvent[]; auditEvent: AuditEvent } | undefined {
+): Promise<{ events: StreamEvent[]; auditEvent: AuditEvent } | undefined> {
   const session = getOwnedSession(state.sessions, user.id, sessionId);
   if (!session || session.lifecycle === 'closed' || session.lifecycle === 'blocked') {
     appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Session is unavailable to this user.');
     return undefined;
   }
 
-  const events = createPromptResponse(session.id, prompt);
-  addStreamEvents(state.sessions, events);
-  const auditEvent = appendAudit(
+  const cleanPrompt = prompt.trim();
+  if (!cleanPrompt) {
+    appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Prompt cannot be empty.');
+    return undefined;
+  }
+  if (cleanPrompt.length > 16_000) {
+    appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Prompt exceeds server limit.');
+    return undefined;
+  }
+
+  session.lifecycle = 'streaming';
+  const started = appendAudit(
     state.audit,
     user,
     'session.prompt',
     sessionId,
     'allowed',
-    'Accepted prompt metadata for mock runner.',
+    'Accepted prompt for Codex runner.',
   );
+  const result = await state.runner.runPrompt({ session, prompt: cleanPrompt });
+  const events = result.events;
+  addStreamEvents(state.sessions, events);
+  if (result.ok) {
+    session.lifecycle = 'ready';
+    appendAudit(state.audit, user, 'session.runner_complete', sessionId, 'allowed', 'Codex runner completed.');
+  } else {
+    session.lifecycle = 'blocked';
+    appendAudit(state.audit, user, 'session.runner_failed', sessionId, 'denied', result.reason);
+  }
 
-  return { events, auditEvent };
+  return { events, auditEvent: started };
 }
 
 export function streamEventsForSession(
@@ -119,7 +143,7 @@ export function streamEventsForSession(
   sessionId: string,
 ): StreamEvent[] | undefined {
   const session = getOwnedSession(state.sessions, user.id, sessionId);
-  if (!session || session.lifecycle === 'closed' || session.lifecycle === 'blocked') {
+  if (!session || session.lifecycle === 'closed') {
     appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'SSE stream denied.');
     return undefined;
   }

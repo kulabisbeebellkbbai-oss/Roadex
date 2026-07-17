@@ -24,10 +24,10 @@ export type SessionSummary = {
 export const activeWorkspace: WorkspaceRef = {
   id: 'roadex',
   name: 'Roadex Portal',
-  root: '/srv/roadex/projects/roadex',
+  root: 'Server-approved workspace',
 };
 
-export const activeSession: RoadexSession = getActiveMockSession();
+export const activeSession: RoadexSession = getActiveSession();
 
 export const navItems: NavItem[] = [
   { label: 'Sessions', icon: TerminalSquare, active: true },
@@ -40,7 +40,7 @@ export const sessionSummaries: SessionSummary[] = [
   {
     project: 'Roadex Portal',
     branch: 'main',
-    state: 'Designing browser shell',
+    state: 'Codex backend enabled',
     signal: 'Live',
   },
   {
@@ -65,13 +65,13 @@ export const portalTargets = [
   { label: 'Client devices', value: 'Deferred until review' },
 ];
 
-function getActiveMockSession(): RoadexSession {
+function getActiveSession(): RoadexSession {
   return {
-    id: `mock-${activeWorkspace.id}`,
+    id: `codex-${activeWorkspace.id}`,
     userId: 'demo-user',
     workspace: activeWorkspace,
     lifecycle: 'ready',
-    runnerMode: 'mock',
+    runnerMode: 'codex',
     transport: 'sse',
     deviceBridge: 'disabled',
     gates: firstMilestoneGates.map((gate) => ({

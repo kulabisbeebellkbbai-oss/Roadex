@@ -80,7 +80,7 @@ function App() {
             <Menu size={20} />
           </button>
           <div className="topbar-title">
-            <span>{roadex.user?.displayName ?? 'Attaching mock user'}</span>
+            <span>{roadex.user?.displayName ?? 'Attaching user'}</span>
             <strong title={session?.workspace.root}>
               {session?.workspace.root ?? '/srv/roadex/projects/...'}
             </strong>
@@ -93,7 +93,7 @@ function App() {
 
         <section className="session-header">
           <div>
-            <span className="eyebrow">Live mock Roadex session</span>
+            <span className="eyebrow">Live Roadex session</span>
             <h1>{session?.workspace.name ?? 'Attaching session'}</h1>
           </div>
           <div className="session-facts" aria-label="Session facts">
@@ -143,7 +143,7 @@ function App() {
               {roadex.transcript.length === 0 && roadex.connectionState === 'connected' ? (
                 <div className="message system">
                   <TerminalSquare size={18} />
-                  <p>Mock session is ready. Send a prompt to test server-side streaming.</p>
+                  <p>Codex session is ready. Send a prompt to run on the server workspace.</p>
                 </div>
               ) : null}
             </div>
@@ -158,8 +158,8 @@ function App() {
                 onChange={(event) => setPrompt(event.target.value)}
                 placeholder={
                   roadex.connectionState === 'streaming'
-                    ? 'Streaming mock response...'
-                    : 'Send a prompt to the server-side mock Codex session'
+                    ? 'Streaming Codex response...'
+                    : 'Send a prompt to the server-side Codex session'
                 }
                 type="text"
                 value={prompt}
@@ -238,7 +238,7 @@ function App() {
                 </li>
               ))}
             </ul>
-            <div className="safeguard-note">Real Codex and device bridge remain disabled.</div>
+            <div className="safeguard-note">Device bridge remains disabled.</div>
           </article>
 
           <article className="section-card device-card">
