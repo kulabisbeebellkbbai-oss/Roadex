@@ -1,3 +1,5 @@
+import type { DeviceBridgePolicy } from './deviceBridgeContracts.js';
+
 export type SessionLifecycle =
   | 'pending'
   | 'ready'
@@ -130,6 +132,7 @@ export type RoadexBootstrap = {
   auditEvents: AuditEvent[];
   streamPreview: StreamEvent[];
   managedThreads: ManagedCodexThread[];
+  deviceBridgePolicy: DeviceBridgePolicy;
 };
 
 export type SessionResponse =
@@ -166,6 +169,6 @@ export const firstMilestoneGates: SecurityGate[] = [
     id: 'device-bridge',
     label: 'Client device bridge',
     state: 'deferred',
-    description: 'USB and local peripherals stay disabled until security review.',
+    description: 'The reviewed foundation is disabled until separate exposure and hardware approvals.',
   },
 ];

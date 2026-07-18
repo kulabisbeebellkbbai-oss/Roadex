@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createJsonFilePersistence, serializeState } from '../src/server/statePersistence';
 import type { RoadexSession, StreamEvent } from '../src/shared/sessionContracts';
+import type { DeviceArtifactMetadata, DeviceBridgeOperationRecord } from '../src/shared/deviceBridgeContracts';
 
 describe('state persistence', () => {
   it('writes Roadex runtime state as mode 600 JSON and reloads it', () => {
@@ -25,6 +26,9 @@ describe('state persistence', () => {
       ],
       auditEvents: [],
       managedThreadClaims: [],
+      deviceArtifacts: [],
+      deviceBridgeApprovals: [],
+      deviceBridgeOperations: [],
     });
 
     expect(readFileSync(path, 'utf8')).toContain('persisted');
@@ -125,6 +129,135 @@ describe('state persistence', () => {
     expect(state.managedThreadClaims).toEqual([
       { threadId: stale.managedThreadId, userId: 'user', claimedAt: stale.createdAt },
     ]);
+  });
+
+  it('persists valid bridge metadata and discards malformed records without credentials', () => {
+    const now = new Date().toISOString();
+    const state = serializeState({
+      deviceArtifacts: [{
+        id: 'artifact',
+        projectId: 'roadex',
+        sessionId: 'session',
+        label: 'firmware.bin',
+        byteLength: 1024,
+        mediaType: 'application/octet-stream',
+        sha256: 'a'.repeat(64),
+        createdAt: now,
+        credential: 'must-be-stripped',
+        firmwareBytes: 'must-be-stripped',
+      } as DeviceArtifactMetadata, {
+        id: 'bad-artifact',
+        projectId: 'roadex',
+        sessionId: 'session',
+        label: 'bad.bin',
+        byteLength: -1,
+        mediaType: 'application/octet-stream',
+        sha256: 'not-a-digest',
+        createdAt: now,
+      }],
+      deviceBridgeApprovals: [{
+        id: 'approval',
+        userId: 'user',
+        sessionId: 'session',
+        projectId: 'roadex',
+        artifactId: 'artifact',
+        expectedDeviceId: 'inventory-device',
+        operation: 'esp32.flash',
+        status: 'pending',
+        createdAt: now,
+        expiresAt: now,
+      }],
+      deviceBridgeOperations: [{
+        id: 'operation',
+        approvalId: 'approval',
+        userId: 'user',
+        sessionId: 'session',
+        projectId: 'roadex',
+        artifactId: 'artifact',
+        expectedDeviceId: 'inventory-device',
+        operation: 'esp32.flash',
+        phase: 'probe',
+        nextEventSequence: 0,
+        phaseExpiresAt: now,
+        reportingExpiresAt: now,
+        createdAt: now,
+        updatedAt: now,
+        token: 'must-be-stripped',
+        probeOutput: 'must-be-stripped',
+      } as DeviceBridgeOperationRecord],
+    });
+
+    expect(state.deviceArtifacts.map((record) => record.id)).toEqual(['artifact']);
+    expect(state.deviceBridgeApprovals.map((record) => record.id)).toEqual(['approval']);
+    expect(state.deviceBridgeOperations.map((record) => record.id)).toEqual(['operation']);
+    expect(JSON.stringify(state)).not.toContain('credential');
+    expect(JSON.stringify(state)).not.toContain('firmwareBytes');
+    expect(JSON.stringify(state)).not.toContain('token');
+    expect(JSON.stringify(state)).not.toContain('probeOutput');
+  });
+
+  it('bounds retained bridge records and removes stale unreferenced artifacts', () => {
+    const now = Date.UTC(2026, 6, 18);
+    const recent = new Date(now).toISOString();
+    const stale = new Date(now - 10_000).toISOString();
+    const artifact = (id: string, createdAt: string): DeviceArtifactMetadata => ({
+      id,
+      projectId: 'roadex',
+      sessionId: 'session',
+      label: `${id}.bin`,
+      byteLength: 1,
+      mediaType: 'application/octet-stream',
+      sha256: 'a'.repeat(64),
+      createdAt,
+    });
+    const state = serializeState(
+      { deviceArtifacts: [artifact('stale', stale), artifact('one', recent), artifact('two', recent)] },
+      { now, deviceBridgeRetentionMs: 5_000, maxDeviceArtifacts: 1 },
+    );
+
+    expect(state.deviceArtifacts).toHaveLength(1);
+    expect(state.deviceArtifacts[0].id).not.toBe('stale');
+  });
+
+  it('preserves every artifact referenced by retained operations beyond the artifact cap', () => {
+    const now = Date.UTC(2026, 6, 18);
+    const recent = new Date(now).toISOString();
+    const stale = new Date(now - 10_000).toISOString();
+    const operation = (id: string, artifactId: string): DeviceBridgeOperationRecord => ({
+      id,
+      approvalId: `approval-${id}`,
+      userId: 'user',
+      sessionId: 'session',
+      projectId: 'roadex',
+      artifactId,
+      expectedDeviceId: 'inventory-device',
+      operation: 'esp32.flash',
+      phase: 'probe',
+      nextEventSequence: 0,
+      phaseExpiresAt: recent,
+      reportingExpiresAt: recent,
+      createdAt: recent,
+      updatedAt: recent,
+    });
+    const artifact = (id: string): DeviceArtifactMetadata => ({
+      id,
+      projectId: 'roadex',
+      sessionId: 'session',
+      label: `${id}.bin`,
+      byteLength: 1,
+      mediaType: 'application/octet-stream',
+      sha256: 'a'.repeat(64),
+      createdAt: stale,
+    });
+    const state = serializeState(
+      {
+        deviceArtifacts: [artifact('one'), artifact('two')],
+        deviceBridgeOperations: [operation('one', 'one'), operation('two', 'two')],
+      },
+      { now, deviceBridgeRetentionMs: 5_000, maxDeviceArtifacts: 1 },
+    );
+
+    expect(state.deviceArtifacts.map((record) => record.id).sort()).toEqual(['one', 'two']);
   });
 });
 

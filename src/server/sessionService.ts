@@ -1,6 +1,6 @@
 import { appendAudit, createAuditLogFromEvents, type AuditLog } from './auditLog.js';
 import { createCodexRunner, type SessionRunner } from './codexRunner.js';
-import { denyDeviceBridge } from './deviceBridgePolicy.js';
+import { denyDeviceBridge, getDeviceBridgePolicy } from './deviceBridgePolicy.js';
 import { createRunnerIntro, createStreamEvent } from './mockRunner.js';
 import { addStreamEvents, createSessionStoreFromState, getOwnedSession, type SessionStore } from './sessionStore.js';
 import {
@@ -25,6 +25,11 @@ import {
   type ReopenSessionResponse,
   type PromptAcceptedResponse,
 } from '../shared/sessionContracts.js';
+import type {
+  DeviceArtifactMetadata,
+  DeviceBridgeApprovalRecord,
+  DeviceBridgeOperationRecord,
+} from '../shared/deviceBridgeContracts.js';
 
 export type RoadexState = {
   sessions: SessionStore;
@@ -38,6 +43,9 @@ export type RoadexState = {
   maxActiveRuns: number;
   maxActiveSessionsPerUser: number;
   managedThreadClaims: Map<string, ManagedThreadClaim>;
+  deviceArtifacts: Map<string, DeviceArtifactMetadata>;
+  deviceBridgeApprovals: Map<string, DeviceBridgeApprovalRecord>;
+  deviceBridgeOperations: Map<string, DeviceBridgeOperationRecord>;
 };
 
 type StreamSubscriber = {
@@ -75,6 +83,9 @@ export function createInitialState(
     maxActiveRuns: Number(process.env.ROADEX_MAX_ACTIVE_RUNS ?? 2),
     maxActiveSessionsPerUser: readPositiveInteger(process.env.ROADEX_MAX_ACTIVE_SESSIONS_PER_USER, 8),
     managedThreadClaims,
+    deviceArtifacts: new Map(persisted.deviceArtifacts.map((record) => [record.id, record])),
+    deviceBridgeApprovals: new Map(persisted.deviceBridgeApprovals.map((record) => [record.id, record])),
+    deviceBridgeOperations: new Map(persisted.deviceBridgeOperations.map((record) => [record.id, record])),
   };
 }
 
@@ -98,6 +109,7 @@ export async function bootstrap(state: RoadexState, user: UserProfile): Promise<
     auditEvents: visibleAuditEvents(state.audit, user).slice(-8).reverse(),
     streamPreview: state.sessions.streamEvents.filter((event) => visibleSessionIds.has(event.sessionId)).slice(-8),
     managedThreads: canAccessManagedCodexProjects(user) ? safeManagedThreads(user) : [],
+    deviceBridgePolicy: getDeviceBridgePolicy(),
   };
 }
 
@@ -580,7 +592,7 @@ export function createMockSession(request: SessionRequest): SessionResponse {
   }
 
   if (request.requestedDeviceBridge) {
-    return deny('device-bridge', 'Client device bridge is disabled until the core portal passes review.');
+    return deny('device-bridge', 'Client device bridge implementation is disabled pending separate exposure and hardware approvals.');
   }
 
   const session: RoadexSession = {
@@ -616,6 +628,9 @@ function saveState(state: RoadexState): void {
     streamEvents: state.sessions.streamEvents,
     auditEvents: state.audit.events,
     managedThreadClaims: [...state.managedThreadClaims.values()],
+    deviceArtifacts: [...state.deviceArtifacts.values()],
+    deviceBridgeApprovals: [...state.deviceBridgeApprovals.values()],
+    deviceBridgeOperations: [...state.deviceBridgeOperations.values()],
   }));
 }
 

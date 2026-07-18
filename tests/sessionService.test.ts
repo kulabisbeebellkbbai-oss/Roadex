@@ -146,6 +146,21 @@ describe('createMockSession', () => {
     });
   });
 
+  it('reports only the disabled device bridge foundation in bootstrap', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const result = await bootstrap(state, mockUser);
+
+    expect(result.deviceBridgePolicy).toEqual({
+      state: 'disabled',
+      approvedFoundation: true,
+      operations: ['esp32.flash'],
+      reason: expect.stringContaining('disabled'),
+    });
+    expect(state.deviceArtifacts.size).toBe(0);
+    expect(state.deviceBridgeApprovals.size).toBe(0);
+    expect(state.deviceBridgeOperations.size).toBe(0);
+  });
+
   it('creates a ready mock session for an authenticated user and approved workspace', () => {
     const response = createMockSession({
       userId: 'user-1',

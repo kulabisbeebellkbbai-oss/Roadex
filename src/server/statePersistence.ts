@@ -1,12 +1,20 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AuditEvent, ManagedThreadClaim, RoadexSession, StreamEvent } from '../shared/sessionContracts.js';
+import type {
+  DeviceArtifactMetadata,
+  DeviceBridgeApprovalRecord,
+  DeviceBridgeOperationRecord,
+} from '../shared/deviceBridgeContracts.js';
 
 export type PersistedRoadexState = {
   sessions: RoadexSession[];
   streamEvents: StreamEvent[];
   auditEvents: AuditEvent[];
   managedThreadClaims: ManagedThreadClaim[];
+  deviceArtifacts: DeviceArtifactMetadata[];
+  deviceBridgeApprovals: DeviceBridgeApprovalRecord[];
+  deviceBridgeOperations: DeviceBridgeOperationRecord[];
 };
 
 export type StatePersistence = {
@@ -20,6 +28,10 @@ export type RetentionOptions = {
   maxStreamEvents?: number;
   maxAuditEvents?: number;
   sessionRetentionMs?: number;
+  maxDeviceArtifacts?: number;
+  maxDeviceApprovals?: number;
+  maxDeviceOperations?: number;
+  deviceBridgeRetentionMs?: number;
 };
 
 export function createMemoryPersistence(initial?: Partial<PersistedRoadexState>): StatePersistence {
@@ -28,6 +40,9 @@ export function createMemoryPersistence(initial?: Partial<PersistedRoadexState>)
     streamEvents: initial?.streamEvents ?? [],
     auditEvents: initial?.auditEvents ?? [],
     managedThreadClaims: initial?.managedThreadClaims ?? [],
+    deviceArtifacts: initial?.deviceArtifacts ?? [],
+    deviceBridgeApprovals: initial?.deviceBridgeApprovals ?? [],
+    deviceBridgeOperations: initial?.deviceBridgeOperations ?? [],
   };
   return {
     load() {
@@ -80,6 +95,9 @@ function sanitizeState(state: Partial<PersistedRoadexState>, now = Date.now()): 
     managedThreadClaims: (state.managedThreadClaims ?? []).filter(
       (claim) => Boolean(cleanOptionalString(claim.threadId) && cleanOptionalString(claim.userId)),
     ),
+    deviceArtifacts: (state.deviceArtifacts ?? []).flatMap((record) => sanitizeArtifact(record) ?? []),
+    deviceBridgeApprovals: (state.deviceBridgeApprovals ?? []).flatMap((record) => sanitizeApproval(record) ?? []),
+    deviceBridgeOperations: (state.deviceBridgeOperations ?? []).flatMap((record) => sanitizeOperation(record) ?? []),
   };
 }
 
@@ -89,7 +107,12 @@ function applyRetention(state: PersistedRoadexState, options: RetentionOptions):
   const maxStreamEvents = options.maxStreamEvents ?? numberFromEnv('ROADEX_STATE_MAX_STREAM_EVENTS', 500);
   const maxAuditEvents = options.maxAuditEvents ?? numberFromEnv('ROADEX_STATE_MAX_AUDIT_EVENTS', 500);
   const sessionRetentionMs = options.sessionRetentionMs ?? numberFromEnv('ROADEX_SESSION_RETENTION_MS', 2_592_000_000);
+  const deviceBridgeRetentionMs = options.deviceBridgeRetentionMs ?? numberFromEnv('ROADEX_DEVICE_BRIDGE_RETENTION_MS', 2_592_000_000);
+  const maxDeviceArtifacts = options.maxDeviceArtifacts ?? numberFromEnv('ROADEX_MAX_DEVICE_ARTIFACTS', 100);
+  const maxDeviceApprovals = options.maxDeviceApprovals ?? numberFromEnv('ROADEX_MAX_DEVICE_APPROVALS', 200);
+  const maxDeviceOperations = options.maxDeviceOperations ?? numberFromEnv('ROADEX_MAX_DEVICE_OPERATIONS', 200);
   const cutoff = now - sessionRetentionMs;
+  const deviceCutoff = now - deviceBridgeRetentionMs;
   const retainedSessionIds = new Set(
     state.sessions
       .filter((session) => {
@@ -103,6 +126,30 @@ function applyRetention(state: PersistedRoadexState, options: RetentionOptions):
       .map((session) => session.id),
   );
 
+  const deviceBridgeApprovals = retainByTimestamp(
+    state.deviceBridgeApprovals,
+    (record) => record.createdAt,
+    deviceCutoff,
+    maxDeviceApprovals,
+  );
+  const deviceBridgeOperations = retainByTimestamp(
+    state.deviceBridgeOperations,
+    (record) => record.updatedAt,
+    deviceCutoff,
+    maxDeviceOperations,
+  );
+  const referencedArtifactIds = new Set([
+    ...deviceBridgeApprovals.map((record) => record.artifactId),
+    ...deviceBridgeOperations.map((record) => record.artifactId),
+  ]);
+  const referencedArtifacts = state.deviceArtifacts.filter((record) => referencedArtifactIds.has(record.id));
+  const unreferencedArtifactSlots = Math.max(0, maxDeviceArtifacts - referencedArtifacts.length);
+  const unreferencedArtifacts = state.deviceArtifacts
+    .filter((record) => !referencedArtifactIds.has(record.id) && Date.parse(record.createdAt) >= deviceCutoff)
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+    .slice(0, unreferencedArtifactSlots);
+  const deviceArtifacts = [...referencedArtifacts, ...unreferencedArtifacts];
+
   return {
     sessions: state.sessions.filter((session) => retainedSessionIds.has(session.id)),
     streamEvents: state.streamEvents
@@ -110,6 +157,9 @@ function applyRetention(state: PersistedRoadexState, options: RetentionOptions):
       .slice(-maxStreamEvents),
     auditEvents: state.auditEvents.slice(-maxAuditEvents),
     managedThreadClaims: state.managedThreadClaims,
+    deviceArtifacts,
+    deviceBridgeApprovals,
+    deviceBridgeOperations,
   };
 }
 
@@ -134,7 +184,118 @@ function emptyState(): PersistedRoadexState {
     streamEvents: [],
     auditEvents: [],
     managedThreadClaims: [],
+    deviceArtifacts: [],
+    deviceBridgeApprovals: [],
+    deviceBridgeOperations: [],
   };
+}
+
+function sanitizeArtifact(record: DeviceArtifactMetadata): DeviceArtifactMetadata | undefined {
+  if (!(
+    validBoundedString(record.id, 128) &&
+    validBoundedString(record.projectId, 128) &&
+    validBoundedString(record.sessionId, 128) &&
+    validBoundedString(record.label, 160) &&
+    Number.isSafeInteger(record.byteLength) &&
+    record.byteLength > 0 &&
+    record.mediaType === 'application/octet-stream' &&
+    /^[a-f0-9]{64}$/i.test(record.sha256) &&
+    validIsoDate(record.createdAt)
+  )) return undefined;
+  return {
+    id: record.id.trim(),
+    projectId: record.projectId.trim(),
+    sessionId: record.sessionId.trim(),
+    label: record.label.trim(),
+    byteLength: record.byteLength,
+    mediaType: 'application/octet-stream',
+    sha256: record.sha256.toLowerCase(),
+    createdAt: new Date(record.createdAt).toISOString(),
+  };
+}
+
+function sanitizeApproval(record: DeviceBridgeApprovalRecord): DeviceBridgeApprovalRecord | undefined {
+  if (!(
+    validBoundedString(record.id, 128) &&
+    validBoundedString(record.userId, 128) &&
+    validBoundedString(record.sessionId, 128) &&
+    validBoundedString(record.projectId, 128) &&
+    validBoundedString(record.artifactId, 128) &&
+    validBoundedString(record.expectedDeviceId, 128) &&
+    record.operation === 'esp32.flash' &&
+    ['pending', 'consumed', 'revoked', 'expired'].includes(record.status) &&
+    validIsoDate(record.createdAt) &&
+    validIsoDate(record.expiresAt)
+  )) return undefined;
+  return {
+    id: record.id.trim(),
+    userId: record.userId.trim(),
+    sessionId: record.sessionId.trim(),
+    projectId: record.projectId.trim(),
+    artifactId: record.artifactId.trim(),
+    expectedDeviceId: record.expectedDeviceId.trim(),
+    operation: 'esp32.flash',
+    status: record.status,
+    createdAt: new Date(record.createdAt).toISOString(),
+    expiresAt: new Date(record.expiresAt).toISOString(),
+  };
+}
+
+function sanitizeOperation(record: DeviceBridgeOperationRecord): DeviceBridgeOperationRecord | undefined {
+  if (!(
+    validBoundedString(record.id, 128) &&
+    validBoundedString(record.approvalId, 128) &&
+    validBoundedString(record.userId, 128) &&
+    validBoundedString(record.sessionId, 128) &&
+    validBoundedString(record.projectId, 128) &&
+    validBoundedString(record.artifactId, 128) &&
+    validBoundedString(record.expectedDeviceId, 128) &&
+    record.operation === 'esp32.flash' &&
+    ['probe', 'confirmation', 'destructive', 'reporting', 'completed', 'failed', 'cancelled'].includes(record.phase) &&
+    Number.isSafeInteger(record.nextEventSequence) &&
+    record.nextEventSequence >= 0 &&
+    validIsoDate(record.phaseExpiresAt) &&
+    validIsoDate(record.reportingExpiresAt) &&
+    validIsoDate(record.createdAt) &&
+    validIsoDate(record.updatedAt)
+  )) return undefined;
+  return {
+    id: record.id.trim(),
+    approvalId: record.approvalId.trim(),
+    userId: record.userId.trim(),
+    sessionId: record.sessionId.trim(),
+    projectId: record.projectId.trim(),
+    artifactId: record.artifactId.trim(),
+    expectedDeviceId: record.expectedDeviceId.trim(),
+    operation: 'esp32.flash',
+    phase: record.phase,
+    nextEventSequence: record.nextEventSequence,
+    phaseExpiresAt: new Date(record.phaseExpiresAt).toISOString(),
+    reportingExpiresAt: new Date(record.reportingExpiresAt).toISOString(),
+    createdAt: new Date(record.createdAt).toISOString(),
+    updatedAt: new Date(record.updatedAt).toISOString(),
+  };
+}
+
+function validIsoDate(value: string): boolean {
+  return typeof value === 'string' && !Number.isNaN(Date.parse(value));
+}
+
+function validBoundedString(value: string, maxLength: number): boolean {
+  const cleaned = cleanOptionalString(value);
+  return Boolean(cleaned && cleaned.length <= maxLength);
+}
+
+function retainByTimestamp<T>(
+  records: T[],
+  timestamp: (record: T) => string,
+  cutoff: number,
+  maximum: number,
+): T[] {
+  return records
+    .filter((record) => Date.parse(timestamp(record)) >= cutoff)
+    .sort((left, right) => Date.parse(timestamp(right)) - Date.parse(timestamp(left)))
+    .slice(0, maximum);
 }
 
 function cloneState(state: PersistedRoadexState): PersistedRoadexState {

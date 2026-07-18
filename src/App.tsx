@@ -346,7 +346,11 @@ function App() {
               <PlugZap size={22} />
               <div>
                 <span>Client devices</span>
-                <strong>Deferred until review</strong>
+                <strong>
+                  {roadex.deviceBridgePolicy?.state === 'disabled'
+                    ? `${deviceTransportLabel(roadex.browserDeviceCapability.transport)} · disabled`
+                    : 'Policy unavailable'}
+                </strong>
               </div>
             </article>
           </aside>
@@ -411,4 +415,10 @@ function readLayoutPreference(): string | null {
   } catch {
     return null;
   }
+}
+
+function deviceTransportLabel(transport: 'web-serial' | 'webusb-polyfill' | 'unavailable'): string {
+  if (transport === 'web-serial') return 'Web Serial detected';
+  if (transport === 'webusb-polyfill') return 'Android WebUSB detected';
+  return 'Browser unsupported';
 }

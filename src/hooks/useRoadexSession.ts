@@ -19,6 +19,8 @@ import type {
   WorkspaceRef,
 } from '../shared/sessionContracts';
 import { isRunnerTerminal, lifecycleAfterTranscript, lifecycleForTerminalEvent } from './sessionSelection';
+import { detectDeviceCapability } from '../client/deviceCapability';
+import type { BrowserDeviceCapability, DeviceBridgePolicy } from '../shared/deviceBridgeContracts';
 
 export type ConnectionState = 'loading' | 'connected' | 'streaming' | 'error';
 
@@ -29,6 +31,8 @@ export type RoadexSessionState = {
   workspaces: WorkspaceRef[];
   sessions: RoadexSession[];
   managedThreads: ManagedCodexThread[];
+  deviceBridgePolicy?: DeviceBridgePolicy;
+  browserDeviceCapability: BrowserDeviceCapability;
   session?: RoadexSession;
   archivedSessions: RoadexSession[];
   transcript: StreamEvent[];
@@ -53,6 +57,8 @@ export function useRoadexSession(): RoadexSessionState {
   const [workspaces, setWorkspaces] = useState<WorkspaceRef[]>([]);
   const [sessions, setSessions] = useState<RoadexSession[]>([]);
   const [managedThreads, setManagedThreads] = useState<ManagedCodexThread[]>([]);
+  const [deviceBridgePolicy, setDeviceBridgePolicy] = useState<DeviceBridgePolicy>();
+  const browserDeviceCapability = useMemo(() => detectDeviceCapability(window.navigator), []);
   const [session, setSession] = useState<RoadexSession>();
   const [archivedSessions, setArchivedSessions] = useState<RoadexSession[]>([]);
   const [transcript, setTranscript] = useState<StreamEvent[]>([]);
@@ -84,6 +90,7 @@ export function useRoadexSession(): RoadexSessionState {
       setWorkspaces(result.bootstrap.workspaces);
       setSessions(result.bootstrap.sessions);
       setManagedThreads(result.bootstrap.managedThreads);
+      setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
       setSession(activeSession);
       const archived = await listArchivedSessions(result.token);
       setArchivedSessions(archived.sessions);
@@ -193,6 +200,7 @@ export function useRoadexSession(): RoadexSessionState {
       setWorkspaces(result.bootstrap.workspaces);
       setSessions(result.bootstrap.sessions);
       setManagedThreads(result.bootstrap.managedThreads);
+      setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
       setSession(activeSession);
       setArchivedSessions(archived.sessions);
       setAuditEvents([response.auditEvent, ...result.bootstrap.auditEvents].slice(0, 8));
@@ -225,6 +233,7 @@ export function useRoadexSession(): RoadexSessionState {
       setWorkspaces(result.bootstrap.workspaces);
       setSessions(result.bootstrap.sessions);
       setManagedThreads(result.bootstrap.managedThreads);
+      setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
       setSession(response.session);
       setArchivedSessions(archived.sessions);
       setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
@@ -249,6 +258,7 @@ export function useRoadexSession(): RoadexSessionState {
         const nextSession = result.session;
         setSessions(result.bootstrap.sessions);
         setManagedThreads(result.bootstrap.managedThreads);
+        setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
         setSession(nextSession);
         setAuditEvents(result.bootstrap.auditEvents);
         setTranscript(result.bootstrap.streamPreview.filter((event) => event.sessionId === nextSession.id));
@@ -273,6 +283,7 @@ export function useRoadexSession(): RoadexSessionState {
         const result = await createSession(token, { workspaceId, newThread: true });
         setSessions(result.bootstrap.sessions);
         setManagedThreads(result.bootstrap.managedThreads);
+        setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
         setSession(result.session);
         setAuditEvents(result.bootstrap.auditEvents);
         await refreshStream(result.session);
@@ -330,6 +341,7 @@ export function useRoadexSession(): RoadexSessionState {
         const result = await createSession(token, { workspaceId, managedThreadId: threadId });
         setSessions(result.bootstrap.sessions);
         setManagedThreads(result.bootstrap.managedThreads);
+        setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
         setSession(result.session);
         setAuditEvents(result.bootstrap.auditEvents);
         await refreshStream(result.session);
@@ -354,6 +366,7 @@ export function useRoadexSession(): RoadexSessionState {
       const result = await createSession(token, { workspaceId: workspaces[0].id });
       setSessions(result.bootstrap.sessions);
       setManagedThreads(result.bootstrap.managedThreads);
+      setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
       setSession(result.session);
       setAuditEvents(result.bootstrap.auditEvents);
       setTranscript(result.bootstrap.streamPreview);
@@ -371,6 +384,8 @@ export function useRoadexSession(): RoadexSessionState {
       workspaces,
       sessions,
       managedThreads,
+      deviceBridgePolicy,
+      browserDeviceCapability,
       session,
       archivedSessions,
       transcript,
@@ -398,6 +413,8 @@ export function useRoadexSession(): RoadexSessionState {
       error,
       notice,
       managedThreads,
+      deviceBridgePolicy,
+      browserDeviceCapability,
       openWorkspace,
       reopenArchivedSession,
       retry,
