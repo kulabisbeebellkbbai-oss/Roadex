@@ -18,6 +18,7 @@ import {
   listDeviceArtifactMetadata,
   listDeviceInventoryBindings,
   listArchivedSessions,
+  observeDeviceDescriptor,
   reopenSession,
   registerDeviceArtifactMetadata,
   requestDeviceBridgeIntake,
@@ -169,6 +170,7 @@ describe('createMockSession', () => {
       approvedFoundation: true,
       operations: ['esp32.flash'],
       requestIntakeEnabled: false,
+      descriptorObservationEnabled: false,
       operationsEnabled: false,
       reason: expect.stringContaining('disabled'),
     });
@@ -196,6 +198,76 @@ describe('createMockSession', () => {
 });
 
 describe('Roadex session service', () => {
+  it('observes an allowlisted USB descriptor without persisting or returning the raw serial', async () => {
+    const enabled = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED;
+    const descriptorKey = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY;
+    const auditKey = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    try {
+      process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY = 'descriptor-observation-hmac-key-test-32';
+      process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+      const persistence = createMemoryPersistence();
+      const state = createInitialState(fakeRunner(), persistence);
+      const user = protectedGatewayUser();
+      const created = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const binding = seedDeviceInventoryBinding(state);
+
+      const result = observeDeviceDescriptor(state, user, created.session.id, {
+        inventoryBindingId: binding.id,
+        vendorId: 0x10c4,
+        productId: 0xea60,
+        serialNumber: 'Private-USB-Serial',
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        observation: { status: 'observed', verification: 'unverified' },
+      });
+      expect(JSON.stringify(result)).not.toContain('Private-USB-Serial');
+      expect(JSON.stringify(result)).not.toContain('descriptorFingerprint');
+      const stored = [...state.deviceDescriptorObservations.values()][0];
+      expect(stored.descriptorFingerprint).toBe(createHmac('sha256', 'descriptor-observation-hmac-key-test-32')
+        .update('roadex-usb-descriptor:v1:4292:60000:private-usb-serial')
+        .digest('hex'));
+      expect(JSON.stringify(persistence.load())).not.toContain('Private-USB-Serial');
+      expect(state.deviceBridgeRequests.size).toBe(0);
+      expect(state.deviceBridgeApprovals.size).toBe(0);
+      expect(state.deviceBridgeOperations.size).toBe(0);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED', enabled);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY', descriptorKey);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', auditKey);
+    }
+  });
+
+  it('rejects unsupported USB descriptors and leaves observation state unchanged', async () => {
+    const enabled = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED;
+    const descriptorKey = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY;
+    const auditKey = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    try {
+      process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY = 'descriptor-observation-hmac-key-test-32';
+      process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const created = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const binding = seedDeviceInventoryBinding(state);
+      expect(observeDeviceDescriptor(state, user, created.session.id, {
+        inventoryBindingId: binding.id,
+        vendorId: 1,
+        productId: 2,
+      })).toMatchObject({ ok: false, classification: 'schema' });
+      expect(state.deviceDescriptorObservations.size).toBe(0);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED', enabled);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY', descriptorKey);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', auditKey);
+    }
+  });
   it('creates a session from a server-owned workspace id and records audit', async () => {
     const state = createInitialState(fakeRunner(), createMemoryPersistence());
     const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });

@@ -1,4 +1,5 @@
 import type { DeviceBridgePolicy } from './deviceBridgeContracts.js';
+import type { DeviceInventoryBindingRef } from './deviceBridgeContracts.js';
 
 export type SessionLifecycle =
   | 'pending'
@@ -46,6 +47,7 @@ export type AuditEvent = {
     | 'device_bridge.artifact'
     | 'device_bridge.inventory_binding'
     | 'device_bridge.approval'
+    | 'device_bridge.descriptor_observation'
     | 'device_bridge.request'
     | 'security.denied';
   resource: string;
@@ -137,6 +139,7 @@ export type RoadexBootstrap = {
   streamPreview: StreamEvent[];
   managedThreads: ManagedCodexThread[];
   deviceBridgePolicy: DeviceBridgePolicy;
+  deviceInventoryBindingRefs: DeviceInventoryBindingRef[];
 };
 
 export type SessionResponse =

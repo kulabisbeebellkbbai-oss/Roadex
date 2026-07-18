@@ -6,6 +6,7 @@ import type {
   DeviceBridgeApprovalRecord,
   DeviceBridgeOperationRecord,
   DeviceBridgeRequestRecord,
+  DeviceDescriptorObservationRecord,
   DeviceInventoryBindingRecord,
 } from '../shared/deviceBridgeContracts.js';
 
@@ -19,6 +20,7 @@ export type PersistedRoadexState = {
   deviceBridgeApprovals: DeviceBridgeApprovalRecord[];
   deviceBridgeOperations: DeviceBridgeOperationRecord[];
   deviceInventoryBindings: DeviceInventoryBindingRecord[];
+  deviceDescriptorObservations: DeviceDescriptorObservationRecord[];
 };
 
 export type StatePersistence = {
@@ -50,6 +52,7 @@ export function createMemoryPersistence(initial?: Partial<PersistedRoadexState>)
     deviceBridgeApprovals: initial?.deviceBridgeApprovals ?? [],
     deviceBridgeOperations: initial?.deviceBridgeOperations ?? [],
     deviceInventoryBindings: initial?.deviceInventoryBindings ?? [],
+    deviceDescriptorObservations: initial?.deviceDescriptorObservations ?? [],
   };
   return {
     load() {
@@ -107,6 +110,7 @@ function sanitizeState(state: Partial<PersistedRoadexState>, now = Date.now()): 
     deviceBridgeApprovals: (state.deviceBridgeApprovals ?? []).flatMap((record) => sanitizeApproval(record) ?? []),
     deviceBridgeOperations: (state.deviceBridgeOperations ?? []).flatMap((record) => sanitizeOperation(record) ?? []),
     deviceInventoryBindings: (state.deviceInventoryBindings ?? []).flatMap((record) => sanitizeInventoryBinding(record) ?? []),
+    deviceDescriptorObservations: (state.deviceDescriptorObservations ?? []).flatMap((record) => sanitizeDescriptorObservation(record) ?? []),
   };
 }
 
@@ -179,6 +183,12 @@ function applyRetention(state: PersistedRoadexState, options: RetentionOptions):
     deviceBridgeApprovals,
     deviceBridgeOperations,
     deviceInventoryBindings: state.deviceInventoryBindings,
+    deviceDescriptorObservations: retainByTimestamp(
+      state.deviceDescriptorObservations,
+      (record) => record.createdAt,
+      deviceCutoff,
+      maxDeviceRequests,
+    ),
   };
 }
 
@@ -208,6 +218,36 @@ function emptyState(): PersistedRoadexState {
     deviceBridgeApprovals: [],
     deviceBridgeOperations: [],
     deviceInventoryBindings: [],
+    deviceDescriptorObservations: [],
+  };
+}
+
+function sanitizeDescriptorObservation(record: DeviceDescriptorObservationRecord): DeviceDescriptorObservationRecord | undefined {
+  if (!(
+    validBoundedString(record.id, 128) &&
+    validBoundedString(record.userId, 128) &&
+    validBoundedString(record.sessionId, 128) &&
+    validBoundedString(record.projectId, 128) &&
+    validBoundedString(record.inventoryBindingId, 128) &&
+    Number.isInteger(record.vendorId) && record.vendorId >= 0 && record.vendorId <= 65535 &&
+    Number.isInteger(record.productId) && record.productId >= 0 && record.productId <= 65535 &&
+    /^[a-f0-9]{64}$/i.test(record.descriptorFingerprint) &&
+    record.status === 'observed' &&
+    record.verification === 'unverified' &&
+    validIsoDate(record.createdAt)
+  )) return undefined;
+  return {
+    id: record.id.trim(),
+    userId: record.userId.trim(),
+    sessionId: record.sessionId.trim(),
+    projectId: record.projectId.trim(),
+    inventoryBindingId: record.inventoryBindingId.trim(),
+    vendorId: record.vendorId,
+    productId: record.productId,
+    descriptorFingerprint: record.descriptorFingerprint.toLowerCase(),
+    status: 'observed',
+    verification: 'unverified',
+    createdAt: new Date(record.createdAt).toISOString(),
   };
 }
 

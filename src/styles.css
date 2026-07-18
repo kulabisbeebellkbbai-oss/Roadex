@@ -874,6 +874,33 @@ button {
   background: #fff8e9;
 }
 
+.descriptor-observation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+
+.descriptor-observation > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.descriptor-observation span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.descriptor-observation button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+}
+
 .safeguard-note {
   margin-top: 14px;
   color: var(--muted);

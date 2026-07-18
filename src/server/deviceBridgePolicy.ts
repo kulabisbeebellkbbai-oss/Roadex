@@ -6,6 +6,8 @@ const disabledReason = 'Client device bridge implementation is disabled pending 
 const inventoryJsonEnv = 'ROADEX_DEVICE_BRIDGE_INVENTORY_JSON';
 const requestIntakeEnabledEnv = 'ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED';
 const approvalEnabledEnv = 'ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED';
+const descriptorObservationEnabledEnv = 'ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED';
+const descriptorHmacKeyEnv = 'ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY';
 const metadataRegistryEnabledEnv = 'ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED';
 const auditHmacKeyEnv = 'ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY';
 const identityHmacKeyEnv = 'ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY';
@@ -21,6 +23,7 @@ export function getDeviceBridgePolicy(): DeviceBridgePolicy {
     approvedFoundation: true,
     operations: ['esp32.flash'],
     requestIntakeEnabled: deviceBridgeRequestIntakeEnabled(),
+    descriptorObservationEnabled: deviceBridgeDescriptorObservationEnabled(),
     operationsEnabled: deviceBridgeOperationsEnabled(),
     reason: disabledReason,
   };
@@ -32,6 +35,15 @@ export function deviceBridgeRequestIntakeEnabled(): boolean {
 
 export function deviceBridgeApprovalEnabled(): boolean {
   return strictEnabledByEnv(process.env[approvalEnabledEnv]);
+}
+
+export function deviceBridgeDescriptorObservationEnabled(): boolean {
+  return strictEnabledByEnv(process.env[descriptorObservationEnabledEnv]);
+}
+
+export function deviceBridgeDescriptorHmacKey(): string | undefined {
+  const key = process.env[descriptorHmacKeyEnv]?.trim();
+  return key && key.length >= 32 ? key : undefined;
 }
 
 export function deviceBridgeMetadataRegistryEnabled(): boolean {
@@ -92,6 +104,10 @@ export function isAvailableDeviceBridgeIntakeRoute(method: string | undefined, p
 
 export function isAvailableDeviceBridgeApprovalRoute(method: string | undefined, pathname: string): boolean {
   return method === 'POST' && /^\/api\/device-bridge\/requests\/[^/]+\/approve$/.test(pathname);
+}
+
+export function isAvailableDeviceDescriptorObservationRoute(method: string | undefined, pathname: string): boolean {
+  return method === 'POST' && /^\/api\/sessions\/[^/]+\/device-bridge\/observations$/.test(pathname);
 }
 
 export function isAvailableDeviceBridgeMetadataRoute(method: string | undefined, pathname: string): boolean {

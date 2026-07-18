@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   deviceBridgeIdentityHmacKey,
+  deviceBridgeDescriptorHmacKey,
+  deviceBridgeDescriptorObservationEnabled,
   deviceBridgeMetadataRegistryEnabled,
   deviceBridgeOperationsEnabled,
   deviceBridgeApprovalEnabled,
@@ -9,6 +11,7 @@ import {
   isAvailableDeviceBridgeApprovalRoute,
   isAvailableDeviceBridgeIntakeRoute,
   isAvailableDeviceBridgeMetadataRoute,
+  isAvailableDeviceDescriptorObservationRoute,
 } from '../src/server/deviceBridgePolicy';
 
 describe('device bridge intake policy', () => {
@@ -100,6 +103,38 @@ describe('device bridge intake policy', () => {
       expect(deviceBridgeIdentityHmacKey()).toBe('test-device-bridge-identity-hmac-key-32');
     } finally {
       restoreEnv('ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY', original);
+    }
+  });
+
+  it('keeps descriptor observation default-off with a separate HMAC key', () => {
+    const enabled = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED;
+    const key = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY;
+    try {
+      delete process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED;
+      delete process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY;
+      expect(deviceBridgeDescriptorObservationEnabled()).toBe(false);
+      expect(deviceBridgeDescriptorHmacKey()).toBeUndefined();
+      process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY = 'descriptor-observation-hmac-key-test-32';
+      expect(deviceBridgeDescriptorObservationEnabled()).toBe(true);
+      expect(deviceBridgeDescriptorHmacKey()).toBe('descriptor-observation-hmac-key-test-32');
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED', enabled);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY', key);
+    }
+  });
+
+  it('exposes only the exact descriptor observation route', () => {
+    expect(isAvailableDeviceDescriptorObservationRoute(
+      'POST',
+      '/api/sessions/session-1/device-bridge/observations',
+    )).toBe(true);
+    for (const [method, path] of [
+      ['GET', '/api/sessions/session-1/device-bridge/observations'],
+      ['POST', '/api/sessions/session-1/device-bridge/observations/one'],
+      ['POST', '/api/sessions/session-1/device-bridge/usb'],
+    ] as const) {
+      expect(isAvailableDeviceDescriptorObservationRoute(method, path)).toBe(false);
     }
   });
 

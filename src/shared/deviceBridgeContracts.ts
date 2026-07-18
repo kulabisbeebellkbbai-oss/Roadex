@@ -3,14 +3,55 @@ export type DeviceBridgePolicy = {
   approvedFoundation: true;
   operations: ['esp32.flash'];
   requestIntakeEnabled: boolean;
+  descriptorObservationEnabled: boolean;
   operationsEnabled: false;
   reason: string;
 };
 
 export type BrowserDeviceCapability = {
-  transport: 'web-serial' | 'webusb-polyfill' | 'unavailable';
+  transport: 'webusb' | 'unavailable';
   deviceAccessRequested: false;
 };
+
+export type DeviceInventoryBindingRef = {
+  id: string;
+  projectId: string;
+};
+
+export type DeviceDescriptorObservationRecord = {
+  id: string;
+  userId: string;
+  sessionId: string;
+  projectId: string;
+  inventoryBindingId: string;
+  vendorId: number;
+  productId: number;
+  descriptorFingerprint: string;
+  status: 'observed';
+  verification: 'unverified';
+  createdAt: string;
+};
+
+export type DeviceDescriptorObservationPublic = Omit<
+  DeviceDescriptorObservationRecord,
+  'userId' | 'descriptorFingerprint'
+>;
+
+export type DeviceDescriptorObservationPayload = {
+  inventoryBindingId: string;
+  vendorId: number;
+  productId: number;
+  serialNumber?: string;
+};
+
+export type DeviceDescriptorObservationResponse =
+  | { ok: true; observation: DeviceDescriptorObservationPublic }
+  | {
+      ok: false;
+      gate: 'device-bridge';
+      reason: string;
+      classification?: 'auth' | 'audit' | 'device-bridge' | 'session' | 'inventory' | 'schema' | 'quota';
+    };
 
 export type DeviceArtifactMetadata = {
   id: string;

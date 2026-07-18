@@ -9,6 +9,10 @@ import type {
   ReopenResponse,
 } from '../shared/apiContracts';
 import type { CreateSessionRequest, RoadexSession, SessionResponse, StreamEvent } from '../shared/sessionContracts';
+import type {
+  DeviceDescriptorObservationPayload,
+  DeviceDescriptorObservationResponse,
+} from '../shared/deviceBridgeContracts';
 import { isApiError } from '../shared/apiContracts';
 
 export type RoadexApiSession = {
@@ -66,6 +70,19 @@ export async function submitPrompt(
     token,
     body: { prompt },
   });
+}
+
+export async function submitDeviceDescriptorObservation(
+  token: string | undefined,
+  sessionId: string,
+  body: DeviceDescriptorObservationPayload,
+): Promise<Extract<DeviceDescriptorObservationResponse, { ok: true }>> {
+  const response = await request<DeviceDescriptorObservationResponse>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/device-bridge/observations`,
+    { method: 'POST', token, body },
+  );
+  if (!response.ok) throw new Error(response.reason);
+  return response;
 }
 
 export async function cancelSession(token: string | undefined, sessionId: string): Promise<CancelResponse> {

@@ -9,6 +9,7 @@ import {
   reopenSession,
   subscribeSessionStream,
   submitPrompt,
+  submitDeviceDescriptorObservation,
 } from '../client/sessionApi';
 import type {
   AuditEvent,
@@ -19,8 +20,13 @@ import type {
   WorkspaceRef,
 } from '../shared/sessionContracts';
 import { isRunnerTerminal, lifecycleAfterTranscript, lifecycleForTerminalEvent } from './sessionSelection';
-import { detectDeviceCapability } from '../client/deviceCapability';
-import type { BrowserDeviceCapability, DeviceBridgePolicy } from '../shared/deviceBridgeContracts';
+import { detectDeviceCapability, requestUsbDescriptor } from '../client/deviceCapability';
+import type {
+  BrowserDeviceCapability,
+  DeviceBridgePolicy,
+  DeviceDescriptorObservationPublic,
+  DeviceInventoryBindingRef,
+} from '../shared/deviceBridgeContracts';
 
 export type ConnectionState = 'loading' | 'connected' | 'streaming' | 'error';
 
@@ -33,6 +39,8 @@ export type RoadexSessionState = {
   managedThreads: ManagedCodexThread[];
   deviceBridgePolicy?: DeviceBridgePolicy;
   browserDeviceCapability: BrowserDeviceCapability;
+  deviceInventoryBindingRefs: DeviceInventoryBindingRef[];
+  descriptorObservation?: DeviceDescriptorObservationPublic;
   session?: RoadexSession;
   archivedSessions: RoadexSession[];
   transcript: StreamEvent[];
@@ -47,6 +55,7 @@ export type RoadexSessionState = {
   createThread: (workspaceId: string) => Promise<void>;
   selectThread: (sessionId: string) => Promise<void>;
   attachManagedThread: (threadId: string, workspaceId: string) => Promise<void>;
+  observeUsbDescriptor: () => Promise<void>;
   retry: () => Promise<void>;
 };
 
@@ -58,6 +67,8 @@ export function useRoadexSession(): RoadexSessionState {
   const [sessions, setSessions] = useState<RoadexSession[]>([]);
   const [managedThreads, setManagedThreads] = useState<ManagedCodexThread[]>([]);
   const [deviceBridgePolicy, setDeviceBridgePolicy] = useState<DeviceBridgePolicy>();
+  const [deviceInventoryBindingRefs, setDeviceInventoryBindingRefs] = useState<DeviceInventoryBindingRef[]>([]);
+  const [descriptorObservation, setDescriptorObservation] = useState<DeviceDescriptorObservationPublic>();
   const browserDeviceCapability = useMemo(() => detectDeviceCapability(window.navigator), []);
   const [session, setSession] = useState<RoadexSession>();
   const [archivedSessions, setArchivedSessions] = useState<RoadexSession[]>([]);
@@ -91,6 +102,7 @@ export function useRoadexSession(): RoadexSessionState {
       setSessions(result.bootstrap.sessions);
       setManagedThreads(result.bootstrap.managedThreads);
       setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
+      setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
       setSession(activeSession);
       const archived = await listArchivedSessions(result.token);
       setArchivedSessions(archived.sessions);
@@ -201,6 +213,7 @@ export function useRoadexSession(): RoadexSessionState {
       setSessions(result.bootstrap.sessions);
       setManagedThreads(result.bootstrap.managedThreads);
       setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
+      setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
       setSession(activeSession);
       setArchivedSessions(archived.sessions);
       setAuditEvents([response.auditEvent, ...result.bootstrap.auditEvents].slice(0, 8));
@@ -234,6 +247,7 @@ export function useRoadexSession(): RoadexSessionState {
       setSessions(result.bootstrap.sessions);
       setManagedThreads(result.bootstrap.managedThreads);
       setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
+      setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
       setSession(response.session);
       setArchivedSessions(archived.sessions);
       setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
@@ -259,6 +273,7 @@ export function useRoadexSession(): RoadexSessionState {
         setSessions(result.bootstrap.sessions);
         setManagedThreads(result.bootstrap.managedThreads);
         setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
+        setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
         setSession(nextSession);
         setAuditEvents(result.bootstrap.auditEvents);
         setTranscript(result.bootstrap.streamPreview.filter((event) => event.sessionId === nextSession.id));
@@ -284,6 +299,7 @@ export function useRoadexSession(): RoadexSessionState {
         setSessions(result.bootstrap.sessions);
         setManagedThreads(result.bootstrap.managedThreads);
         setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
+        setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
         setSession(result.session);
         setAuditEvents(result.bootstrap.auditEvents);
         await refreshStream(result.session);
@@ -342,6 +358,7 @@ export function useRoadexSession(): RoadexSessionState {
         setSessions(result.bootstrap.sessions);
         setManagedThreads(result.bootstrap.managedThreads);
         setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
+        setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
         setSession(result.session);
         setAuditEvents(result.bootstrap.auditEvents);
         await refreshStream(result.session);
@@ -376,6 +393,29 @@ export function useRoadexSession(): RoadexSessionState {
     }
   }, [attach, token, workspaces]);
 
+  const observeUsbDescriptor = useCallback(async () => {
+    if (!session) return;
+    const binding = deviceInventoryBindingRefs.find((candidate) => candidate.projectId === session.workspace.id);
+    if (!binding) {
+      setError('No active inventory binding is available for this project.');
+      return;
+    }
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      const descriptor = await requestUsbDescriptor(window.navigator);
+      const result = await submitDeviceDescriptorObservation(token, session.id, {
+        inventoryBindingId: binding.id,
+        ...descriptor,
+      });
+      setDescriptorObservation(result.observation);
+      setNotice('USB descriptor observed. Device identity remains unverified.');
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === 'NotFoundError') return;
+      setError(caught instanceof Error ? caught.message : 'USB descriptor observation failed.');
+    }
+  }, [deviceInventoryBindingRefs, session, token]);
+
   return useMemo(
     () => ({
       connectionState,
@@ -386,6 +426,8 @@ export function useRoadexSession(): RoadexSessionState {
       managedThreads,
       deviceBridgePolicy,
       browserDeviceCapability,
+      deviceInventoryBindingRefs,
+      descriptorObservation,
       session,
       archivedSessions,
       transcript,
@@ -400,6 +442,7 @@ export function useRoadexSession(): RoadexSessionState {
       createThread,
       selectThread,
       attachManagedThread,
+      observeUsbDescriptor,
       retry,
     }),
     [
@@ -415,7 +458,10 @@ export function useRoadexSession(): RoadexSessionState {
       managedThreads,
       deviceBridgePolicy,
       browserDeviceCapability,
+      descriptorObservation,
+      deviceInventoryBindingRefs,
       openWorkspace,
+      observeUsbDescriptor,
       reopenArchivedSession,
       retry,
       sendPrompt,

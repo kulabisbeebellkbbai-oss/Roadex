@@ -347,8 +347,8 @@ function App() {
               <div>
                 <span>Client devices</span>
                 <strong>
-                  {roadex.deviceBridgePolicy?.state === 'disabled'
-                    ? `${deviceTransportLabel(roadex.browserDeviceCapability.transport)} · disabled`
+                  {roadex.deviceBridgePolicy
+                    ? `${deviceTransportLabel(roadex.browserDeviceCapability.transport)} · ${roadex.deviceBridgePolicy.descriptorObservationEnabled ? 'observe only' : 'disabled'}`
                     : 'Policy unavailable'}
                 </strong>
               </div>
@@ -396,6 +396,29 @@ function App() {
                 </div>
               ))}
             </div>
+            <div className="descriptor-observation">
+              <div>
+                <strong>USB descriptor</strong>
+                <span>
+                  {roadex.descriptorObservation
+                    ? `${formatUsbId(roadex.descriptorObservation.vendorId)}:${formatUsbId(roadex.descriptorObservation.productId)} · observed / unverified`
+                    : 'No client descriptor observed'}
+                </span>
+              </div>
+              <button
+                disabled={
+                  !roadex.deviceBridgePolicy?.descriptorObservationEnabled ||
+                  roadex.browserDeviceCapability.transport !== 'webusb' ||
+                  !session ||
+                  !roadex.deviceInventoryBindingRefs.some((binding) => binding.projectId === session.workspace.id)
+                }
+                onClick={() => void roadex.observeUsbDescriptor()}
+                type="button"
+              >
+                <PlugZap size={17} />
+                Observe USB
+              </button>
+            </div>
             <div className="timeline-note">
               <Clock3 size={18} />
               <span>Device bridge approval is a later security-reviewed phase.</span>
@@ -417,8 +440,11 @@ function readLayoutPreference(): string | null {
   }
 }
 
-function deviceTransportLabel(transport: 'web-serial' | 'webusb-polyfill' | 'unavailable'): string {
-  if (transport === 'web-serial') return 'Web Serial detected';
-  if (transport === 'webusb-polyfill') return 'Android WebUSB detected';
+function deviceTransportLabel(transport: 'webusb' | 'unavailable'): string {
+  if (transport === 'webusb') return 'WebUSB detected';
   return 'Browser unsupported';
+}
+
+function formatUsbId(value: number): string {
+  return value.toString(16).padStart(4, '0').toUpperCase();
 }

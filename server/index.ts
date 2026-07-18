@@ -13,6 +13,7 @@ import {
   listDeviceArtifactMetadata,
   listArchivedSessions,
   listDeviceInventoryBindings,
+  observeDeviceDescriptor,
   reopenSession,
   registerDeviceArtifactMetadata,
   requestDeviceBridgeIntake,
@@ -26,6 +27,7 @@ import {
   isAvailableDeviceBridgeIntakeRoute,
   isAvailableDeviceBridgeApprovalRoute,
   isAvailableDeviceBridgeMetadataRoute,
+  isAvailableDeviceDescriptorObservationRoute,
 } from '../src/server/deviceBridgePolicy.js';
 import type { CreateSessionRequest } from '../src/shared/sessionContracts.js';
 
@@ -165,6 +167,21 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       gate: result.gate,
       reason: result.reason,
     });
+    return;
+  }
+
+  const descriptorObservationMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/device-bridge\/observations$/);
+  if (descriptorObservationMatch && isAvailableDeviceDescriptorObservationRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const body = await readJson<unknown>(req);
+    const result = observeDeviceDescriptor(
+      state,
+      auth.user,
+      decodeURIComponent(descriptorObservationMatch[1]),
+      body,
+    );
+    sendJson(res, result.ok ? 201 : 403, result);
     return;
   }
 

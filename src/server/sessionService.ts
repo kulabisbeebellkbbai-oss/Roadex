@@ -16,6 +16,8 @@ import {
   deviceBridgeAuditHmacKey,
   deviceBridgeApprovalEnabled,
   deviceBridgeIdentityHmacKey,
+  deviceBridgeDescriptorHmacKey,
+  deviceBridgeDescriptorObservationEnabled,
   deviceBridgeMetadataRegistryEnabled,
   deviceBridgeRequestIntakeEnabled,
   getDeviceBridgePolicy,
@@ -58,6 +60,10 @@ import type {
   DeviceBridgeRequestPublic,
   DeviceBridgeRequestRecord,
   DeviceBridgeRequestResponse,
+  DeviceDescriptorObservationPayload,
+  DeviceDescriptorObservationPublic,
+  DeviceDescriptorObservationRecord,
+  DeviceDescriptorObservationResponse,
   DeviceInventoryBindingPayload,
   DeviceInventoryBindingRecord,
   DeviceInventoryBindingResponse,
@@ -80,6 +86,7 @@ export type RoadexState = {
   deviceBridgeApprovals: Map<string, DeviceBridgeApprovalRecord>;
   deviceBridgeOperations: Map<string, DeviceBridgeOperationRecord>;
   deviceInventoryBindings: Map<string, DeviceInventoryBindingRecord>;
+  deviceDescriptorObservations: Map<string, DeviceDescriptorObservationRecord>;
 };
 
 type StreamSubscriber = {
@@ -106,6 +113,15 @@ type DeviceBridgeApprovalGate =
   | 'session'
   | 'artifact'
   | 'inventory';
+
+type DeviceDescriptorObservationGate =
+  | 'auth'
+  | 'audit'
+  | 'device-bridge'
+  | 'session'
+  | 'inventory'
+  | 'schema'
+  | 'quota';
 
 type DeviceBridgeMetadataGate =
   | 'auth'
@@ -159,6 +175,7 @@ export function createInitialState(
     deviceBridgeApprovals: new Map(persisted.deviceBridgeApprovals.map((record) => [record.id, record])),
     deviceBridgeOperations: new Map(persisted.deviceBridgeOperations.map((record) => [record.id, record])),
     deviceInventoryBindings: new Map(persisted.deviceInventoryBindings.map((record) => [record.id, record])),
+    deviceDescriptorObservations: new Map(persisted.deviceDescriptorObservations.map((record) => [record.id, record])),
   };
 }
 
@@ -183,6 +200,11 @@ export async function bootstrap(state: RoadexState, user: UserProfile): Promise<
     streamPreview: state.sessions.streamEvents.filter((event) => visibleSessionIds.has(event.sessionId)).slice(-8),
     managedThreads: canAccessManagedCodexProjects(user) ? safeManagedThreads(user) : [],
     deviceBridgePolicy: getDeviceBridgePolicy(),
+    deviceInventoryBindingRefs: user.authMode === 'protected-gateway' && canAuthorizeInventoryBinding(user)
+      ? [...state.deviceInventoryBindings.values()]
+        .filter((binding) => binding.lifecycle === 'active' && getApprovedWorkspaces(user).some((workspace) => workspace.id === binding.projectId))
+        .map((binding) => ({ id: binding.id, projectId: binding.projectId }))
+      : [],
   };
 }
 
@@ -787,6 +809,82 @@ export function approveDeviceBridgeRequest(
   state.deviceBridgeApprovals.set(approval.id, approval);
   state.audit.events.push(auditEvent);
   return { ok: true, approval: publicDeviceBridgeApproval(approval) };
+}
+
+export function observeDeviceDescriptor(
+  state: RoadexState,
+  user: UserProfile,
+  sessionId: string,
+  payload: unknown,
+): DeviceDescriptorObservationResponse {
+  const auditHmacKey = deviceBridgeAuditHmacKey();
+  const descriptorHmacKey = deviceBridgeDescriptorHmacKey();
+  if (!deviceBridgeDescriptorObservationEnabled()) {
+    return denyDescriptorObservation(state, user, sessionId, 'device-bridge', auditHmacKey);
+  }
+  if (!auditHmacKey || !descriptorHmacKey) {
+    return denyDescriptorObservation(state, user, sessionId, 'audit', auditHmacKey);
+  }
+  if (user.authMode !== 'protected-gateway' || !canAuthorizeInventoryBinding(user)) {
+    return denyDescriptorObservation(state, user, sessionId, 'auth', auditHmacKey);
+  }
+  const session = getOwnedSession(state.sessions, user.id, sessionId);
+  if (!session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle !== 'ready') {
+    return denyDescriptorObservation(state, user, sessionId, 'session', auditHmacKey);
+  }
+  const parsed = parseDescriptorObservationPayload(payload);
+  if (!parsed.ok || !approvedUsbDescriptor(parsed.payload.vendorId, parsed.payload.productId)) {
+    return denyDescriptorObservation(state, user, sessionId, 'schema', auditHmacKey);
+  }
+  const binding = state.deviceInventoryBindings.get(parsed.payload.inventoryBindingId);
+  if (!validActiveInventoryBindingForRequest(binding, session.workspace.id)) {
+    return denyDescriptorObservation(state, user, sessionId, 'inventory', auditHmacKey);
+  }
+  const recentCount = [...state.deviceDescriptorObservations.values()].filter(
+    (record) => record.sessionId === session.id && Date.parse(record.createdAt) > Date.now() - 60_000,
+  ).length;
+  if (recentCount >= 10) {
+    return denyDescriptorObservation(state, user, sessionId, 'quota', auditHmacKey);
+  }
+
+  const serial = parsed.payload.serialNumber?.normalize('NFC').trim().toLowerCase() ?? 'none';
+  const descriptorFingerprint = createHmac('sha256', descriptorHmacKey)
+    .update(`roadex-usb-descriptor:v1:${parsed.payload.vendorId}:${parsed.payload.productId}:${serial}`)
+    .digest('hex');
+  const observation: DeviceDescriptorObservationRecord = {
+    id: `descriptor-observation-${randomUUID()}`,
+    userId: user.id,
+    sessionId: session.id,
+    projectId: session.workspace.id,
+    inventoryBindingId: binding.id,
+    vendorId: parsed.payload.vendorId,
+    productId: parsed.payload.productId,
+    descriptorFingerprint,
+    status: 'observed',
+    verification: 'unverified',
+    createdAt: new Date().toISOString(),
+  };
+  const auditEvent = createBridgeAuditEvent(
+    state,
+    auditHmacKey,
+    user,
+    'device_bridge.descriptor_observation',
+    session.id,
+    'allowed',
+    bridgeAuditSummary(auditHmacKey, {
+      classification: 'descriptor_observed',
+      userId: user.id,
+      sessionId: session.id,
+      requestId: observation.id,
+    }),
+  );
+  persistStateSnapshot(state, {
+    deviceDescriptorObservations: [...state.deviceDescriptorObservations.values(), observation],
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.deviceDescriptorObservations.set(observation.id, observation);
+  state.audit.events.push(auditEvent);
+  return { ok: true, observation: publicDescriptorObservation(observation) };
 }
 
 export function registerDeviceArtifactMetadata(
@@ -1439,6 +1537,54 @@ function publicDeviceInventoryBindingDenial(classification: DeviceInventoryBindi
   };
 }
 
+function denyDescriptorObservation(
+  state: RoadexState,
+  user: UserProfile,
+  resource: string,
+  gate: DeviceDescriptorObservationGate,
+  auditHmacKey: string | undefined,
+): DeviceDescriptorObservationResponse {
+  if (auditHmacKey) {
+    const auditEvent = createBridgeAuditEvent(
+      state,
+      auditHmacKey,
+      user,
+      'security.denied',
+      resource,
+      'denied',
+      bridgeAuditSummary(auditHmacKey, {
+        classification: gate,
+        userId: user.id,
+        sessionId: resource,
+      }),
+    );
+    persistStateSnapshot(state, { auditEvents: [...state.audit.events, auditEvent] });
+    state.audit.events.push(auditEvent);
+  }
+  return {
+    ok: false,
+    gate: 'device-bridge',
+    reason: 'USB descriptor observation denied.',
+    classification: gate,
+  };
+}
+
+function publicDescriptorObservation(
+  observation: DeviceDescriptorObservationRecord,
+): DeviceDescriptorObservationPublic {
+  return {
+    id: observation.id,
+    sessionId: observation.sessionId,
+    projectId: observation.projectId,
+    inventoryBindingId: observation.inventoryBindingId,
+    vendorId: observation.vendorId,
+    productId: observation.productId,
+    status: observation.status,
+    verification: observation.verification,
+    createdAt: observation.createdAt,
+  };
+}
+
 function createBridgeAuditEvent(
   state: RoadexState,
   auditHmacKey: string,
@@ -1545,6 +1691,57 @@ function parseDeviceArtifactMetadataPayload(payload: unknown): {
       label: record.label === undefined ? basename(record.artifactPath.trim()) : record.label.trim(),
     },
   };
+}
+
+function parseDescriptorObservationPayload(payload: unknown): {
+  ok: true;
+  payload: DeviceDescriptorObservationPayload;
+} | {
+  ok: false;
+} {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return { ok: false };
+  const record = payload as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const expectedKeys = record.serialNumber === undefined
+    ? ['inventoryBindingId', 'productId', 'vendorId']
+    : ['inventoryBindingId', 'productId', 'serialNumber', 'vendorId'];
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
+    return { ok: false };
+  }
+  if (
+    !boundedToken(record.inventoryBindingId, 128) ||
+    !validUsbIdentifier(record.vendorId) ||
+    !validUsbIdentifier(record.productId) ||
+    (record.serialNumber !== undefined && !validUsbSerial(record.serialNumber))
+  ) return { ok: false };
+  return {
+    ok: true,
+    payload: {
+      inventoryBindingId: record.inventoryBindingId.trim(),
+      vendorId: record.vendorId,
+      productId: record.productId,
+      ...(record.serialNumber === undefined ? {} : { serialNumber: record.serialNumber.normalize('NFC').trim() }),
+    },
+  };
+}
+
+function validUsbIdentifier(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 0xffff;
+}
+
+function validUsbSerial(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.trim().length <= 128 && !/[\r\n\0]/.test(value);
+}
+
+function approvedUsbDescriptor(vendorId: number, productId: number): boolean {
+  return new Set([
+    '303a:0002',
+    '303a:1001',
+    '10c4:ea60',
+    '1a86:7523',
+    '1a86:55d4',
+    '0403:6001',
+  ]).has(`${vendorId.toString(16).padStart(4, '0')}:${productId.toString(16).padStart(4, '0')}`);
 }
 
 function readProjectArtifactMetadata(
@@ -1771,6 +1968,7 @@ function saveState(state: RoadexState): void {
     deviceBridgeApprovals: [...state.deviceBridgeApprovals.values()],
     deviceBridgeOperations: [...state.deviceBridgeOperations.values()],
     deviceInventoryBindings: [...state.deviceInventoryBindings.values()],
+    deviceDescriptorObservations: [...state.deviceDescriptorObservations.values()],
   }));
 }
 
@@ -1786,6 +1984,7 @@ function persistStateSnapshot(
     deviceBridgeApprovals: DeviceBridgeApprovalRecord[];
     deviceBridgeOperations: DeviceBridgeOperationRecord[];
     deviceInventoryBindings: DeviceInventoryBindingRecord[];
+    deviceDescriptorObservations: DeviceDescriptorObservationRecord[];
   }>,
 ): void {
   state.persistence.save(serializeState({
@@ -1798,6 +1997,7 @@ function persistStateSnapshot(
     deviceBridgeApprovals: overrides.deviceBridgeApprovals ?? [...state.deviceBridgeApprovals.values()],
     deviceBridgeOperations: overrides.deviceBridgeOperations ?? [...state.deviceBridgeOperations.values()],
     deviceInventoryBindings: overrides.deviceInventoryBindings ?? [...state.deviceInventoryBindings.values()],
+    deviceDescriptorObservations: overrides.deviceDescriptorObservations ?? [...state.deviceDescriptorObservations.values()],
   }));
 }
 
