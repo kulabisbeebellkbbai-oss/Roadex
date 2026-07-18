@@ -2,7 +2,7 @@
 
 Date: 2026-07-18
 
-Status: deployed with pending-request intake enabled and device operations hard-disabled. Fail-closed MSI verification passed; a short audit-correlation retest remains pending.
+Status: deployed and verified with pending-request intake enabled and device operations hard-disabled. Fail-closed MSI verification and complete audit correlation passed.
 
 ## Deployed Scope
 
@@ -58,4 +58,17 @@ The authenticated MSI smoke from `10.70.0.10` during the UTC window `2026-07-18T
 - Roadex retained zero requests, approvals, and operations.
 - Bootstrap succeeded before and after the request, preserving the active session, workspace, lifecycle, and thread.
 
-Gateway commit `bbd35a5` adds the missing positive success record for the pre-forward authorization event. The gateway-only restart completed under the approved intake deployment scope. A short MSI repeat is required to verify that both IDS event IDs now have explicit gateway success records.
+Gateway commit `bbd35a5` adds the positive success record for the pre-forward authorization event. The gateway-only restart and MSI repeat completed under the approved intake deployment scope.
+
+## Audit-Correlation Retest
+
+The authenticated MSI repeat from `10.70.0.10` during the UTC window `2026-07-18T17:26:28.1993318Z` through `2026-07-18T17:26:30.8231709Z` verified:
+
+- Two unique gateway `ids_forwarding_succeeded` records.
+- A one-to-one event-ID match with the IDS pre-forward authorization and backend-denial events.
+- Two matching durable IDS replay rows.
+- Gateway telemetry spool remained empty.
+- Roadex retained zero requests, approvals, and operations.
+- Bootstrap succeeded before and after the fail-closed request, preserving the active session, workspace, lifecycle, and thread.
+
+The pending-request intake deployment is complete. Creating a valid pending request remains blocked until a server-produced firmware artifact and owner-approved inventory binding are implemented and separately approved.
