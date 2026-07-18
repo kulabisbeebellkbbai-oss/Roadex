@@ -221,6 +221,7 @@ function sanitizeApproval(record: DeviceBridgeApprovalRecord): DeviceBridgeAppro
     validBoundedString(record.sessionId, 128) &&
     validBoundedString(record.projectId, 128) &&
     validBoundedString(record.artifactId, 128) &&
+    /^[a-f0-9]{64}$/i.test(record.artifactSha256) &&
     validBoundedString(record.expectedDeviceId, 128) &&
     record.operation === 'esp32.flash' &&
     ['pending', 'consumed', 'revoked', 'expired'].includes(record.status) &&
@@ -233,6 +234,7 @@ function sanitizeApproval(record: DeviceBridgeApprovalRecord): DeviceBridgeAppro
     sessionId: record.sessionId.trim(),
     projectId: record.projectId.trim(),
     artifactId: record.artifactId.trim(),
+    artifactSha256: record.artifactSha256.toLowerCase(),
     expectedDeviceId: record.expectedDeviceId.trim(),
     operation: 'esp32.flash',
     status: record.status,
@@ -249,9 +251,15 @@ function sanitizeOperation(record: DeviceBridgeOperationRecord): DeviceBridgeOpe
     validBoundedString(record.sessionId, 128) &&
     validBoundedString(record.projectId, 128) &&
     validBoundedString(record.artifactId, 128) &&
+    /^[a-f0-9]{64}$/i.test(record.artifactSha256) &&
     validBoundedString(record.expectedDeviceId, 128) &&
     record.operation === 'esp32.flash' &&
     ['probe', 'confirmation', 'destructive', 'reporting', 'completed', 'failed', 'cancelled'].includes(record.phase) &&
+    /^[a-f0-9]{64}$/i.test(record.credentialDigest) &&
+    (!record.actualDeviceId || validBoundedString(record.actualDeviceId, 128)) &&
+    (!record.verifiedArtifactSha256 || /^[a-f0-9]{64}$/i.test(record.verifiedArtifactSha256)) &&
+    (!record.confirmationChallengeDigest || /^[a-f0-9]{64}$/i.test(record.confirmationChallengeDigest)) &&
+    (!record.destructiveNonceDigest || /^[a-f0-9]{64}$/i.test(record.destructiveNonceDigest)) &&
     Number.isSafeInteger(record.nextEventSequence) &&
     record.nextEventSequence >= 0 &&
     validIsoDate(record.phaseExpiresAt) &&
@@ -266,9 +274,21 @@ function sanitizeOperation(record: DeviceBridgeOperationRecord): DeviceBridgeOpe
     sessionId: record.sessionId.trim(),
     projectId: record.projectId.trim(),
     artifactId: record.artifactId.trim(),
+    artifactSha256: record.artifactSha256.toLowerCase(),
     expectedDeviceId: record.expectedDeviceId.trim(),
     operation: 'esp32.flash',
     phase: record.phase,
+    credentialDigest: record.credentialDigest.toLowerCase(),
+    ...(record.actualDeviceId ? { actualDeviceId: record.actualDeviceId.trim() } : {}),
+    ...(record.verifiedArtifactSha256
+      ? { verifiedArtifactSha256: record.verifiedArtifactSha256.toLowerCase() }
+      : {}),
+    ...(record.confirmationChallengeDigest
+      ? { confirmationChallengeDigest: record.confirmationChallengeDigest.toLowerCase() }
+      : {}),
+    ...(record.destructiveNonceDigest
+      ? { destructiveNonceDigest: record.destructiveNonceDigest.toLowerCase() }
+      : {}),
     nextEventSequence: record.nextEventSequence,
     phaseExpiresAt: new Date(record.phaseExpiresAt).toISOString(),
     reportingExpiresAt: new Date(record.reportingExpiresAt).toISOString(),

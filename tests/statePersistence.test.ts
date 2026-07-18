@@ -161,6 +161,7 @@ describe('state persistence', () => {
         sessionId: 'session',
         projectId: 'roadex',
         artifactId: 'artifact',
+        artifactSha256: 'a'.repeat(64),
         expectedDeviceId: 'inventory-device',
         operation: 'esp32.flash',
         status: 'pending',
@@ -174,9 +175,11 @@ describe('state persistence', () => {
         sessionId: 'session',
         projectId: 'roadex',
         artifactId: 'artifact',
+        artifactSha256: 'a'.repeat(64),
         expectedDeviceId: 'inventory-device',
         operation: 'esp32.flash',
         phase: 'probe',
+        credentialDigest: 'b'.repeat(64),
         nextEventSequence: 0,
         phaseExpiresAt: now,
         reportingExpiresAt: now,
@@ -190,7 +193,9 @@ describe('state persistence', () => {
     expect(state.deviceArtifacts.map((record) => record.id)).toEqual(['artifact']);
     expect(state.deviceBridgeApprovals.map((record) => record.id)).toEqual(['approval']);
     expect(state.deviceBridgeOperations.map((record) => record.id)).toEqual(['operation']);
-    expect(JSON.stringify(state)).not.toContain('credential');
+    expect(JSON.stringify(state)).not.toContain('must-be-stripped');
+    expect('credential' in state.deviceArtifacts[0]).toBe(false);
+    expect('token' in state.deviceBridgeOperations[0]).toBe(false);
     expect(JSON.stringify(state)).not.toContain('firmwareBytes');
     expect(JSON.stringify(state)).not.toContain('token');
     expect(JSON.stringify(state)).not.toContain('probeOutput');
@@ -230,9 +235,11 @@ describe('state persistence', () => {
       sessionId: 'session',
       projectId: 'roadex',
       artifactId,
+      artifactSha256: 'a'.repeat(64),
       expectedDeviceId: 'inventory-device',
       operation: 'esp32.flash',
       phase: 'probe',
+      credentialDigest: 'b'.repeat(64),
       nextEventSequence: 0,
       phaseExpiresAt: recent,
       reportingExpiresAt: recent,
