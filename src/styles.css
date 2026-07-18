@@ -71,6 +71,10 @@ button {
   background: rgb(255 255 255 / 8%);
 }
 
+.layout-toggle {
+  flex: 0 0 auto;
+}
+
 .brand strong,
 .brand span,
 .topbar-title strong,
@@ -431,6 +435,82 @@ button {
   border-radius: 6px;
   color: #ffffff;
   background: var(--accent);
+}
+
+.app-shell.layout-mobile {
+  display: block;
+}
+
+.app-shell.layout-mobile .sidebar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+}
+
+.app-shell.layout-mobile .brand div:last-child {
+  display: block;
+}
+
+.app-shell.layout-mobile .nav-list {
+  display: flex;
+  justify-content: flex-end;
+  overflow-x: auto;
+}
+
+.app-shell.layout-mobile .nav-item {
+  flex: 0 0 auto;
+}
+
+.app-shell.layout-mobile .trust-panel,
+.app-shell.layout-mobile .session-pill {
+  display: none;
+}
+
+.app-shell.layout-mobile .workspace {
+  width: min(100%, 720px);
+  margin: 0 auto;
+  padding: 14px;
+}
+
+.app-shell.layout-mobile .session-selectors {
+  grid-template-columns: minmax(0, 1fr) 40px;
+}
+
+.app-shell.layout-mobile .session-selectors label:first-child {
+  grid-column: 1 / -1;
+}
+
+.app-shell.layout-mobile .topbar {
+  align-items: flex-start;
+}
+
+.app-shell.layout-mobile .session-header,
+.app-shell.layout-mobile .dashboard-grid,
+.app-shell.layout-mobile .lower-grid,
+.app-shell.layout-mobile .side-stack {
+  grid-template-columns: 1fr;
+}
+
+.app-shell.layout-mobile .session-header {
+  padding: 20px;
+}
+
+.app-shell.layout-mobile .session-facts {
+  justify-content: flex-start;
+}
+
+.app-shell.layout-mobile .session-row {
+  grid-template-columns: 1fr;
+}
+
+.app-shell.layout-mobile .signal,
+.app-shell.layout-mobile .inline-action {
+  justify-self: start;
 }
 
 .message {
@@ -860,6 +940,36 @@ button {
 
   .inline-action {
     justify-self: start;
+  }
+
+  .app-shell.layout-desktop {
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+
+  .app-shell.layout-desktop .sidebar {
+    position: static;
+    display: flex;
+    align-items: center;
+    padding: 10px 8px;
+  }
+
+  .app-shell.layout-desktop .brand div:last-child,
+  .app-shell.layout-desktop .nav-item span,
+  .app-shell.layout-desktop .trust-panel {
+    display: none;
+  }
+
+  .app-shell.layout-desktop .nav-list {
+    display: grid;
+    width: 100%;
+    overflow: visible;
+  }
+
+  .app-shell.layout-desktop .nav-item {
+    justify-content: center;
+    width: 44px;
+    padding: 0;
   }
 }
 

@@ -1,4 +1,4 @@
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -13,21 +13,28 @@ import {
   LockKeyhole,
   Menu,
   MonitorSmartphone,
+  Monitor,
   PlugZap,
   Plus,
   RadioTower,
   RotateCcw,
   ShieldCheck,
+  Smartphone,
   TerminalSquare,
   UserRound,
 } from 'lucide-react';
 import { useRoadexSession } from './hooks/useRoadexSession';
 import { navItems } from './roadexModel';
 import { isVisibleTranscriptEvent } from './transcript';
+import { resolveLayoutMode, toggleLayoutMode } from './layoutMode';
 
 function App() {
   const roadex = useRoadexSession();
   const [prompt, setPrompt] = useState('');
+  const [layoutMode, setLayoutMode] = useState(() => resolveLayoutMode(
+    readLayoutPreference(),
+    window.matchMedia('(max-width: 720px)').matches,
+  ));
   const session = roadex.session;
   const visibleTranscript = roadex.transcript.filter(isVisibleTranscriptEvent);
   const projectThreads = [...roadex.sessions, ...roadex.archivedSessions]
@@ -40,6 +47,14 @@ function App() {
     !session ||
     session.lifecycle !== 'ready';
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('roadex-layout-mode', layoutMode);
+    } catch {
+      // Storage can be unavailable in privacy-restricted browser contexts.
+    }
+  }, [layoutMode]);
+
   async function handlePrompt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (composerDisabled || !prompt.trim()) return;
@@ -49,7 +64,7 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell layout-${layoutMode}`}>
       <aside className="sidebar" aria-label="Roadex navigation">
         <div className="brand">
           <div className="brand-mark" aria-hidden="true">
@@ -98,6 +113,16 @@ function App() {
             <Activity size={16} />
             <span>{roadex.connectionState}</span>
           </div>
+          <button
+            aria-label={`Switch to ${layoutMode === 'desktop' ? 'mobile' : 'desktop'} layout`}
+            aria-pressed={layoutMode === 'mobile'}
+            className="icon-button layout-toggle"
+            onClick={() => setLayoutMode((current) => toggleLayoutMode(current))}
+            title={`Switch to ${layoutMode === 'desktop' ? 'mobile' : 'desktop'} layout`}
+            type="button"
+          >
+            {layoutMode === 'desktop' ? <Smartphone size={19} /> : <Monitor size={19} />}
+          </button>
         </header>
 
         <section className="session-header">
@@ -387,3 +412,11 @@ function App() {
 }
 
 export default App;
+
+function readLayoutPreference(): string | null {
+  try {
+    return window.localStorage.getItem('roadex-layout-mode');
+  } catch {
+    return null;
+  }
+}
