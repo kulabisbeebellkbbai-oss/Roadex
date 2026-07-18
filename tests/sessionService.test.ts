@@ -9,6 +9,8 @@ import {
   createMockSession,
   createSessionFromApi,
   cancelSessionRun,
+  listArchivedSessions,
+  reopenSession,
   streamEventsForSession,
   subscribeToSessionStream,
   submitPrompt,
@@ -549,12 +551,8 @@ describe('Roadex session service', () => {
     expect(response.session.lifecycle).toBe('closed');
     expect(state.streamSubscribers.has(response.session.id)).toBe(false);
     expect(bootstrapped.sessions.some((session) => session.id === response.session.id)).toBe(false);
-    expect(bootstrapped.sessions[0]).toMatchObject({
-      lifecycle: 'ready',
-      workspace: {
-        id: 'roadex',
-      },
-    });
+    expect(bootstrapped.sessions).toEqual([]);
+    expect(listArchivedSessions(state, mockUser)).toEqual([response.session]);
   });
 
   it('denies wrong-owner session archive attempts', async () => {
@@ -573,6 +571,126 @@ describe('Roadex session service', () => {
       resource: response.session.id,
       outcome: 'denied',
     });
+  });
+
+  it('lists only archived sessions owned by the authenticated user', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const otherUser = { ...mockUser, id: 'other-user' };
+    const owned = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    const other = await createSessionFromApi(state, otherUser, { workspaceId: 'roadex' });
+
+    expect(owned.ok).toBe(true);
+    expect(other.ok).toBe(true);
+    if (!owned.ok || !other.ok) return;
+
+    closeSession(state, mockUser, owned.session.id);
+    closeSession(state, otherUser, other.session.id);
+
+    expect(listArchivedSessions(state, mockUser)).toEqual([owned.session]);
+  });
+
+  it('reopens an owned archived session with its Codex thread and transcript intact', async () => {
+    const state = createInitialState(fakeRunner('ok', 'thread-roadex-reopen'), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    submitPrompt(state, mockUser, response.session.id, 'preserve this history');
+    await flushRunner();
+    closeSession(state, mockUser, response.session.id);
+
+    const reopened = reopenSession(state, mockUser, response.session.id);
+
+    expect(reopened).toMatchObject({
+      reopened: true,
+      session: {
+        id: response.session.id,
+        lifecycle: 'ready',
+        codexThreadId: 'thread-roadex-reopen',
+      },
+      auditEvent: {
+        action: 'session.reopen',
+        outcome: 'allowed',
+      },
+    });
+    expect(streamEventsForSession(state, mockUser, response.session.id)?.some((event) =>
+      event.message.includes('preserve this history'),
+    )).toBe(true);
+  });
+
+  it('denies reopen attempts for another user without exposing session state', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+    closeSession(state, mockUser, response.session.id);
+
+    const intruder = { ...mockUser, id: 'other-user' };
+    expect(reopenSession(state, intruder, response.session.id)).toBeUndefined();
+    expect(response.session.lifecycle).toBe('closed');
+    expect(state.audit.events.at(-1)).toMatchObject({
+      action: 'security.denied',
+      actorId: intruder.id,
+      resource: response.session.id,
+      outcome: 'denied',
+    });
+    expect(state.audit.events.at(-1)?.summary).toContain('session_not_owned_or_missing');
+  });
+
+  it('denies reopening a session unless it is closed and has no active runner', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    expect(reopenSession(state, mockUser, response.session.id)).toBeUndefined();
+    expect(state.audit.events.at(-1)?.summary).toContain('session_not_closed');
+
+    closeSession(state, mockUser, response.session.id);
+    state.activeRuns.set(response.session.id, new AbortController());
+    expect(reopenSession(state, mockUser, response.session.id)).toBeUndefined();
+    expect(response.session.lifecycle).toBe('closed');
+    expect(state.audit.events.at(-1)?.summary).toContain('active_runner_present');
+  });
+
+  it('denies reopening when the archived workspace is no longer approved', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+    closeSession(state, mockUser, response.session.id);
+
+    const original = process.env.ROADEX_WORKSPACES_JSON;
+    process.env.ROADEX_WORKSPACES_JSON = JSON.stringify([
+      { id: 'gateway', name: 'Gateway', root: '/srv/gateway' },
+    ]);
+    try {
+      expect(reopenSession(state, mockUser, response.session.id)).toBeUndefined();
+      expect(response.session.lifecycle).toBe('closed');
+      expect(state.audit.events.at(-1)?.summary).toContain('workspace_no_longer_approved');
+    } finally {
+      if (original === undefined) delete process.env.ROADEX_WORKSPACES_JSON;
+      else process.env.ROADEX_WORKSPACES_JSON = original;
+    }
+  });
+
+  it('denies reopening when the workspace already has an active session', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const archived = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(archived.ok).toBe(true);
+    if (!archived.ok) return;
+    closeSession(state, mockUser, archived.session.id);
+    const active = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    expect(active.ok).toBe(true);
+
+    expect(reopenSession(state, mockUser, archived.session.id)).toBeUndefined();
+    expect(archived.session.lifecycle).toBe('closed');
+    expect(state.audit.events.at(-1)?.summary).toContain('active_workspace_session_present');
   });
 
   it('denies wrong-owner cancellation and records actor/session detail', async () => {

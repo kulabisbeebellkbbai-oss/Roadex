@@ -512,6 +512,40 @@ button {
   gap: 10px;
 }
 
+.archive-heading {
+  margin: 22px 0 10px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.archive-heading h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 1rem;
+  letter-spacing: 0;
+}
+
+.archived-list {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.icon-action {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+}
+
+.empty-state {
+  margin: 0;
+  padding: 12px;
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+
 .session-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(120px, 0.7fr) auto;
@@ -526,6 +560,16 @@ button {
 .session-row strong,
 .session-row span {
   display: block;
+}
+
+.session-row > div {
+  min-width: 0;
+}
+
+.archived-list .session-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-row span,

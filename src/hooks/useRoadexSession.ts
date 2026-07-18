@@ -4,7 +4,9 @@ import {
   closeSession,
   createSession,
   loginAndBootstrap,
+  listArchivedSessions,
   readSessionStream,
+  reopenSession,
   subscribeSessionStream,
   submitPrompt,
 } from '../client/sessionApi';
@@ -24,6 +26,7 @@ export type RoadexSessionState = {
   user?: UserProfile;
   workspaces: WorkspaceRef[];
   session?: RoadexSession;
+  archivedSessions: RoadexSession[];
   transcript: StreamEvent[];
   auditEvents: AuditEvent[];
   error?: string;
@@ -31,6 +34,7 @@ export type RoadexSessionState = {
   sendPrompt: (prompt: string) => Promise<void>;
   cancelPrompt: () => Promise<void>;
   closeCurrentSession: () => Promise<void>;
+  reopenArchivedSession: (sessionId: string) => Promise<void>;
   openWorkspace: (workspaceId: string) => Promise<void>;
   retry: () => Promise<void>;
 };
@@ -41,6 +45,7 @@ export function useRoadexSession(): RoadexSessionState {
   const [user, setUser] = useState<UserProfile>();
   const [workspaces, setWorkspaces] = useState<WorkspaceRef[]>([]);
   const [session, setSession] = useState<RoadexSession>();
+  const [archivedSessions, setArchivedSessions] = useState<RoadexSession[]>([]);
   const [transcript, setTranscript] = useState<StreamEvent[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [error, setError] = useState<string>();
@@ -67,6 +72,8 @@ export function useRoadexSession(): RoadexSessionState {
       setUser(result.bootstrap.user);
       setWorkspaces(result.bootstrap.workspaces);
       setSession(activeSession);
+      const archived = await listArchivedSessions(result.token);
+      setArchivedSessions(archived.sessions);
       setAuditEvents(result.bootstrap.auditEvents);
       setTranscript(result.bootstrap.streamPreview);
       if (activeSession) {
@@ -84,14 +91,16 @@ export function useRoadexSession(): RoadexSessionState {
     void attach();
   }, [attach]);
 
+  const sessionId = session?.id;
   useEffect(() => {
-    if (!session) return undefined;
+    if (!sessionId) return undefined;
     return subscribeSessionStream(
       token,
-      session.id,
+      sessionId,
       (event) => {
         setTranscript((existing) => mergeStreamEvents(existing, [event]));
         if (isTerminalRunnerEvent(event)) {
+          setSession((existing) => existing ? { ...existing, lifecycle: 'ready' } : existing);
           setConnectionState('connected');
         }
       },
@@ -100,18 +109,20 @@ export function useRoadexSession(): RoadexSessionState {
         setConnectionState('error');
       },
     );
-  }, [session, token]);
+  }, [sessionId, token]);
 
   const sendPrompt = useCallback(
     async (prompt: string) => {
       if (!session) return;
       setConnectionState('streaming');
+      setSession((existing) => existing ? { ...existing, lifecycle: 'streaming' } : existing);
       setError(undefined);
       setNotice(undefined);
       try {
         const response = await submitPrompt(token, session.id, prompt);
         setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
       } catch (caught) {
+        setSession((existing) => existing ? { ...existing, lifecycle: 'ready' } : existing);
         setError(caught instanceof Error ? caught.message : 'Prompt submission failed.');
         setConnectionState('error');
       }
@@ -126,6 +137,7 @@ export function useRoadexSession(): RoadexSessionState {
       setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
       setNotice(response.cancelled ? 'Cancel requested for the active Codex run.' : 'No Codex run is active for this session.');
       await refreshStream(session);
+      setSession((existing) => existing ? { ...existing, lifecycle: 'ready' } : existing);
       setConnectionState('connected');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Cancel request failed.');
@@ -142,11 +154,13 @@ export function useRoadexSession(): RoadexSessionState {
     try {
       const response = await closeSession(token, session.id);
       const result = await loginAndBootstrap();
+      const archived = await listArchivedSessions(result.token);
       const activeSession = result.bootstrap.sessions[0];
       setToken(result.token);
       setUser(result.bootstrap.user);
       setWorkspaces(result.bootstrap.workspaces);
       setSession(activeSession);
+      setArchivedSessions(archived.sessions);
       setAuditEvents([response.auditEvent, ...result.bootstrap.auditEvents].slice(0, 8));
       setTranscript(result.bootstrap.streamPreview.filter((event) => !activeSession || event.sessionId === activeSession.id));
       if (activeSession) {
@@ -161,6 +175,25 @@ export function useRoadexSession(): RoadexSessionState {
       setConnectionState('error');
     }
   }, [session, token]);
+
+  const reopenArchivedSession = useCallback(async (sessionId: string) => {
+    setConnectionState('loading');
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      const response = await reopenSession(token, sessionId);
+      const archived = await listArchivedSessions(token);
+      setSession(response.session);
+      setArchivedSessions(archived.sessions);
+      setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
+      await refreshStream(response.session);
+      setNotice('Archived session reopened.');
+      setConnectionState('connected');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Session reopen failed.');
+      setConnectionState('error');
+    }
+  }, [refreshStream, token]);
 
   const openWorkspace = useCallback(
     async (workspaceId: string) => {
@@ -207,6 +240,7 @@ export function useRoadexSession(): RoadexSessionState {
       user,
       workspaces,
       session,
+      archivedSessions,
       transcript,
       auditEvents,
       error,
@@ -214,17 +248,20 @@ export function useRoadexSession(): RoadexSessionState {
       sendPrompt,
       cancelPrompt,
       closeCurrentSession,
+      reopenArchivedSession,
       openWorkspace,
       retry,
     }),
     [
       auditEvents,
+      archivedSessions,
       cancelPrompt,
       closeCurrentSession,
       connectionState,
       error,
       notice,
       openWorkspace,
+      reopenArchivedSession,
       retry,
       sendPrompt,
       session,

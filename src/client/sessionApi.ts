@@ -1,10 +1,12 @@
 import type {
   ApiError,
+  ArchivedSessionsResponse,
   BootstrapResponse,
   CancelResponse,
   CloseResponse,
   MockLoginResponse,
   PromptResponse,
+  ReopenResponse,
 } from '../shared/apiContracts';
 import type { CreateSessionRequest, StreamEvent } from '../shared/sessionContracts';
 import { isApiError } from '../shared/apiContracts';
@@ -69,6 +71,17 @@ export async function cancelSession(token: string | undefined, sessionId: string
 
 export async function closeSession(token: string | undefined, sessionId: string): Promise<CloseResponse> {
   return request<CloseResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
+    method: 'POST',
+    token,
+  });
+}
+
+export async function listArchivedSessions(token: string | undefined): Promise<ArchivedSessionsResponse> {
+  return request<ArchivedSessionsResponse>('/api/sessions', { token });
+}
+
+export async function reopenSession(token: string | undefined, sessionId: string): Promise<ReopenResponse> {
+  return request<ReopenResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/reopen`, {
     method: 'POST',
     token,
   });

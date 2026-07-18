@@ -38,6 +38,8 @@ Runtime session, transcript, and audit metadata are written to `data/roadex-stat
 
 Prompt submission is asynchronous: `POST /api/sessions/:id/prompts` accepts work and the transcript is read from `GET /api/sessions/:id/stream` while Codex runs. Add `?live=1` for a long-lived SSE stream that sends the existing transcript followed by new runner events. The local API also supports `POST /api/sessions/:id/cancel` and `POST /api/sessions/:id/close`.
 
+Archived sessions are listed through `GET /api/sessions` and restored through `POST /api/sessions/:id/reopen`. History is owner-scoped. Reopen preserves the session transcript and Codex thread, revalidates the workspace against current server policy, and is denied when that workspace already has an active session or stale runner state exists.
+
 Roadex limits live streams per session to protect the long-lived endpoint. Set `ROADEX_MAX_STREAMS_PER_SESSION` to a positive integer to override the default of four. Rejected excess streams are recorded as security denial audit events. Bootstrap audit and transcript previews are scoped to the authenticated user; `admin` and `security-reviewer` roles may inspect the global audit tail, but not another user's session transcript.
 
 ## Protected Gateway

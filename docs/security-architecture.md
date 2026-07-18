@@ -41,6 +41,8 @@ Roadex exposes powerful server-side Codex capabilities through a browser. The in
 - Bootstrap transcript previews are restricted to sessions owned by the authenticated user.
 - Ordinary users receive only their own audit events; `admin` and `security-reviewer` roles may receive the global audit tail for oversight.
 - Live SSE subscriptions enforce ownership before capacity checks and are capped per session through `ROADEX_MAX_STREAMS_PER_SESSION`.
+- Archived-session history is owner-scoped. Reopen requires the original owner, a closed lifecycle, no active runner, a still-approved unchanged workspace root, and no other visible session for that workspace.
+- The protected gateway admits only the exact `POST /api/sessions/:id/reopen` route shape; other methods, encoded delimiters, and additional path segments remain denied.
 - Device bridge code paths remain unavailable in the first milestone.
 
 ## Deferred Device Access

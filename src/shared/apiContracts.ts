@@ -2,7 +2,9 @@ import type {
   CancelSessionResponse,
   CloseSessionResponse,
   PromptAcceptedResponse,
+  ReopenSessionResponse,
   RoadexBootstrap,
+  RoadexSession,
   UserProfile,
 } from './sessionContracts.js';
 
@@ -30,6 +32,12 @@ export type PromptResponse = PromptAcceptedResponse;
 export type CancelResponse = CancelSessionResponse;
 
 export type CloseResponse = CloseSessionResponse;
+
+export type ReopenResponse = ReopenSessionResponse;
+
+export type ArchivedSessionsResponse = {
+  sessions: RoadexSession[];
+};
 
 export function isApiError(value: unknown): value is ApiError {
   return (

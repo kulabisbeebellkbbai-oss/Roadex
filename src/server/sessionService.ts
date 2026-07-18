@@ -20,6 +20,7 @@ import {
   type UserProfile,
   type CancelSessionResponse,
   type CloseSessionResponse,
+  type ReopenSessionResponse,
   type PromptAcceptedResponse,
 } from '../shared/sessionContracts.js';
 
@@ -58,7 +59,10 @@ export function createInitialState(
 
 export async function bootstrap(state: RoadexState, user: UserProfile): Promise<RoadexBootstrap> {
   let userSessions = state.sessions.sessions.filter((session) => isVisibleSessionForUser(session, user));
-  if (userSessions.length === 0) {
+  const hasArchivedSessions = state.sessions.sessions.some(
+    (session) => session.userId === user.id && session.lifecycle === 'closed',
+  );
+  if (userSessions.length === 0 && !hasArchivedSessions) {
     const defaultWorkspace = getApprovedWorkspaces()[0];
     if (defaultWorkspace) {
       await createSessionFromApi(state, user, { workspaceId: defaultWorkspace.id });
@@ -256,6 +260,101 @@ export function closeSession(
   );
   saveState(state);
   return { closed: true, auditEvent };
+}
+
+export function listArchivedSessions(state: RoadexState, user: UserProfile): RoadexSession[] {
+  return state.sessions.sessions
+    .filter((session) => session.userId === user.id && session.lifecycle === 'closed')
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+export function reopenSession(
+  state: RoadexState,
+  user: UserProfile,
+  sessionId: string,
+): ReopenSessionResponse | undefined {
+  const session = getOwnedSession(state.sessions, user.id, sessionId);
+  if (!session) {
+    appendAudit(
+      state.audit,
+      user,
+      'security.denied',
+      sessionId,
+      'denied',
+      `Reopen denied: actor=${user.id} session=${sessionId} reason=session_not_owned_or_missing.`,
+    );
+    saveState(state);
+    return undefined;
+  }
+  if (session.lifecycle !== 'closed') {
+    appendAudit(
+      state.audit,
+      user,
+      'security.denied',
+      sessionId,
+      'denied',
+      `Reopen denied: actor=${user.id} session=${sessionId} reason=session_not_closed.`,
+    );
+    saveState(state);
+    return undefined;
+  }
+  if (state.activeRuns.has(sessionId)) {
+    appendAudit(
+      state.audit,
+      user,
+      'security.denied',
+      sessionId,
+      'denied',
+      `Reopen denied: actor=${user.id} session=${sessionId} reason=active_runner_present.`,
+    );
+    saveState(state);
+    return undefined;
+  }
+  const workspaceDecision = resolveWorkspaceForUser(user, session.workspace.id);
+  if (!workspaceDecision.ok || workspaceDecision.workspace.root !== session.workspace.root) {
+    appendAudit(
+      state.audit,
+      user,
+      'security.denied',
+      sessionId,
+      'denied',
+      `Reopen denied: actor=${user.id} session=${sessionId} reason=workspace_no_longer_approved.`,
+    );
+    saveState(state);
+    return undefined;
+  }
+  const activeWorkspaceSession = state.sessions.sessions.some(
+    (candidate) =>
+      candidate.id !== sessionId &&
+      candidate.userId === user.id &&
+      candidate.workspace.id === session.workspace.id &&
+      isVisibleSession(candidate),
+  );
+  if (activeWorkspaceSession) {
+    appendAudit(
+      state.audit,
+      user,
+      'security.denied',
+      sessionId,
+      'denied',
+      `Reopen denied: actor=${user.id} session=${sessionId} reason=active_workspace_session_present.`,
+    );
+    saveState(state);
+    return undefined;
+  }
+
+  session.lifecycle = 'ready';
+  touchSession(session);
+  const auditEvent = appendAudit(
+    state.audit,
+    user,
+    'session.reopen',
+    sessionId,
+    'allowed',
+    `Reopened session: actor=${user.id} session=${sessionId} result=ready.`,
+  );
+  saveState(state);
+  return { reopened: true, session, auditEvent };
 }
 
 export function cancelSessionRun(

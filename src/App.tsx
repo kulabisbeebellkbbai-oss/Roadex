@@ -15,6 +15,7 @@ import {
   MonitorSmartphone,
   PlugZap,
   RadioTower,
+  RotateCcw,
   ShieldCheck,
   TerminalSquare,
 } from 'lucide-react';
@@ -251,6 +252,34 @@ function App() {
                   )}
                 </div>
               ))}
+            </div>
+            <div className="archive-heading">
+              <span className="section-label">History</span>
+              <h3>Archived sessions</h3>
+            </div>
+            <div className="session-list archived-list">
+              {roadex.archivedSessions.map((archived) => (
+                <div className="session-row" key={archived.id}>
+                  <div>
+                    <strong>{archived.workspace.name}</strong>
+                    <span>{archived.id}</span>
+                  </div>
+                  <p>{new Date(archived.updatedAt).toLocaleString()}</p>
+                  <button
+                    aria-label={`Reopen ${archived.workspace.name} session`}
+                    className="inline-action icon-action"
+                    disabled={roadex.connectionState === 'loading' || roadex.connectionState === 'streaming'}
+                    onClick={() => void roadex.reopenArchivedSession(archived.id)}
+                    title="Reopen session"
+                    type="button"
+                  >
+                    <RotateCcw size={17} />
+                  </button>
+                </div>
+              ))}
+              {roadex.archivedSessions.length === 0 ? (
+                <p className="empty-state">No archived sessions.</p>
+              ) : null}
             </div>
           </article>
 

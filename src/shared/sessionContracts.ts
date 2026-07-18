@@ -39,6 +39,7 @@ export type AuditEvent = {
     | 'session.runner_failed'
     | 'session.cancel'
     | 'session.close'
+    | 'session.reopen'
     | 'session.stream_open'
     | 'security.denied';
   resource: string;
@@ -67,6 +68,12 @@ export type CancelSessionResponse = {
 
 export type CloseSessionResponse = {
   closed: true;
+  auditEvent: AuditEvent;
+};
+
+export type ReopenSessionResponse = {
+  reopened: true;
+  session: RoadexSession;
   auditEvent: AuditEvent;
 };
 

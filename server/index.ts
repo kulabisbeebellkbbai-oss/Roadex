@@ -8,6 +8,8 @@ import {
   closeSession,
   createInitialState,
   createSessionFromApi,
+  listArchivedSessions,
+  reopenSession,
   subscribeToSessionStream,
   streamEventsForSession,
   submitPrompt,
@@ -65,6 +67,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
 
+  if (url.pathname === '/api/sessions' && req.method === 'GET') {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    sendJson(res, 200, { sessions: listArchivedSessions(state, auth.user) });
+    return;
+  }
+
   if (url.pathname === '/api/sessions' && req.method === 'POST') {
     const auth = requireAuth(req, res);
     if (!auth) return;
@@ -111,6 +120,19 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return;
     }
     sendJson(res, 202, result);
+    return;
+  }
+
+  const reopenMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/reopen$/);
+  if (reopenMatch && req.method === 'POST') {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const result = reopenSession(state, auth.user, decodeURIComponent(reopenMatch[1]));
+    if (!result) {
+      sendJson(res, 404, { error: { code: 'not_found', message: 'Archived session not found.' } });
+      return;
+    }
+    sendJson(res, 200, result);
     return;
   }
 
