@@ -2,7 +2,7 @@
 
 Date: 2026-07-18
 
-Status: deployed and authenticated MSI-origin default-off verification passed. Device-bridge request intake and operations remain disabled. A gateway-only restart is pending to activate explicit positive forwarding audit records added after correlation.
+Status: deployed and authenticated MSI-origin default-off verification passed, including explicit positive forwarding audit correlation. Device-bridge request intake and operations remain disabled.
 
 ## Deployed Scope
 
@@ -52,6 +52,15 @@ The server clock led the client-reported timestamps by approximately one to two 
 
 ## Follow-Up Audit Improvement
 
-Gateway commit `ed012c0` adds an explicit local `ids_forwarding_succeeded` record after a denied event receives its authenticated durable IDS acknowledgement. The full gateway suite passes with this behavior. A separately approved gateway-only restart is required to activate it; no receiver, network, key, or feature-flag change is required.
+Gateway commit `ed012c0` adds an explicit local `ids_forwarding_succeeded` record after a denied event receives its authenticated durable IDS acknowledgement. The gateway-only restart was approved and completed.
 
-Activating the audit improvement and any later request-intake enablement require separate approvals.
+The authenticated MSI retest from `10.70.0.10` during the UTC window `2026-07-18T17:10:32.4532071Z` through `2026-07-18T17:10:34.5415274Z` verified:
+
+- One normalized gateway denial and one `ids_forwarding_succeeded` record.
+- The gateway success record carried the same event ID as exactly one IDS event and exactly one durable replay row.
+- The IDS event remained within the approved redacted schema with reason `request_intake_disabled`.
+- Gateway telemetry spool remained empty.
+- Roadex retained zero bridge requests, approvals, and operations.
+- Bootstrap succeeded before and after the denial, preserving the active session, workspace, lifecycle, and thread.
+
+Any later request-intake enablement requires separate approval.
