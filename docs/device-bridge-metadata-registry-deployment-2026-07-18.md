@@ -43,8 +43,24 @@ environment, the service unit, the prior persisted state when present, and
 
 ## External Verification Boundary
 
-The remaining check requires the approved MSI VPN source and an authenticated
-Roadex browser session. Verify that the portal and bootstrap remain available,
-the metadata and inventory routes remain blocked by the gateway, the existing
-session and thread remain unchanged, and no bridge records are created.
+Completed from the approved MSI VPN source during the UTC window
+`2026-07-18T18:04:55.3417965Z` through `2026-07-18T18:04:58.0559929Z`.
 
+- The portal and bootstrap returned HTTP 200 and the CSRF response header was
+  available to the authenticated helper without being printed.
+- Artifact metadata and inventory-binding POST requests both returned HTTP 404,
+  `Cache-Control: no-store`, `device_bridge_rejected`, and
+  `bridge_route_not_allowed`.
+- Follow-up authentication succeeded and preserved the session, workspace,
+  lifecycle, and thread.
+- Artifact, inventory-binding, bridge-request, approval, and operation counts
+  remained zero.
+- Gateway records contain both route rejections, matching successful IDS
+  forwarding records, and the successful follow-up bootstrap.
+- Roadex received neither prohibited route and its persisted bridge state
+  remained empty.
+
+The Windows helper reported Schannel missing-close-notify warnings after both
+complete rejection responses. Status, headers, and bodies were received, so the
+warnings did not invalidate this smoke. Graceful TLS shutdown remains a separate
+transport-hardening follow-up.
