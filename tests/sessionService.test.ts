@@ -1,5 +1,6 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { closeSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash, createHmac } from 'node:crypto';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { mockUser } from '../src/server/authService';
@@ -8,13 +9,19 @@ import { createMemoryPersistence, type StatePersistence } from '../src/server/st
 import {
   bootstrap,
   closeSession,
+  createDeviceInventoryBinding,
   createInitialState,
   createMockSession,
   createSessionFromApi,
   cancelSessionRun,
+  listDeviceArtifactMetadata,
+  listDeviceInventoryBindings,
   listArchivedSessions,
   reopenSession,
+  registerDeviceArtifactMetadata,
   requestDeviceBridgeIntake,
+  revokeDeviceArtifactMetadata,
+  revokeDeviceInventoryBinding,
   streamEventsForSession,
   subscribeToSessionStream,
   submitPrompt,
@@ -370,6 +377,337 @@ describe('Roadex session service', () => {
       restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
       restoreEnv('ROADEX_DEVICE_BRIDGE_INVENTORY_JSON', originalInventory);
       restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('keeps firmware artifact metadata registry default-off with no metadata or binding records', async () => {
+    const originalRegistry = process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    delete process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED;
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+
+      expect(registerDeviceArtifactMetadata(state, user, response.session.id, validArtifactMetadataPayload())).toMatchObject({
+        ok: false,
+        gate: 'device-bridge',
+        classification: 'device-bridge',
+      });
+      expect(listDeviceArtifactMetadata(state, user, response.session.id)).toBeUndefined();
+      expect(createDeviceInventoryBinding(state, user, validInventoryBindingPayload())).toMatchObject({
+        ok: false,
+        gate: 'device-bridge',
+        classification: 'device-bridge',
+      });
+      expect(listDeviceInventoryBindings(state, user, 'roadex')).toBeUndefined();
+      expect(state.deviceArtifacts.size).toBe(0);
+      expect(state.deviceInventoryBindings.size).toBe(0);
+      expect(state.deviceBridgeApprovals.size).toBe(0);
+      expect(state.deviceBridgeOperations.size).toBe(0);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED', originalRegistry);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('registers server-produced firmware artifact metadata only for the owning gateway user', async () => {
+    const originalRegistry = process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    const originalWorkspaces = process.env.ROADEX_WORKSPACES_JSON;
+    const fixture = createArtifactFixture('server-produced-firmware-v1');
+    process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    process.env.ROADEX_WORKSPACES_JSON = workspaceEnv(fixture.root);
+    try {
+      const state = createInitialState(fakeRunner('ok', 'thread-from-run'), createMemoryPersistence());
+      const user: UserProfile = { ...protectedGatewayUser(), id: 'artifact-owner', roles: ['user'] };
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      const promptResult = submitPrompt(state, user, response.session.id, 'produce firmware metadata');
+      expect(promptResult).toMatchObject({ accepted: true });
+      await flushRunner();
+
+      const registered = registerDeviceArtifactMetadata(state, user, response.session.id, validArtifactMetadataPayload());
+
+      expect(registered).toMatchObject({
+        ok: true,
+        artifact: {
+          projectId: 'roadex',
+          sessionId: response.session.id,
+          producerUserId: user.id,
+          producerThreadId: 'thread-from-run',
+          label: 'firmware.bin',
+          byteLength: fixture.byteLength,
+          mediaType: 'application/octet-stream',
+          format: 'esp32-firmware-bin',
+          sha256: fixture.sha256,
+          status: 'active',
+        },
+      });
+      if (!registered.ok) return;
+      expect(registered.artifact).not.toHaveProperty('storageReference');
+      expect(state.deviceArtifacts.get(registered.artifact.id)?.storageReference).toMatch(/^artifact-ref-/);
+      expect(state.deviceArtifacts.get(registered.artifact.id)?.storageReference).not.toContain('/');
+      expect(registered.artifact.id).toMatch(/^artifact-/);
+      expect(Date.parse(registered.artifact.expiresAt)).toBeGreaterThan(Date.parse(registered.artifact.createdAt));
+      expect(listDeviceArtifactMetadata(state, user, response.session.id)).toEqual([registered.artifact]);
+      expect(state.deviceBridgeApprovals.size).toBe(0);
+      expect(state.deviceBridgeOperations.size).toBe(0);
+      const audit = state.audit.events.at(-1);
+      expect(audit).toMatchObject({ action: 'device_bridge.artifact', outcome: 'allowed' });
+      expect(audit?.actorId).not.toBe(user.id);
+      expect(audit?.resource).not.toBe(response.session.id);
+      expect(audit?.summary).toContain('classification=artifact_registered');
+      expect(audit?.summary).not.toContain(user.id);
+      expect(audit?.summary).not.toContain(response.session.id);
+      expect(audit?.summary).not.toContain(registered.artifact.id);
+      expect(audit?.summary).not.toContain('firmware.bin');
+      expect(audit?.summary).not.toContain(fixture.sha256);
+
+      const intruder = { ...protectedGatewayUser(), id: 'not-owner' };
+      expect(listDeviceArtifactMetadata(state, intruder, response.session.id)).toBeUndefined();
+      expect(listDeviceArtifactMetadata(state, { ...user, authMode: 'mock' }, response.session.id)).toBeUndefined();
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED', originalRegistry);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+      restoreEnv('ROADEX_WORKSPACES_JSON', originalWorkspaces);
+    }
+  });
+
+  it('rejects unsafe project artifact references and client-supplied metadata without mutating state', async () => {
+    const originalRegistry = process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    const originalWorkspaces = process.env.ROADEX_WORKSPACES_JSON;
+    const fixture = createArtifactFixture('server-produced-firmware-v1');
+    const outsideRoot = mkdtempSync(join(tmpdir(), 'roadex-outside-artifacts-'));
+    writeProjectArtifact(outsideRoot, 'outside.bin', 'outside');
+    symlinkSync(join(outsideRoot, 'outside.bin'), join(fixture.root, 'build', 'link.bin'));
+    mkdirSync(join(fixture.root, 'build', 'directory.bin'));
+    const oversizedPath = join(fixture.root, 'build', 'oversized.bin');
+    const oversizedFd = openSync(oversizedPath, 'w');
+    ftruncateSync(oversizedFd, 16 * 1024 * 1024 + 1);
+    closeSync(oversizedFd);
+    process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    process.env.ROADEX_WORKSPACES_JSON = workspaceEnv(fixture.root);
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      const invalidPayloads = [
+        { ...validArtifactMetadataPayload(), extra: true },
+        { ...validArtifactMetadataPayload(), sha256: 'b'.repeat(64) },
+        { ...validArtifactMetadataPayload(), byteLength: fixture.byteLength },
+        { ...validArtifactMetadataPayload(), label: '../firmware.bin' },
+        { ...validArtifactMetadataPayload(), label: 'firmware.hex' },
+        { ...validArtifactMetadataPayload(), artifactPath: '../outside.bin' },
+        { ...validArtifactMetadataPayload(), artifactPath: '/tmp/firmware.bin' },
+        { ...validArtifactMetadataPayload(), artifactPath: 'build/link.bin' },
+        { ...validArtifactMetadataPayload(), artifactPath: 'build/directory.bin', label: 'directory.bin' },
+        { ...validArtifactMetadataPayload(), artifactPath: 'build/oversized.bin', label: 'oversized.bin' },
+        { ...validArtifactMetadataPayload(), artifactPath: 'build/firmware.hex', label: 'firmware.bin' },
+      ];
+
+      for (const payload of invalidPayloads) {
+        const result = registerDeviceArtifactMetadata(state, user, response.session.id, payload);
+        expect(result).toMatchObject({ ok: false, classification: 'schema' });
+      }
+      expect(state.deviceArtifacts.size).toBe(0);
+      expect(state.deviceBridgeApprovals.size).toBe(0);
+      expect(state.deviceBridgeOperations.size).toBe(0);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED', originalRegistry);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+      restoreEnv('ROADEX_WORKSPACES_JSON', originalWorkspaces);
+    }
+  });
+
+  it('revokes firmware artifact metadata without exposing bytes or creating operations', async () => {
+    const originalRegistry = process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    const originalWorkspaces = process.env.ROADEX_WORKSPACES_JSON;
+    const fixture = createArtifactFixture('server-produced-firmware-v1');
+    process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    process.env.ROADEX_WORKSPACES_JSON = workspaceEnv(fixture.root);
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      const registered = registerDeviceArtifactMetadata(state, user, response.session.id, validArtifactMetadataPayload());
+      expect(registered.ok).toBe(true);
+      if (!registered.ok) return;
+
+      const revoked = revokeDeviceArtifactMetadata(state, user, response.session.id, registered.artifact.id);
+
+      expect(revoked).toMatchObject({ ok: true, artifact: { id: registered.artifact.id, status: 'revoked' } });
+      expect(revoked.ok && revoked.artifact).not.toHaveProperty('storageReference');
+      expect(listDeviceArtifactMetadata(state, user, response.session.id)).toEqual([]);
+      expect(JSON.stringify([...state.deviceArtifacts.values()])).not.toContain('firmwareBytes');
+      expect(state.deviceBridgeApprovals.size).toBe(0);
+      expect(state.deviceBridgeOperations.size).toBe(0);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED', originalRegistry);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+      restoreEnv('ROADEX_WORKSPACES_JSON', originalWorkspaces);
+    }
+  });
+
+  it('creates and revokes owner-approved inventory bindings with HMAC device identity only', async () => {
+    const originalRegistry = process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    const originalIdentityHmac = process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY = testIdentityHmacKey();
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const admin = protectedGatewayUser();
+      const ordinary = { ...protectedGatewayUser(), id: 'ordinary', roles: ['user'] as UserProfile['roles'] };
+      const rawIdentity = 'chip=ESP32 mac=AA:BB:CC:DD:EE:FF serial=USB-SERIAL-123';
+
+      expect(createDeviceInventoryBinding(state, ordinary, validInventoryBindingPayload(rawIdentity))).toMatchObject({
+        ok: false,
+        classification: 'auth',
+      });
+      const created = createDeviceInventoryBinding(state, admin, validInventoryBindingPayload(rawIdentity));
+
+      expect(created).toMatchObject({
+        ok: true,
+        binding: {
+          projectId: 'roadex',
+          allowedOperation: 'esp32.flash',
+          secureBootExpected: 'required',
+          flashEncryptionExpected: 'required',
+          lifecycle: 'active',
+          createdBy: admin.id,
+        },
+      });
+      if (!created.ok) return;
+      const expectedIdentityTag = createHmac('sha256', testIdentityHmacKey())
+        .update(`roadex-device-bridge-identity:v1:roadex:${rawIdentity.toLowerCase()}`)
+        .digest('hex');
+      const auditKeyTag = createHmac('sha256', testAuditHmacKey())
+        .update(`roadex-device-bridge-identity:v1:roadex:${rawIdentity.toLowerCase()}`)
+        .digest('hex');
+      expect(created.binding.deviceIdentityTag).toMatch(/^[a-f0-9]{64}$/);
+      expect(created.binding.deviceIdentityTag).toBe(expectedIdentityTag);
+      expect(created.binding.deviceIdentityTag).not.toBe(auditKeyTag);
+      expect(JSON.stringify(created.binding)).not.toContain('AA:BB');
+      expect(JSON.stringify(created.binding)).not.toContain('USB-SERIAL-123');
+      expect(listDeviceInventoryBindings(state, admin, 'roadex')).toEqual([created.binding]);
+      expect(createDeviceInventoryBinding(state, admin, validInventoryBindingPayload(rawIdentity))).toMatchObject({
+        ok: false,
+        classification: 'quota',
+      });
+      expect(state.deviceBridgeApprovals.size).toBe(0);
+      expect(state.deviceBridgeOperations.size).toBe(0);
+      const audit = state.audit.events.at(-1);
+      expect(audit?.summary).not.toContain('AA:BB');
+      expect(audit?.summary).not.toContain('USB-SERIAL-123');
+
+      const revoked = revokeDeviceInventoryBinding(state, admin, created.binding.id);
+      expect(revoked).toMatchObject({ ok: true, binding: { lifecycle: 'revoked' } });
+      expect(listDeviceInventoryBindings(state, admin, 'roadex')).toEqual([]);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED', originalRegistry);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY', originalIdentityHmac);
+    }
+  });
+
+  it('fails inventory binding closed without the separate identity HMAC key', async () => {
+    const originalRegistry = process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    const originalIdentityHmac = process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    delete process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY;
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const admin = protectedGatewayUser();
+
+      expect(createDeviceInventoryBinding(state, admin, validInventoryBindingPayload())).toMatchObject({
+        ok: false,
+        classification: 'audit',
+      });
+      expect(listDeviceInventoryBindings(state, admin, 'roadex')).toBeUndefined();
+      state.deviceInventoryBindings.set('binding', {
+        id: 'binding',
+        projectId: 'roadex',
+        deviceIdentityTag: 'c'.repeat(64),
+        allowedOperation: 'esp32.flash',
+        secureBootExpected: 'required',
+        flashEncryptionExpected: 'required',
+        lifecycle: 'active',
+        createdBy: admin.id,
+        createdAt: new Date().toISOString(),
+      });
+      expect(revokeDeviceInventoryBinding(state, admin, 'binding')).toMatchObject({
+        ok: false,
+        classification: 'audit',
+      });
+      expect(state.deviceInventoryBindings.get('binding')?.lifecycle).toBe('active');
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED', originalRegistry);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY', originalIdentityHmac);
+    }
+  });
+
+  it('rejects malformed inventory binding payloads and rolls back persistence failures', async () => {
+    const originalRegistry = process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    const originalIdentityHmac = process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY;
+    const originalWorkspaces = process.env.ROADEX_WORKSPACES_JSON;
+    const fixture = createArtifactFixture('server-produced-firmware-v1');
+    process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY = testIdentityHmacKey();
+    process.env.ROADEX_WORKSPACES_JSON = workspaceEnv(fixture.root);
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const admin = protectedGatewayUser();
+      for (const payload of [
+        { ...validInventoryBindingPayload(), extra: true },
+        { ...validInventoryBindingPayload(), projectId: '../roadex' },
+        { ...validInventoryBindingPayload(), normalizedDeviceIdentity: 'bad/id' },
+        { ...validInventoryBindingPayload(), allowedOperation: 'esp32.erase' },
+        { ...validInventoryBindingPayload(), secureBootExpected: true },
+        { ...validInventoryBindingPayload(), flashEncryptionExpected: 1 },
+      ]) {
+        expect(createDeviceInventoryBinding(state, admin, payload)).toMatchObject({ ok: false });
+      }
+      expect(state.deviceInventoryBindings.size).toBe(0);
+
+      const response = await createSessionFromApi(state, admin, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      const auditCount = state.audit.events.length;
+      state.persistence = failingSavePersistence();
+      expect(() =>
+        registerDeviceArtifactMetadata(state, admin, response.session.id, validArtifactMetadataPayload()),
+      ).toThrow('injected persistence failure');
+      expect(() =>
+        createDeviceInventoryBinding(state, admin, validInventoryBindingPayload('chip=ESP32 mac=11:22:33:44:55:66')),
+      ).toThrow('injected persistence failure');
+      expect(state.deviceArtifacts.size).toBe(0);
+      expect(state.deviceInventoryBindings.size).toBe(0);
+      expect(state.audit.events).toHaveLength(auditCount);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED', originalRegistry);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY', originalIdentityHmac);
+      restoreEnv('ROADEX_WORKSPACES_JSON', originalWorkspaces);
     }
   });
 
@@ -1418,6 +1756,49 @@ function validDeviceBridgeRequest() {
   };
 }
 
+function validArtifactMetadataPayload() {
+  return {
+    artifactPath: 'build/firmware.bin',
+    label: 'firmware.bin',
+  };
+}
+
+function createArtifactFixture(contents: string) {
+  const root = mkdtempSync(join(tmpdir(), 'roadex-artifacts-'));
+  const artifactPath = 'build/firmware.bin';
+  writeProjectArtifact(root, artifactPath, contents);
+  return {
+    root,
+    artifactPath,
+    byteLength: Buffer.byteLength(contents),
+    sha256: createHash('sha256').update(contents).digest('hex'),
+  };
+}
+
+function writeProjectArtifact(root: string, artifactPath: string, contents: string): void {
+  const absolutePath = join(root, artifactPath);
+  mkdirSync(dirname(absolutePath), { recursive: true });
+  writeFileSync(absolutePath, contents);
+}
+
+function workspaceEnv(root: string): string {
+  return JSON.stringify([{ id: 'roadex', name: 'Roadex Portal', root }]);
+}
+
+function testIdentityHmacKey(): string {
+  return 'test-device-bridge-identity-hmac-key-32';
+}
+
+function validInventoryBindingPayload(normalizedDeviceIdentity = 'chip=ESP32 mac=AA:BB:CC:DD:EE:FF') {
+  return {
+    projectId: 'roadex',
+    normalizedDeviceIdentity,
+    allowedOperation: 'esp32.flash',
+    secureBootExpected: 'required',
+    flashEncryptionExpected: 'required',
+  };
+}
+
 function seedDeviceArtifact(
   state: ReturnType<typeof createInitialState>,
   sessionId: string,
@@ -1427,11 +1808,17 @@ function seedDeviceArtifact(
     id: 'artifact',
     projectId,
     sessionId,
+    producerUserId: mockUser.id,
+    producerThreadId: 'thread-artifact',
     label: 'firmware.bin',
     byteLength: 1024,
     mediaType: 'application/octet-stream',
+    format: 'esp32-firmware-bin',
     sha256: 'a'.repeat(64),
+    storageReference: 'artifact-ref-test',
+    status: 'active',
     createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
   };
   state.deviceArtifacts.set(artifact.id, artifact);
   return artifact;
@@ -1472,6 +1859,7 @@ function failingSavePersistence(): StatePersistence {
         deviceBridgeRequests: [],
         deviceBridgeApprovals: [],
         deviceBridgeOperations: [],
+        deviceInventoryBindings: [],
       };
     },
     save() {

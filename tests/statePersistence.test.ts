@@ -4,7 +4,11 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createJsonFilePersistence, serializeState } from '../src/server/statePersistence';
 import type { RoadexSession, StreamEvent } from '../src/shared/sessionContracts';
-import type { DeviceArtifactMetadata, DeviceBridgeOperationRecord } from '../src/shared/deviceBridgeContracts';
+import type {
+  DeviceArtifactMetadata,
+  DeviceBridgeOperationRecord,
+  DeviceInventoryBindingRecord,
+} from '../src/shared/deviceBridgeContracts';
 
 describe('state persistence', () => {
   it('writes Roadex runtime state as mode 600 JSON and reloads it', () => {
@@ -30,6 +34,7 @@ describe('state persistence', () => {
       deviceBridgeRequests: [],
       deviceBridgeApprovals: [],
       deviceBridgeOperations: [],
+      deviceInventoryBindings: [],
     });
 
     expect(readFileSync(path, 'utf8')).toContain('persisted');
@@ -139,23 +144,56 @@ describe('state persistence', () => {
         id: 'artifact',
         projectId: 'roadex',
         sessionId: 'session',
+        producerUserId: 'user',
+        producerThreadId: 'thread',
         label: 'firmware.bin',
         byteLength: 1024,
         mediaType: 'application/octet-stream',
+        format: 'esp32-firmware-bin',
         sha256: 'a'.repeat(64),
+        storageReference: 'artifact-ref-test',
+        status: 'active',
         createdAt: now,
+        expiresAt: new Date(Date.parse(now) + 60_000).toISOString(),
         credential: 'must-be-stripped',
         firmwareBytes: 'must-be-stripped',
       } as DeviceArtifactMetadata, {
         id: 'bad-artifact',
         projectId: 'roadex',
         sessionId: 'session',
+        producerUserId: 'user',
         label: 'bad.bin',
         byteLength: -1,
         mediaType: 'application/octet-stream',
+        format: 'esp32-firmware-bin',
         sha256: 'not-a-digest',
+        storageReference: 'bad-ref',
+        status: 'active',
         createdAt: now,
+        expiresAt: now,
       }],
+      deviceInventoryBindings: [{
+        id: 'binding',
+        projectId: 'roadex',
+        deviceIdentityTag: 'c'.repeat(64),
+        allowedOperation: 'esp32.flash',
+        secureBootExpected: 'required',
+        flashEncryptionExpected: 'required',
+        lifecycle: 'active',
+        createdBy: 'admin',
+        createdAt: now,
+        rawDeviceIdentity: 'must-be-stripped',
+      } as DeviceInventoryBindingRecord, {
+        id: 'bad-binding',
+        projectId: 'roadex',
+        deviceIdentityTag: 'raw-usb-serial',
+        allowedOperation: 'esp32.flash',
+        secureBootExpected: 'required',
+        flashEncryptionExpected: 'required',
+        lifecycle: 'active',
+        createdBy: 'admin',
+        createdAt: now,
+      } as DeviceInventoryBindingRecord],
       deviceBridgeApprovals: [{
         id: 'approval',
         userId: 'user',
@@ -192,6 +230,7 @@ describe('state persistence', () => {
     });
 
     expect(state.deviceArtifacts.map((record) => record.id)).toEqual(['artifact']);
+    expect(state.deviceInventoryBindings.map((record) => record.id)).toEqual(['binding']);
     expect(state.deviceBridgeApprovals.map((record) => record.id)).toEqual(['approval']);
     expect(state.deviceBridgeOperations.map((record) => record.id)).toEqual(['operation']);
     expect(JSON.stringify(state)).not.toContain('must-be-stripped');
@@ -200,6 +239,7 @@ describe('state persistence', () => {
     expect(JSON.stringify(state)).not.toContain('firmwareBytes');
     expect(JSON.stringify(state)).not.toContain('token');
     expect(JSON.stringify(state)).not.toContain('probeOutput');
+    expect(JSON.stringify(state)).not.toContain('raw-usb-serial');
   });
 
   it('bounds retained bridge records and removes stale unreferenced artifacts', () => {
@@ -210,11 +250,16 @@ describe('state persistence', () => {
       id,
       projectId: 'roadex',
       sessionId: 'session',
+      producerUserId: 'user',
       label: `${id}.bin`,
       byteLength: 1,
       mediaType: 'application/octet-stream',
+      format: 'esp32-firmware-bin',
       sha256: 'a'.repeat(64),
+      storageReference: `${id}-ref`,
+      status: 'active',
       createdAt,
+      expiresAt: new Date(Date.parse(createdAt) + 60_000).toISOString(),
     });
     const state = serializeState(
       { deviceArtifacts: [artifact('stale', stale), artifact('one', recent), artifact('two', recent)] },
@@ -251,11 +296,16 @@ describe('state persistence', () => {
       id,
       projectId: 'roadex',
       sessionId: 'session',
+      producerUserId: 'user',
       label: `${id}.bin`,
       byteLength: 1,
       mediaType: 'application/octet-stream',
+      format: 'esp32-firmware-bin',
       sha256: 'a'.repeat(64),
+      storageReference: `${id}-ref`,
+      status: 'active',
       createdAt: stale,
+      expiresAt: recent,
     });
     const state = serializeState(
       {

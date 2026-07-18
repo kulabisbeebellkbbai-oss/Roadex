@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  deviceBridgeIdentityHmacKey,
+  deviceBridgeMetadataRegistryEnabled,
   deviceBridgeOperationsEnabled,
   deviceBridgeRequestIntakeEnabled,
   getDeviceBridgePolicy,
   isAvailableDeviceBridgeIntakeRoute,
+  isAvailableDeviceBridgeMetadataRoute,
 } from '../src/server/deviceBridgePolicy';
 
 describe('device bridge intake policy', () => {
@@ -47,6 +50,44 @@ describe('device bridge intake policy', () => {
     }
   });
 
+  it('defaults metadata registry false and fails closed for malformed booleans', () => {
+    const original = process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED;
+    try {
+      delete process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED;
+      expect(deviceBridgeMetadataRegistryEnabled()).toBe(false);
+
+      process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED = 'false';
+      expect(deviceBridgeMetadataRegistryEnabled()).toBe(false);
+
+      process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED = '1';
+      expect(deviceBridgeMetadataRegistryEnabled()).toBe(false);
+
+      process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED = 'True';
+      expect(deviceBridgeMetadataRegistryEnabled()).toBe(false);
+
+      process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED = 'true';
+      expect(deviceBridgeMetadataRegistryEnabled()).toBe(true);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED', original);
+    }
+  });
+
+  it('requires a separate strong identity HMAC key for device pseudonyms', () => {
+    const original = process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY;
+    try {
+      delete process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY;
+      expect(deviceBridgeIdentityHmacKey()).toBeUndefined();
+
+      process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY = 'too-short';
+      expect(deviceBridgeIdentityHmacKey()).toBeUndefined();
+
+      process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY = 'test-device-bridge-identity-hmac-key-32';
+      expect(deviceBridgeIdentityHmacKey()).toBe('test-device-bridge-identity-hmac-key-32');
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY', original);
+    }
+  });
+
   it('exposes only the pending request intake route as an available bridge route', () => {
     expect(isAvailableDeviceBridgeIntakeRoute(
       'POST',
@@ -63,6 +104,35 @@ describe('device bridge intake policy', () => {
       ['POST', '/api/device-bridge/operations/operation-1/cancel'],
     ] as const) {
       expect(isAvailableDeviceBridgeIntakeRoute(method, path)).toBe(false);
+    }
+  });
+
+  it('exposes only artifact metadata and inventory binding registry routes', () => {
+    for (const [method, path] of [
+      ['POST', '/api/sessions/session-1/device-bridge/artifacts'],
+      ['GET', '/api/sessions/session-1/device-bridge/artifacts'],
+      ['POST', '/api/sessions/session-1/device-bridge/artifacts/artifact-1/revoke'],
+      ['POST', '/api/device-bridge/inventory-bindings'],
+      ['GET', '/api/device-bridge/inventory-bindings'],
+      ['POST', '/api/device-bridge/inventory-bindings/binding-1/revoke'],
+    ] as const) {
+      expect(isAvailableDeviceBridgeMetadataRoute(method, path)).toBe(true);
+    }
+
+    for (const [method, path] of [
+      ['GET', '/api/sessions/session-1/device-bridge/artifacts/artifact-1'],
+      ['GET', '/api/sessions/session-1/device-bridge/artifacts/artifact-1/bytes'],
+      ['POST', '/api/sessions/session-1/device-bridge/browser-chooser'],
+      ['POST', '/api/sessions/session-1/device-bridge/usb'],
+      ['POST', '/api/device-bridge/requests/request-1/approve'],
+      ['POST', '/api/device-bridge/approvals/approval-1/start'],
+      ['GET', '/api/device-bridge/operations/operation-1/artifact'],
+      ['POST', '/api/device-bridge/operations/operation-1/probe'],
+      ['POST', '/api/device-bridge/operations/operation-1/authorize-write'],
+      ['POST', '/api/device-bridge/operations/operation-1/flash'],
+      ['POST', '/api/device-bridge/operations/operation-1/cancel'],
+    ] as const) {
+      expect(isAvailableDeviceBridgeMetadataRoute(method, path)).toBe(false);
     }
   });
 });

@@ -6,6 +6,7 @@ import type {
   DeviceBridgeApprovalRecord,
   DeviceBridgeOperationRecord,
   DeviceBridgeRequestRecord,
+  DeviceInventoryBindingRecord,
 } from '../shared/deviceBridgeContracts.js';
 
 export type PersistedRoadexState = {
@@ -17,6 +18,7 @@ export type PersistedRoadexState = {
   deviceBridgeRequests: DeviceBridgeRequestRecord[];
   deviceBridgeApprovals: DeviceBridgeApprovalRecord[];
   deviceBridgeOperations: DeviceBridgeOperationRecord[];
+  deviceInventoryBindings: DeviceInventoryBindingRecord[];
 };
 
 export type StatePersistence = {
@@ -47,6 +49,7 @@ export function createMemoryPersistence(initial?: Partial<PersistedRoadexState>)
     deviceBridgeRequests: initial?.deviceBridgeRequests ?? [],
     deviceBridgeApprovals: initial?.deviceBridgeApprovals ?? [],
     deviceBridgeOperations: initial?.deviceBridgeOperations ?? [],
+    deviceInventoryBindings: initial?.deviceInventoryBindings ?? [],
   };
   return {
     load() {
@@ -103,6 +106,7 @@ function sanitizeState(state: Partial<PersistedRoadexState>, now = Date.now()): 
     deviceBridgeRequests: (state.deviceBridgeRequests ?? []).flatMap((record) => sanitizeRequest(record) ?? []),
     deviceBridgeApprovals: (state.deviceBridgeApprovals ?? []).flatMap((record) => sanitizeApproval(record) ?? []),
     deviceBridgeOperations: (state.deviceBridgeOperations ?? []).flatMap((record) => sanitizeOperation(record) ?? []),
+    deviceInventoryBindings: (state.deviceInventoryBindings ?? []).flatMap((record) => sanitizeInventoryBinding(record) ?? []),
   };
 }
 
@@ -174,6 +178,7 @@ function applyRetention(state: PersistedRoadexState, options: RetentionOptions):
     deviceBridgeRequests,
     deviceBridgeApprovals,
     deviceBridgeOperations,
+    deviceInventoryBindings: state.deviceInventoryBindings,
   };
 }
 
@@ -202,6 +207,7 @@ function emptyState(): PersistedRoadexState {
     deviceBridgeRequests: [],
     deviceBridgeApprovals: [],
     deviceBridgeOperations: [],
+    deviceInventoryBindings: [],
   };
 }
 
@@ -210,22 +216,67 @@ function sanitizeArtifact(record: DeviceArtifactMetadata): DeviceArtifactMetadat
     validBoundedString(record.id, 128) &&
     validBoundedString(record.projectId, 128) &&
     validBoundedString(record.sessionId, 128) &&
-    validBoundedString(record.label, 160) &&
+    validBoundedString(record.producerUserId, 128) &&
+    validOptionalBoundedString(record.producerThreadId, 128) &&
+    validOptionalBoundedString(record.producerRunId, 128) &&
+    /^[a-zA-Z0-9._-]{1,128}$/.test(record.label) &&
     Number.isSafeInteger(record.byteLength) &&
     record.byteLength > 0 &&
+    record.byteLength <= 16 * 1024 * 1024 &&
     record.mediaType === 'application/octet-stream' &&
+    record.format === 'esp32-firmware-bin' &&
     /^[a-f0-9]{64}$/i.test(record.sha256) &&
-    validIsoDate(record.createdAt)
+    validBoundedString(record.storageReference, 160) &&
+    !record.storageReference.includes('/') &&
+    ['active', 'revoked', 'expired'].includes(record.status) &&
+    validIsoDate(record.createdAt) &&
+    validIsoDate(record.expiresAt) &&
+    validOptionalIsoDate(record.revokedAt)
   )) return undefined;
   return {
     id: record.id.trim(),
     projectId: record.projectId.trim(),
     sessionId: record.sessionId.trim(),
+    producerUserId: record.producerUserId.trim(),
+    producerThreadId: cleanOptionalString(record.producerThreadId),
+    producerRunId: cleanOptionalString(record.producerRunId),
     label: record.label.trim(),
     byteLength: record.byteLength,
     mediaType: 'application/octet-stream',
+    format: 'esp32-firmware-bin',
     sha256: record.sha256.toLowerCase(),
+    storageReference: record.storageReference.trim(),
+    status: record.status,
     createdAt: new Date(record.createdAt).toISOString(),
+    expiresAt: new Date(record.expiresAt).toISOString(),
+    revokedAt: cleanOptionalIsoDate(record.revokedAt),
+  };
+}
+
+function sanitizeInventoryBinding(record: DeviceInventoryBindingRecord): DeviceInventoryBindingRecord | undefined {
+  if (!(
+    validBoundedString(record.id, 128) &&
+    validBoundedString(record.projectId, 128) &&
+    /^[a-f0-9]{64}$/i.test(record.deviceIdentityTag) &&
+    record.allowedOperation === 'esp32.flash' &&
+    ['required', 'not-required', 'unknown'].includes(record.secureBootExpected) &&
+    ['required', 'not-required', 'unknown'].includes(record.flashEncryptionExpected) &&
+    ['active', 'revoked'].includes(record.lifecycle) &&
+    validBoundedString(record.createdBy, 128) &&
+    validIsoDate(record.createdAt) &&
+    validOptionalIsoDate(record.revokedAt)
+  )) return undefined;
+  return {
+    id: record.id.trim(),
+    projectId: record.projectId.trim(),
+    deviceIdentityTag: record.deviceIdentityTag.toLowerCase(),
+    allowedOperation: 'esp32.flash',
+    secureBootExpected: record.secureBootExpected,
+    flashEncryptionExpected: record.flashEncryptionExpected,
+    lifecycle: record.lifecycle,
+    createdBy: record.createdBy.trim(),
+    createdAt: new Date(record.createdAt).toISOString(),
+    revokedAt: cleanOptionalIsoDate(record.revokedAt),
   };
 }
 
@@ -345,9 +396,21 @@ function validIsoDate(value: string): boolean {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value));
 }
 
+function validOptionalIsoDate(value: string | undefined): boolean {
+  return value === undefined || validIsoDate(value);
+}
+
 function validBoundedString(value: string, maxLength: number): boolean {
   const cleaned = cleanOptionalString(value);
   return Boolean(cleaned && cleaned.length <= maxLength);
+}
+
+function validOptionalBoundedString(value: string | undefined, maxLength: number): boolean {
+  return value === undefined || validBoundedString(value, maxLength);
+}
+
+function cleanOptionalIsoDate(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : new Date(value).toISOString();
 }
 
 function retainByTimestamp<T>(

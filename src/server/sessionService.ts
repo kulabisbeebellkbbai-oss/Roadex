@@ -1,9 +1,21 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  realpathSync,
+} from 'node:fs';
+import { basename, extname, isAbsolute, resolve, sep } from 'node:path';
 import { appendAudit, createAuditLogFromEvents, type AuditLog } from './auditLog.js';
 import { createCodexRunner, type SessionRunner } from './codexRunner.js';
 import {
   denyDeviceBridge,
   deviceBridgeAuditHmacKey,
+  deviceBridgeIdentityHmacKey,
+  deviceBridgeMetadataRegistryEnabled,
   deviceBridgeRequestIntakeEnabled,
   getDeviceBridgePolicy,
   resolveDeviceBridgeInventoryDevice,
@@ -35,11 +47,17 @@ import {
 } from '../shared/sessionContracts.js';
 import type {
   DeviceArtifactMetadata,
+  DeviceArtifactMetadataPublic,
+  DeviceArtifactMetadataRegistrationPayload,
   DeviceBridgeApprovalRecord,
+  DeviceBridgeMetadataResponse,
   DeviceBridgeOperationRecord,
   DeviceBridgeRequestPayload,
   DeviceBridgeRequestRecord,
   DeviceBridgeRequestResponse,
+  DeviceInventoryBindingPayload,
+  DeviceInventoryBindingRecord,
+  DeviceInventoryBindingResponse,
 } from '../shared/deviceBridgeContracts.js';
 
 export type RoadexState = {
@@ -58,6 +76,7 @@ export type RoadexState = {
   deviceBridgeRequests: Map<string, DeviceBridgeRequestRecord>;
   deviceBridgeApprovals: Map<string, DeviceBridgeApprovalRecord>;
   deviceBridgeOperations: Map<string, DeviceBridgeOperationRecord>;
+  deviceInventoryBindings: Map<string, DeviceInventoryBindingRecord>;
 };
 
 type StreamSubscriber = {
@@ -73,6 +92,23 @@ type DeviceBridgeRequestGate =
   | 'workspace'
   | 'artifact'
   | 'inventory'
+  | 'schema'
+  | 'quota';
+
+type DeviceBridgeMetadataGate =
+  | 'auth'
+  | 'audit'
+  | 'device-bridge'
+  | 'session'
+  | 'workspace'
+  | 'schema'
+  | 'quota';
+
+type DeviceInventoryBindingGate =
+  | 'auth'
+  | 'audit'
+  | 'device-bridge'
+  | 'workspace'
   | 'schema'
   | 'quota';
 
@@ -110,6 +146,7 @@ export function createInitialState(
     deviceBridgeRequests: new Map(persisted.deviceBridgeRequests.map((record) => [record.id, record])),
     deviceBridgeApprovals: new Map(persisted.deviceBridgeApprovals.map((record) => [record.id, record])),
     deviceBridgeOperations: new Map(persisted.deviceBridgeOperations.map((record) => [record.id, record])),
+    deviceInventoryBindings: new Map(persisted.deviceInventoryBindings.map((record) => [record.id, record])),
   };
 }
 
@@ -635,6 +672,306 @@ export function requestDeviceBridgeIntake(
   return { ok: true, request };
 }
 
+export function registerDeviceArtifactMetadata(
+  state: RoadexState,
+  user: UserProfile,
+  sessionId: string,
+  payload: unknown,
+): DeviceBridgeMetadataResponse {
+  const auditHmacKey = deviceBridgeAuditHmacKey();
+  if (!deviceBridgeMetadataRegistryEnabled()) {
+    return auditHmacKey
+      ? denyDeviceBridgeMetadata(state, user, sessionId, 'device-bridge', auditHmacKey)
+      : publicDeviceBridgeMetadataDenial('device-bridge');
+  }
+  if (!auditHmacKey) return publicDeviceBridgeMetadataDenial('audit');
+  if (user.authMode !== 'protected-gateway') {
+    return denyDeviceBridgeMetadata(state, user, sessionId, 'auth', auditHmacKey);
+  }
+
+  const session = getOwnedSession(state.sessions, user.id, sessionId);
+  if (!session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle !== 'ready') {
+    return denyDeviceBridgeMetadata(state, user, sessionId, 'session', auditHmacKey);
+  }
+
+  const parsed = parseDeviceArtifactMetadataPayload(payload);
+  if (!parsed.ok) {
+    return denyDeviceBridgeMetadata(state, user, session.id, 'schema', auditHmacKey);
+  }
+  const artifactFile = readProjectArtifactMetadata(session.workspace.root, parsed.payload);
+  if (!artifactFile.ok) {
+    return denyDeviceBridgeMetadata(state, user, session.id, 'schema', auditHmacKey);
+  }
+  if (activeDeviceArtifactCountForSession(state, session.id) >= 20) {
+    return denyDeviceBridgeMetadata(state, user, session.id, 'quota', auditHmacKey);
+  }
+  if (activeDeviceArtifactCountForProject(state, session.workspace.id) >= 50) {
+    return denyDeviceBridgeMetadata(state, user, session.id, 'quota', auditHmacKey);
+  }
+
+  const createdAt = new Date().toISOString();
+  const artifact: DeviceArtifactMetadata = {
+    id: `artifact-${randomUUID()}`,
+    projectId: session.workspace.id,
+    sessionId: session.id,
+    producerUserId: user.id,
+    producerThreadId: session.codexThreadId,
+    label: artifactFile.metadata.label,
+    byteLength: artifactFile.metadata.byteLength,
+    mediaType: 'application/octet-stream',
+    format: 'esp32-firmware-bin',
+    sha256: artifactFile.metadata.sha256,
+    storageReference: `artifact-ref-${randomUUID()}`,
+    status: 'active',
+    createdAt,
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60_000).toISOString(),
+  };
+  const auditEvent = createBridgeAuditEvent(
+    state,
+    auditHmacKey,
+    user,
+    'device_bridge.artifact',
+    session.id,
+    'allowed',
+    bridgeAuditSummary(auditHmacKey, {
+      classification: 'artifact_registered',
+      userId: user.id,
+      sessionId: session.id,
+      requestId: artifact.id,
+    }),
+  );
+  persistStateSnapshot(state, {
+    deviceArtifacts: [...state.deviceArtifacts.values(), artifact],
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.deviceArtifacts.set(artifact.id, artifact);
+  state.audit.events.push(auditEvent);
+  return { ok: true, artifact: publicDeviceArtifactMetadata(artifact) };
+}
+
+export function listDeviceArtifactMetadata(
+  state: RoadexState,
+  user: UserProfile,
+  sessionId: string,
+): DeviceArtifactMetadataPublic[] | undefined {
+  if (!deviceBridgeMetadataRegistryEnabled() || user.authMode !== 'protected-gateway') return undefined;
+  const session = getOwnedSession(state.sessions, user.id, sessionId);
+  if (!session || !isManagedSessionAuthorized(state, user, session)) return undefined;
+  return [...state.deviceArtifacts.values()]
+    .filter((artifact) =>
+      artifact.sessionId === session.id &&
+      artifact.projectId === session.workspace.id &&
+      artifact.status === 'active' &&
+      Date.parse(artifact.expiresAt) > Date.now(),
+    )
+    .map(publicDeviceArtifactMetadata);
+}
+
+export function revokeDeviceArtifactMetadata(
+  state: RoadexState,
+  user: UserProfile,
+  sessionId: string,
+  artifactId: string,
+): DeviceBridgeMetadataResponse {
+  const auditHmacKey = deviceBridgeAuditHmacKey();
+  if (!deviceBridgeMetadataRegistryEnabled()) {
+    return auditHmacKey
+      ? denyDeviceBridgeMetadata(state, user, sessionId, 'device-bridge', auditHmacKey)
+      : publicDeviceBridgeMetadataDenial('device-bridge');
+  }
+  if (!auditHmacKey) return publicDeviceBridgeMetadataDenial('audit');
+  if (user.authMode !== 'protected-gateway') {
+    return denyDeviceBridgeMetadata(state, user, sessionId, 'auth', auditHmacKey);
+  }
+  const session = getOwnedSession(state.sessions, user.id, sessionId);
+  const artifact = state.deviceArtifacts.get(artifactId);
+  if (
+    !session ||
+    !isManagedSessionAuthorized(state, user, session) ||
+    !artifact ||
+    artifact.sessionId !== session.id ||
+    artifact.projectId !== session.workspace.id
+  ) {
+    return denyDeviceBridgeMetadata(state, user, sessionId, 'session', auditHmacKey);
+  }
+  const revoked: DeviceArtifactMetadata = {
+    ...artifact,
+    status: 'revoked',
+    revokedAt: new Date().toISOString(),
+  };
+  const auditEvent = createBridgeAuditEvent(
+    state,
+    auditHmacKey,
+    user,
+    'device_bridge.artifact',
+    session.id,
+    'allowed',
+    bridgeAuditSummary(auditHmacKey, {
+      classification: 'artifact_revoked',
+      userId: user.id,
+      sessionId: session.id,
+      requestId: artifact.id,
+    }),
+  );
+  persistStateSnapshot(state, {
+    deviceArtifacts: [...state.deviceArtifacts.values()].map((record) => record.id === artifact.id ? revoked : record),
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.deviceArtifacts.set(artifact.id, revoked);
+  state.audit.events.push(auditEvent);
+  return { ok: true, artifact: publicDeviceArtifactMetadata(revoked) };
+}
+
+export function createDeviceInventoryBinding(
+  state: RoadexState,
+  user: UserProfile,
+  payload: unknown,
+): DeviceInventoryBindingResponse {
+  const auditHmacKey = deviceBridgeAuditHmacKey();
+  const identityHmacKey = deviceBridgeIdentityHmacKey();
+  if (!deviceBridgeMetadataRegistryEnabled()) {
+    return auditHmacKey
+      ? denyDeviceInventoryBinding(state, user, 'device-bridge', 'device-bridge', auditHmacKey)
+      : publicDeviceInventoryBindingDenial('device-bridge');
+  }
+  if (!auditHmacKey) return publicDeviceInventoryBindingDenial('audit');
+  if (!identityHmacKey) {
+    return denyDeviceInventoryBinding(state, user, 'device-bridge', 'audit', auditHmacKey);
+  }
+  if (user.authMode !== 'protected-gateway' || !canAuthorizeInventoryBinding(user)) {
+    return denyDeviceInventoryBinding(state, user, 'device-bridge', 'auth', auditHmacKey);
+  }
+  const parsed = parseDeviceInventoryBindingPayload(payload);
+  if (!parsed.ok) {
+    return denyDeviceInventoryBinding(state, user, 'device-bridge', 'schema', auditHmacKey);
+  }
+  const workspaceDecision = resolveWorkspaceForUser(user, parsed.payload.projectId);
+  if (!workspaceDecision.ok) {
+    return denyDeviceInventoryBinding(state, user, parsed.payload.projectId, 'workspace', auditHmacKey);
+  }
+  if (activeInventoryBindingCountForProject(state, workspaceDecision.workspace.id) >= 25) {
+    return denyDeviceInventoryBinding(state, user, workspaceDecision.workspace.id, 'quota', auditHmacKey);
+  }
+  const deviceIdentityTag = applicationHmacTag(
+    identityHmacKey,
+    normalizedDeviceIdentity(parsed.payload.normalizedDeviceIdentity, workspaceDecision.workspace.id),
+  );
+  const duplicate = [...state.deviceInventoryBindings.values()].some(
+    (binding) =>
+      binding.projectId === workspaceDecision.workspace.id &&
+      binding.deviceIdentityTag === deviceIdentityTag &&
+      binding.allowedOperation === parsed.payload.allowedOperation &&
+      binding.lifecycle === 'active',
+  );
+  if (duplicate) {
+    return denyDeviceInventoryBinding(state, user, workspaceDecision.workspace.id, 'quota', auditHmacKey);
+  }
+
+  const binding: DeviceInventoryBindingRecord = {
+    id: `inventory-binding-${randomUUID()}`,
+    projectId: workspaceDecision.workspace.id,
+    deviceIdentityTag,
+    allowedOperation: 'esp32.flash',
+    secureBootExpected: parsed.payload.secureBootExpected,
+    flashEncryptionExpected: parsed.payload.flashEncryptionExpected,
+    lifecycle: 'active',
+    createdBy: user.id,
+    createdAt: new Date().toISOString(),
+  };
+  const auditEvent = createBridgeAuditEvent(
+    state,
+    auditHmacKey,
+    user,
+    'device_bridge.inventory_binding',
+    workspaceDecision.workspace.id,
+    'allowed',
+    bridgeAuditSummary(auditHmacKey, {
+      classification: 'inventory_binding_created',
+      userId: user.id,
+      sessionId: workspaceDecision.workspace.id,
+      requestId: binding.id,
+    }),
+  );
+  persistStateSnapshot(state, {
+    deviceInventoryBindings: [...state.deviceInventoryBindings.values(), binding],
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.deviceInventoryBindings.set(binding.id, binding);
+  state.audit.events.push(auditEvent);
+  return { ok: true, binding };
+}
+
+export function listDeviceInventoryBindings(
+  state: RoadexState,
+  user: UserProfile,
+  projectId: string,
+): DeviceInventoryBindingRecord[] | undefined {
+  if (
+    !deviceBridgeMetadataRegistryEnabled() ||
+    !deviceBridgeIdentityHmacKey() ||
+    user.authMode !== 'protected-gateway' ||
+    !canAuthorizeInventoryBinding(user)
+  ) {
+    return undefined;
+  }
+  const workspaceDecision = resolveWorkspaceForUser(user, projectId);
+  if (!workspaceDecision.ok) return undefined;
+  return [...state.deviceInventoryBindings.values()].filter(
+    (binding) => binding.projectId === workspaceDecision.workspace.id && binding.lifecycle === 'active',
+  );
+}
+
+export function revokeDeviceInventoryBinding(
+  state: RoadexState,
+  user: UserProfile,
+  bindingId: string,
+): DeviceInventoryBindingResponse {
+  const auditHmacKey = deviceBridgeAuditHmacKey();
+  const identityHmacKey = deviceBridgeIdentityHmacKey();
+  if (!deviceBridgeMetadataRegistryEnabled()) {
+    return auditHmacKey
+      ? denyDeviceInventoryBinding(state, user, 'device-bridge', 'device-bridge', auditHmacKey)
+      : publicDeviceInventoryBindingDenial('device-bridge');
+  }
+  if (!auditHmacKey) return publicDeviceInventoryBindingDenial('audit');
+  if (!identityHmacKey) {
+    return denyDeviceInventoryBinding(state, user, 'device-bridge', 'audit', auditHmacKey);
+  }
+  if (user.authMode !== 'protected-gateway' || !canAuthorizeInventoryBinding(user)) {
+    return denyDeviceInventoryBinding(state, user, 'device-bridge', 'auth', auditHmacKey);
+  }
+  const binding = state.deviceInventoryBindings.get(bindingId);
+  if (!binding || !resolveWorkspaceForUser(user, binding.projectId).ok) {
+    return denyDeviceInventoryBinding(state, user, 'device-bridge', 'workspace', auditHmacKey);
+  }
+  const revoked: DeviceInventoryBindingRecord = {
+    ...binding,
+    lifecycle: 'revoked',
+    revokedAt: new Date().toISOString(),
+  };
+  const auditEvent = createBridgeAuditEvent(
+    state,
+    auditHmacKey,
+    user,
+    'device_bridge.inventory_binding',
+    binding.projectId,
+    'allowed',
+    bridgeAuditSummary(auditHmacKey, {
+      classification: 'inventory_binding_revoked',
+      userId: user.id,
+      sessionId: binding.projectId,
+      requestId: binding.id,
+    }),
+  );
+  persistStateSnapshot(state, {
+    deviceInventoryBindings: [...state.deviceInventoryBindings.values()].map((record) => record.id === binding.id ? revoked : record),
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.deviceInventoryBindings.set(binding.id, revoked);
+  state.audit.events.push(auditEvent);
+  return { ok: true, binding: revoked };
+}
+
 export function cancelSessionRun(
   state: RoadexState,
   user: UserProfile,
@@ -825,6 +1162,98 @@ function publicDeviceBridgeDenial(classification: DeviceBridgeRequestGate): Devi
   };
 }
 
+function denyDeviceBridgeMetadata(
+  state: RoadexState,
+  user: UserProfile,
+  sessionId: string,
+  gate: DeviceBridgeMetadataGate,
+  auditHmacKey: string,
+): DeviceBridgeMetadataResponse {
+  const auditEvent = createBridgeAuditEvent(
+    state,
+    auditHmacKey,
+    user,
+    'security.denied',
+    sessionId,
+    'denied',
+    bridgeAuditSummary(auditHmacKey, {
+      classification: gate,
+      userId: user.id,
+      sessionId,
+    }),
+  );
+  persistStateSnapshot(state, {
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.audit.events.push(auditEvent);
+  return publicDeviceBridgeMetadataDenial(gate);
+}
+
+function publicDeviceBridgeMetadataDenial(classification: DeviceBridgeMetadataGate): DeviceBridgeMetadataResponse {
+  return {
+    ok: false,
+    gate: 'device-bridge',
+    reason: 'Device bridge metadata denied.',
+    classification,
+  };
+}
+
+function publicDeviceArtifactMetadata(artifact: DeviceArtifactMetadata): DeviceArtifactMetadataPublic {
+  return {
+    id: artifact.id,
+    projectId: artifact.projectId,
+    sessionId: artifact.sessionId,
+    producerUserId: artifact.producerUserId,
+    producerThreadId: artifact.producerThreadId,
+    producerRunId: artifact.producerRunId,
+    label: artifact.label,
+    byteLength: artifact.byteLength,
+    mediaType: artifact.mediaType,
+    format: artifact.format,
+    sha256: artifact.sha256,
+    status: artifact.status,
+    createdAt: artifact.createdAt,
+    expiresAt: artifact.expiresAt,
+    revokedAt: artifact.revokedAt,
+  };
+}
+
+function denyDeviceInventoryBinding(
+  state: RoadexState,
+  user: UserProfile,
+  resource: string,
+  gate: DeviceInventoryBindingGate,
+  auditHmacKey: string,
+): DeviceInventoryBindingResponse {
+  const auditEvent = createBridgeAuditEvent(
+    state,
+    auditHmacKey,
+    user,
+    'security.denied',
+    resource,
+    'denied',
+    bridgeAuditSummary(auditHmacKey, {
+      classification: gate,
+      userId: user.id,
+      sessionId: resource,
+    }),
+  );
+  persistStateSnapshot(state, {
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.audit.events.push(auditEvent);
+  return publicDeviceInventoryBindingDenial(gate);
+}
+
+function publicDeviceInventoryBindingDenial(classification: DeviceInventoryBindingGate): DeviceInventoryBindingResponse {
+  return {
+    ok: false,
+    gate: 'device-bridge',
+    reason: 'Device bridge inventory binding denied.',
+    classification,
+  };
+}
+
 function createBridgeAuditEvent(
   state: RoadexState,
   auditHmacKey: string,
@@ -867,6 +1296,10 @@ function auditTag(key: string, value: string): string {
   return createHmac('sha256', key).update(value).digest('hex').slice(0, 16);
 }
 
+function applicationHmacTag(key: string, value: string): string {
+  return createHmac('sha256', key).update(value).digest('hex');
+}
+
 function pendingDeviceBridgeRequestCountForSession(state: RoadexState, sessionId: string): number {
   const now = Date.now();
   return [...state.deviceBridgeRequests.values()].filter(
@@ -879,6 +1312,207 @@ function pendingDeviceBridgeRequestCountForUser(state: RoadexState, userId: stri
   return [...state.deviceBridgeRequests.values()].filter(
     (request) => request.userId === userId && request.status === 'pending' && Date.parse(request.expiresAt) > now,
   ).length;
+}
+
+function activeDeviceArtifactCountForSession(state: RoadexState, sessionId: string): number {
+  const now = Date.now();
+  return [...state.deviceArtifacts.values()].filter(
+    (artifact) => artifact.sessionId === sessionId && artifact.status === 'active' && Date.parse(artifact.expiresAt) > now,
+  ).length;
+}
+
+function activeDeviceArtifactCountForProject(state: RoadexState, projectId: string): number {
+  const now = Date.now();
+  return [...state.deviceArtifacts.values()].filter(
+    (artifact) => artifact.projectId === projectId && artifact.status === 'active' && Date.parse(artifact.expiresAt) > now,
+  ).length;
+}
+
+function activeInventoryBindingCountForProject(state: RoadexState, projectId: string): number {
+  return [...state.deviceInventoryBindings.values()].filter(
+    (binding) => binding.projectId === projectId && binding.lifecycle === 'active',
+  ).length;
+}
+
+function parseDeviceArtifactMetadataPayload(payload: unknown): {
+  ok: true;
+  payload: DeviceArtifactMetadataRegistrationPayload;
+} | {
+  ok: false;
+} {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return { ok: false };
+  const record = payload as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const expectedKeys = record.label === undefined ? ['artifactPath'] : ['artifactPath', 'label'];
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) return { ok: false };
+  if (
+    typeof record.artifactPath !== 'string' ||
+    !validProjectRelativeArtifactPath(record.artifactPath) ||
+    (record.label !== undefined && (
+      typeof record.label !== 'string' ||
+      !validArtifactLabel(record.label)
+    ))
+  ) return { ok: false };
+  return {
+    ok: true,
+    payload: {
+      artifactPath: record.artifactPath.trim(),
+      label: record.label === undefined ? basename(record.artifactPath.trim()) : record.label.trim(),
+    },
+  };
+}
+
+function readProjectArtifactMetadata(
+  workspaceRoot: string,
+  payload: DeviceArtifactMetadataRegistrationPayload,
+): {
+  ok: true;
+  metadata: Pick<DeviceArtifactMetadata, 'label' | 'byteLength' | 'sha256'>;
+} | {
+  ok: false;
+} {
+  let fd: number | undefined;
+  try {
+    const label = payload.label;
+    if (typeof label !== 'string' || !validArtifactLabel(label) || extname(label).toLowerCase() !== '.bin') {
+      return { ok: false };
+    }
+    const root = realpathSync(workspaceRoot);
+    const artifactPath = resolve(root, payload.artifactPath);
+    if (!isPathWithin(root, artifactPath)) return { ok: false };
+    if (hasSymlinkPathComponent(root, payload.artifactPath)) return { ok: false };
+    fd = openSync(artifactPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.size <= 0 || before.size > 16 * 1024 * 1024) return { ok: false };
+    const descriptorPath = realpathSync(`/proc/self/fd/${fd}`);
+    if (!isPathWithin(root, descriptorPath)) return { ok: false };
+    if (extname(descriptorPath).toLowerCase() !== '.bin') return { ok: false };
+    const hashed = hashOpenFileDescriptor(fd, before.size);
+    if (!hashed.ok) return { ok: false };
+    const after = fstatSync(fd);
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs
+    ) return { ok: false };
+    return {
+      ok: true,
+      metadata: {
+        label,
+        byteLength: hashed.byteLength,
+        sha256: hashed.sha256,
+      },
+    };
+  } catch {
+    return { ok: false };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function hashOpenFileDescriptor(fd: number, expectedSize: number): {
+  ok: true;
+  byteLength: number;
+  sha256: string;
+} | {
+  ok: false;
+} {
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let offset = 0;
+  while (offset < expectedSize) {
+    const bytesRead = readSync(fd, buffer, 0, Math.min(buffer.byteLength, expectedSize - offset), offset);
+    if (bytesRead <= 0) return { ok: false };
+    hash.update(buffer.subarray(0, bytesRead));
+    offset += bytesRead;
+    if (offset > 16 * 1024 * 1024) return { ok: false };
+  }
+  if (offset <= 0 || offset !== expectedSize || offset > 16 * 1024 * 1024) return { ok: false };
+  return {
+    ok: true,
+    byteLength: offset,
+    sha256: hash.digest('hex'),
+  };
+}
+
+function validProjectRelativeArtifactPath(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 256 || trimmed.includes('\0') || trimmed.includes('\\')) return false;
+  if (isAbsolute(trimmed) || trimmed.endsWith('/')) return false;
+  const segments = trimmed.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) return false;
+  if (segments.some((segment) => segment.length > 128)) return false;
+  return extname(trimmed).toLowerCase() === '.bin';
+}
+
+function validArtifactLabel(value: string): boolean {
+  return /^[a-zA-Z0-9._-]{1,128}$/.test(value) && extname(value).toLowerCase() === '.bin';
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const normalizedRoot = root.endsWith(sep) ? root : `${root}${sep}`;
+  return candidate === root || candidate.startsWith(normalizedRoot);
+}
+
+function hasSymlinkPathComponent(root: string, projectRelativePath: string): boolean {
+  let current = root;
+  for (const segment of projectRelativePath.split('/')) {
+    current = resolve(current, segment);
+    if (lstatSync(current).isSymbolicLink()) return true;
+  }
+  return false;
+}
+
+function parseDeviceInventoryBindingPayload(payload: unknown): {
+  ok: true;
+  payload: DeviceInventoryBindingPayload;
+} | {
+  ok: false;
+} {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return { ok: false };
+  const record = payload as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const expectedKeys = [
+    'allowedOperation',
+    'flashEncryptionExpected',
+    'normalizedDeviceIdentity',
+    'projectId',
+    'secureBootExpected',
+  ];
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) return { ok: false };
+  if (
+    !boundedToken(record.projectId, 128) ||
+    typeof record.normalizedDeviceIdentity !== 'string' ||
+    record.normalizedDeviceIdentity.trim().length < 8 ||
+    record.normalizedDeviceIdentity.trim().length > 256 ||
+    /[\r\n/\\]/.test(record.normalizedDeviceIdentity) ||
+    record.allowedOperation !== 'esp32.flash' ||
+    !expectedDeviceSecurityValue(record.secureBootExpected) ||
+    !expectedDeviceSecurityValue(record.flashEncryptionExpected)
+  ) return { ok: false };
+  return {
+    ok: true,
+    payload: {
+      projectId: record.projectId.trim(),
+      normalizedDeviceIdentity: record.normalizedDeviceIdentity.trim().toLowerCase(),
+      allowedOperation: 'esp32.flash',
+      secureBootExpected: record.secureBootExpected,
+      flashEncryptionExpected: record.flashEncryptionExpected,
+    },
+  };
+}
+
+function expectedDeviceSecurityValue(value: unknown): value is DeviceInventoryBindingPayload['secureBootExpected'] {
+  return value === 'required' || value === 'not-required' || value === 'unknown';
+}
+
+function canAuthorizeInventoryBinding(user: UserProfile): boolean {
+  return user.roles.includes('admin') || user.roles.includes('security-reviewer');
+}
+
+function normalizedDeviceIdentity(value: string, projectId: string): string {
+  return `roadex-device-bridge-identity:v1:${projectId}:${value.trim().toLowerCase().replace(/\s+/g, ' ')}`;
 }
 
 function parseDeviceBridgeRequestPayload(payload: unknown): {
@@ -937,6 +1571,7 @@ function saveState(state: RoadexState): void {
     deviceBridgeRequests: [...state.deviceBridgeRequests.values()],
     deviceBridgeApprovals: [...state.deviceBridgeApprovals.values()],
     deviceBridgeOperations: [...state.deviceBridgeOperations.values()],
+    deviceInventoryBindings: [...state.deviceInventoryBindings.values()],
   }));
 }
 
@@ -951,6 +1586,7 @@ function persistStateSnapshot(
     deviceBridgeRequests: DeviceBridgeRequestRecord[];
     deviceBridgeApprovals: DeviceBridgeApprovalRecord[];
     deviceBridgeOperations: DeviceBridgeOperationRecord[];
+    deviceInventoryBindings: DeviceInventoryBindingRecord[];
   }>,
 ): void {
   state.persistence.save(serializeState({
@@ -962,6 +1598,7 @@ function persistStateSnapshot(
     deviceBridgeRequests: overrides.deviceBridgeRequests ?? [...state.deviceBridgeRequests.values()],
     deviceBridgeApprovals: overrides.deviceBridgeApprovals ?? [...state.deviceBridgeApprovals.values()],
     deviceBridgeOperations: overrides.deviceBridgeOperations ?? [...state.deviceBridgeOperations.values()],
+    deviceInventoryBindings: overrides.deviceInventoryBindings ?? [...state.deviceInventoryBindings.values()],
   }));
 }
 

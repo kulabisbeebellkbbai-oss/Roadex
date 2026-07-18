@@ -6,16 +6,25 @@ import {
   bootstrap,
   cancelSessionRun,
   closeSession,
+  createDeviceInventoryBinding,
   createInitialState,
   createSessionFromApi,
+  listDeviceArtifactMetadata,
   listArchivedSessions,
+  listDeviceInventoryBindings,
   reopenSession,
+  registerDeviceArtifactMetadata,
   requestDeviceBridgeIntake,
+  revokeDeviceArtifactMetadata,
+  revokeDeviceInventoryBinding,
   subscribeToSessionStream,
   streamEventsForSession,
   submitPrompt,
 } from '../src/server/sessionService.js';
-import { isAvailableDeviceBridgeIntakeRoute } from '../src/server/deviceBridgePolicy.js';
+import {
+  isAvailableDeviceBridgeIntakeRoute,
+  isAvailableDeviceBridgeMetadataRoute,
+} from '../src/server/deviceBridgePolicy.js';
 import type { CreateSessionRequest } from '../src/shared/sessionContracts.js';
 
 const host = process.env.HOST ?? '127.0.0.1';
@@ -154,6 +163,64 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       gate: result.gate,
       reason: result.reason,
     });
+    return;
+  }
+
+  const deviceBridgeArtifactCollectionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/device-bridge\/artifacts$/);
+  if (deviceBridgeArtifactCollectionMatch && isAvailableDeviceBridgeMetadataRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const sessionId = decodeURIComponent(deviceBridgeArtifactCollectionMatch[1]);
+    if (req.method === 'GET') {
+      const artifacts = listDeviceArtifactMetadata(state, auth.user, sessionId);
+      sendJson(res, artifacts ? 200 : 403, artifacts ? { artifacts } : {
+        error: { code: 'device_bridge_denied', message: 'Device bridge metadata denied.', gate: 'device-bridge' },
+      });
+      return;
+    }
+    const body = await readJson<unknown>(req);
+    const result = registerDeviceArtifactMetadata(state, auth.user, sessionId, body);
+    sendJson(res, result.ok ? 201 : 403, result);
+    return;
+  }
+
+  const deviceBridgeArtifactRevokeMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/device-bridge\/artifacts\/([^/]+)\/revoke$/);
+  if (deviceBridgeArtifactRevokeMatch && isAvailableDeviceBridgeMetadataRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const result = revokeDeviceArtifactMetadata(
+      state,
+      auth.user,
+      decodeURIComponent(deviceBridgeArtifactRevokeMatch[1]),
+      decodeURIComponent(deviceBridgeArtifactRevokeMatch[2]),
+    );
+    sendJson(res, result.ok ? 200 : 403, result);
+    return;
+  }
+
+  if (url.pathname === '/api/device-bridge/inventory-bindings' && isAvailableDeviceBridgeMetadataRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    if (req.method === 'GET') {
+      const projectId = url.searchParams.get('projectId') ?? '';
+      const bindings = listDeviceInventoryBindings(state, auth.user, projectId);
+      sendJson(res, bindings ? 200 : 403, bindings ? { bindings } : {
+        error: { code: 'device_bridge_denied', message: 'Device bridge inventory binding denied.', gate: 'device-bridge' },
+      });
+      return;
+    }
+    const body = await readJson<unknown>(req);
+    const result = createDeviceInventoryBinding(state, auth.user, body);
+    sendJson(res, result.ok ? 201 : 403, result);
+    return;
+  }
+
+  const inventoryRevokeMatch = url.pathname.match(/^\/api\/device-bridge\/inventory-bindings\/([^/]+)\/revoke$/);
+  if (inventoryRevokeMatch && isAvailableDeviceBridgeMetadataRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const result = revokeDeviceInventoryBinding(state, auth.user, decodeURIComponent(inventoryRevokeMatch[1]));
+    sendJson(res, result.ok ? 200 : 403, result);
     return;
   }
 

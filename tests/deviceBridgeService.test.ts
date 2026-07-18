@@ -228,11 +228,17 @@ function createArtifact(): DeviceArtifactMetadata {
     id: 'artifact',
     projectId: 'roadex',
     sessionId: 'session',
+    producerUserId: mockUser.id,
+    producerThreadId: 'thread-artifact',
     label: 'firmware.bin',
     byteLength: 1024,
     mediaType: 'application/octet-stream',
+    format: 'esp32-firmware-bin',
     sha256: 'a'.repeat(64),
+    storageReference: 'artifact-ref-test',
+    status: 'active',
     createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
   };
 }
 

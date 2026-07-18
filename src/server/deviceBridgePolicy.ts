@@ -5,7 +5,9 @@ import type { DeviceBridgePolicy } from '../shared/deviceBridgeContracts.js';
 const disabledReason = 'Client device bridge implementation is disabled pending separate exposure and hardware approvals.';
 const inventoryJsonEnv = 'ROADEX_DEVICE_BRIDGE_INVENTORY_JSON';
 const requestIntakeEnabledEnv = 'ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED';
+const metadataRegistryEnabledEnv = 'ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED';
 const auditHmacKeyEnv = 'ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY';
+const identityHmacKeyEnv = 'ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY';
 
 export type DeviceBridgeInventoryDevice = {
   projectId: string;
@@ -27,12 +29,21 @@ export function deviceBridgeRequestIntakeEnabled(): boolean {
   return strictEnabledByEnv(process.env[requestIntakeEnabledEnv]);
 }
 
+export function deviceBridgeMetadataRegistryEnabled(): boolean {
+  return strictEnabledByEnv(process.env[metadataRegistryEnabledEnv]);
+}
+
 export function deviceBridgeOperationsEnabled(): false {
   return false;
 }
 
 export function deviceBridgeAuditHmacKey(): string | undefined {
   const key = process.env[auditHmacKeyEnv]?.trim();
+  return key && key.length >= 32 ? key : undefined;
+}
+
+export function deviceBridgeIdentityHmacKey(): string | undefined {
+  const key = process.env[identityHmacKeyEnv]?.trim();
   return key && key.length >= 32 ? key : undefined;
 }
 
@@ -74,8 +85,16 @@ export function isAvailableDeviceBridgeIntakeRoute(method: string | undefined, p
   return method === 'POST' && /^\/api\/sessions\/[^/]+\/device-bridge\/requests$/.test(pathname);
 }
 
-function strictEnabledByEnv(value: string | undefined): boolean {
-  if (value === undefined || value === 'false') return false;
-  if (value === 'true') return true;
+export function isAvailableDeviceBridgeMetadataRoute(method: string | undefined, pathname: string): boolean {
+  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/device-bridge\/artifacts$/.test(pathname)) return true;
+  if (method === 'GET' && /^\/api\/sessions\/[^/]+\/device-bridge\/artifacts$/.test(pathname)) return true;
+  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/device-bridge\/artifacts\/[^/]+\/revoke$/.test(pathname)) return true;
+  if (method === 'POST' && pathname === '/api/device-bridge/inventory-bindings') return true;
+  if (method === 'GET' && pathname === '/api/device-bridge/inventory-bindings') return true;
+  if (method === 'POST' && /^\/api\/device-bridge\/inventory-bindings\/[^/]+\/revoke$/.test(pathname)) return true;
   return false;
+}
+
+function strictEnabledByEnv(value: string | undefined): boolean {
+  return value === 'true';
 }
