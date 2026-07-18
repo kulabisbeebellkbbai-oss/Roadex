@@ -2,7 +2,7 @@
 
 Date: 2026-07-18
 
-Status: deployed with device-bridge request intake and operations still disabled. Authenticated MSI-origin verification remains pending.
+Status: deployed and authenticated MSI-origin default-off verification passed. Device-bridge request intake and operations remain disabled. A gateway-only restart is pending to activate explicit positive forwarding audit records added after correlation.
 
 ## Deployed Scope
 
@@ -35,14 +35,23 @@ The IDS archive includes source, tests, receiver documentation, the prior servic
 - Gateway device-bridge request intake and operations remained false.
 - No telemetry record remained queued after the successful authenticated forwarding check.
 
-## Pending External Verification
+## External Verification
 
-From approved VPN source `10.70.0.10`, submit an authenticated browser-origin device-bridge request through `/Roadex/api/sessions/:sessionId/device-bridge/requests`. Expected behavior:
+The approved VPN source `10.70.0.10` completed an authenticated browser-origin smoke during the UTC window `2026-07-18T17:00:04.3185070Z` through `2026-07-18T17:00:05.4776363Z`:
 
-- Response is HTTP `403` with `Cache-Control: no-store`, error `device_bridge_rejected`, and reason `request_intake_disabled`.
-- The authenticated Roadex session and thread remain unchanged.
-- Gateway structured logs contain the redacted denial and successful IDS forwarding evidence.
-- IDS stores exactly one matching `bridge_request_rejected` event with no raw session, identity, request body, device, firmware, cookie, CSRF, or key material.
-- Gateway telemetry spool remains empty.
+- Bootstrap returned HTTP `200` before and after the request.
+- The bridge request returned HTTP `403` with `Cache-Control: no-store`, error `device_bridge_rejected`, and reason `request_intake_disabled`.
+- The authenticated Roadex session, workspace, lifecycle, and thread were preserved.
+- Gateway structured logs contained the normalized bootstrap, denial, and follow-up bootstrap sequence.
+- IDS stored exactly one matching durable `bridge_request_rejected` event and one replay record.
+- The IDS event contained only the approved redacted schema and reason `request_intake_disabled`.
+- Roadex retained zero bridge requests, approvals, and operations.
+- Gateway telemetry spool remained empty.
 
-Deployment completion and any later request-intake enablement require separate approval after this external verification.
+The server clock led the client-reported timestamps by approximately one to two seconds; correlation used a slightly widened window.
+
+## Follow-Up Audit Improvement
+
+Gateway commit `ed012c0` adds an explicit local `ids_forwarding_succeeded` record after a denied event receives its authenticated durable IDS acknowledgement. The full gateway suite passes with this behavior. A separately approved gateway-only restart is required to activate it; no receiver, network, key, or feature-flag change is required.
+
+Activating the audit improvement and any later request-intake enablement require separate approvals.
