@@ -287,6 +287,7 @@ export function submitPrompt(
           'denied',
           'Managed Codex runner returned a mismatched thread identity.',
         );
+        addAndPublishStreamEvents(state, [createStreamEvent(session.id, 'system', 'Codex runner failed.')]);
         return;
       }
       updateCodexThreadId(session, result.codexThreadId);
@@ -302,6 +303,7 @@ export function submitPrompt(
         session.lifecycle = 'blocked';
         touchSession(session);
         appendAudit(state.audit, user, 'session.runner_failed', sessionId, 'denied', result.reason);
+        addAndPublishStreamEvents(state, [createStreamEvent(session.id, 'system', 'Codex runner failed.')]);
       }
     })
     .catch((error: unknown) => {
@@ -316,6 +318,7 @@ export function submitPrompt(
         'denied',
         error instanceof Error ? error.message : 'runner_exception',
       );
+      addAndPublishStreamEvents(state, [createStreamEvent(session.id, 'system', 'Codex runner failed.')]);
     })
     .finally(() => {
       state.activeRuns.delete(session.id);

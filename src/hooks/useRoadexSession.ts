@@ -18,6 +18,7 @@ import type {
   UserProfile,
   WorkspaceRef,
 } from '../shared/sessionContracts';
+import { isRunnerTerminal, lifecycleAfterTranscript, lifecycleForTerminalEvent } from './sessionSelection';
 
 export type ConnectionState = 'loading' | 'connected' | 'streaming' | 'error';
 
@@ -113,8 +114,11 @@ export function useRoadexSession(): RoadexSessionState {
       (event) => {
         if (activeStreamSessionId.current !== sessionId) return;
         setTranscript((existing) => mergeStreamEvents(existing, [event]));
-        if (isTerminalRunnerEvent(event)) {
-          setSession((existing) => existing ? { ...existing, lifecycle: 'ready' } : existing);
+        if (isRunnerTerminal(event)) {
+          const lifecycle = lifecycleForTerminalEvent(event);
+          if (!lifecycle) return;
+          setSession((existing) => existing ? { ...existing, lifecycle } : existing);
+          setSessions((existing) => updateSessionLifecycle(existing, sessionId, lifecycle));
           setConnectionState('connected');
         }
       },
@@ -129,17 +133,22 @@ export function useRoadexSession(): RoadexSessionState {
   const sendPrompt = useCallback(
     async (prompt: string) => {
       if (!session) return;
+      const targetSessionId = session.id;
       setConnectionState('streaming');
       setSession((existing) => existing ? { ...existing, lifecycle: 'streaming' } : existing);
+      setSessions((existing) => updateSessionLifecycle(existing, session.id, 'streaming'));
       setError(undefined);
       setNotice(undefined);
       try {
         const response = await submitPrompt(token, session.id, prompt);
         setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
       } catch (caught) {
-        setSession((existing) => existing ? { ...existing, lifecycle: 'ready' } : existing);
-        setError(caught instanceof Error ? caught.message : 'Prompt submission failed.');
-        setConnectionState('error');
+        setSessions((existing) => updateSessionLifecycle(existing, targetSessionId, 'ready'));
+        if (activeStreamSessionId.current === targetSessionId) {
+          setSession((existing) => existing?.id === targetSessionId ? { ...existing, lifecycle: 'ready' } : existing);
+          setError(caught instanceof Error ? caught.message : 'Prompt submission failed.');
+          setConnectionState('error');
+        }
       }
     },
     [session, token],
@@ -147,19 +156,26 @@ export function useRoadexSession(): RoadexSessionState {
 
   const cancelPrompt = useCallback(async () => {
     if (!session) return;
+    const targetSession = session;
     try {
-      const response = await cancelSession(token, session.id);
+      const response = await cancelSession(token, targetSession.id);
       setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
-      setNotice(response.cancelled ? 'Cancel requested for the active Codex run.' : 'No Codex run is active for this session.');
-      await refreshStream(session);
-      setSession((existing) => existing ? { ...existing, lifecycle: 'ready' } : existing);
-      setConnectionState('connected');
+      const events = await readSessionStream(token, targetSession.id);
+      setSessions((existing) => updateSessionLifecycle(existing, targetSession.id, 'ready'));
+      if (activeStreamSessionId.current === targetSession.id) {
+        setTranscript(events);
+        setSession((existing) => existing?.id === targetSession.id ? { ...existing, lifecycle: 'ready' } : existing);
+        setNotice(response.cancelled ? 'Cancel requested for the active Codex run.' : 'No Codex run is active for this session.');
+        setConnectionState('connected');
+      }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Cancel request failed.');
-      setNotice(undefined);
-      setConnectionState('error');
+      if (activeStreamSessionId.current === targetSession.id) {
+        setError(caught instanceof Error ? caught.message : 'Cancel request failed.');
+        setNotice(undefined);
+        setConnectionState('error');
+      }
     }
-  }, [refreshStream, session, token]);
+  }, [session, token]);
 
   const closeCurrentSession = useCallback(async () => {
     if (!session) return;
@@ -284,10 +300,13 @@ export function useRoadexSession(): RoadexSessionState {
         try {
           const events = await readSessionStream(token, active.id);
           if (sequence !== threadSelectionSequence.current) return;
-          setSession(active);
+          const lifecycle = lifecycleAfterTranscript(active, events);
+          const selected = { ...active, lifecycle };
+          setSessions((existing) => updateSessionLifecycle(existing, active.id, lifecycle));
+          setSession(selected);
           activeStreamSessionId.current = active.id;
           setTranscript(events);
-          setConnectionState('connected');
+          setConnectionState(lifecycle === 'streaming' ? 'streaming' : 'connected');
         } catch (caught) {
           if (sequence !== threadSelectionSequence.current) return;
           activeStreamSessionId.current = previousSessionId;
@@ -402,10 +421,10 @@ function mergeStreamEvents(existing: StreamEvent[], next: StreamEvent[]): Stream
   return [...eventsById.values()];
 }
 
-function isTerminalRunnerEvent(event: StreamEvent): boolean {
-  return (
-    event.message === 'Codex runner completed.' ||
-    event.message.includes('Codex runner was cancelled.') ||
-    event.message.includes('Codex runner timed out')
-  );
+function updateSessionLifecycle(
+  sessions: RoadexSession[],
+  sessionId: string,
+  lifecycle: RoadexSession['lifecycle'],
+): RoadexSession[] {
+  return sessions.map((candidate) => candidate.id === sessionId ? { ...candidate, lifecycle } : candidate);
 }

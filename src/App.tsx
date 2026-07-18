@@ -178,7 +178,7 @@ function App() {
               <label>
                 <span>Project</span>
                 <select
-                  disabled={roadex.connectionState === 'loading' || roadex.connectionState === 'streaming'}
+                  disabled={roadex.connectionState === 'loading'}
                   onChange={(event) => void roadex.openWorkspace(event.target.value)}
                   value={session?.workspace.id ?? ''}
                 >
@@ -190,7 +190,7 @@ function App() {
               <label>
                 <span>Thread</span>
                 <select
-                  disabled={!session || roadex.connectionState === 'loading' || roadex.connectionState === 'streaming'}
+                  disabled={!session || roadex.connectionState === 'loading'}
                   onChange={(event) => {
                     const [source, id] = event.target.value.split(':', 2);
                     if (source === 'roadex') void roadex.selectThread(id);
