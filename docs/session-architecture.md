@@ -14,6 +14,12 @@ Each Roadex session is bound to:
 - A stream channel for prompts, assistant output, terminal-like events, and lifecycle updates.
 - An audit trail for security-sensitive events.
 
+## Project And Thread Selection
+
+The browser may choose a project only from the server-approved workspace registry. Within that project, it may select an active or archived Roadex session owned by the authenticated user, or explicitly create a new thread. Selecting an archived thread reopens the same Roadex session and preserves its Codex thread identifier and transcript.
+
+Roadex does not enumerate or attach arbitrary Codex CLI history from the server. Thread selection remains constrained to sessions created through Roadex so workspace authorization, ownership checks, audit records, and lifecycle controls continue to apply.
+
 The first implementation should use a mock session runner and typed API contracts. Real Codex process spawning should be added only after the policy checks, audit hooks, and isolation tests exist.
 
 ## Request Flow

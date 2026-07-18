@@ -8,7 +8,7 @@ import type {
   PromptResponse,
   ReopenResponse,
 } from '../shared/apiContracts';
-import type { CreateSessionRequest, StreamEvent } from '../shared/sessionContracts';
+import type { CreateSessionRequest, RoadexSession, SessionResponse, StreamEvent } from '../shared/sessionContracts';
 import { isApiError } from '../shared/apiContracts';
 
 export type RoadexApiSession = {
@@ -40,14 +40,20 @@ export async function loginAndBootstrap(): Promise<RoadexApiSession> {
 export async function createSession(
   token: string | undefined,
   requestBody: CreateSessionRequest,
-): Promise<BootstrapResponse> {
-  await request('/api/sessions', {
+): Promise<{ bootstrap: BootstrapResponse; session: RoadexSession }> {
+  const response = await request<SessionResponse>('/api/sessions', {
     method: 'POST',
     token,
     body: requestBody,
   });
+  if (!response.ok) {
+    throw new Error(response.reason);
+  }
 
-  return request<BootstrapResponse>('/api/bootstrap', { token });
+  return {
+    bootstrap: await request<BootstrapResponse>('/api/bootstrap', { token }),
+    session: response.session,
+  };
 }
 
 export async function submitPrompt(
@@ -80,11 +86,18 @@ export async function listArchivedSessions(token: string | undefined): Promise<A
   return request<ArchivedSessionsResponse>('/api/sessions', { token });
 }
 
-export async function reopenSession(token: string | undefined, sessionId: string): Promise<ReopenResponse> {
-  return request<ReopenResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/reopen`, {
+export async function reopenSession(
+  token: string | undefined,
+  sessionId: string,
+): Promise<Extract<ReopenResponse, { reopened: true }>> {
+  const response = await request<ReopenResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/reopen`, {
     method: 'POST',
     token,
   });
+  if (!response.reopened) {
+    throw new Error(response.reason);
+  }
+  return response;
 }
 
 export async function readSessionStream(token: string | undefined, sessionId: string): Promise<StreamEvent[]> {

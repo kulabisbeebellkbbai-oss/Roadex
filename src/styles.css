@@ -393,6 +393,46 @@ button {
   min-height: 270px;
 }
 
+.session-selectors {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(220px, 1.2fr) 40px;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+
+.session-selectors label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.session-selectors select {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  background: #ffffff;
+}
+
+.new-thread-action {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: #ffffff;
+  background: var(--accent);
+}
+
 .message {
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr);
@@ -763,6 +803,14 @@ button {
 
   .workspace {
     padding: 14px;
+  }
+
+  .session-selectors {
+    grid-template-columns: minmax(0, 1fr) 40px;
+  }
+
+  .session-selectors label:first-child {
+    grid-column: 1 / -1;
   }
 
   .topbar {

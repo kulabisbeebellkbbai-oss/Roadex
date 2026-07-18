@@ -75,6 +75,10 @@ export type ReopenSessionResponse = {
   reopened: true;
   session: RoadexSession;
   auditEvent: AuditEvent;
+} | {
+  reopened: false;
+  gate: 'session-limit';
+  reason: string;
 };
 
 export type RoadexSession = {
@@ -100,6 +104,7 @@ export type SessionRequest = {
 export type CreateSessionRequest = {
   workspaceId: string;
   requestedDeviceBridge?: boolean;
+  newThread?: boolean;
 };
 
 export type RoadexBootstrap = {

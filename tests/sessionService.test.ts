@@ -679,7 +679,7 @@ describe('Roadex session service', () => {
     }
   });
 
-  it('denies reopening when the workspace already has an active session', async () => {
+  it('reopens an owned thread when the workspace already has another active thread', async () => {
     const state = createInitialState(fakeRunner(), createMemoryPersistence());
     const archived = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
 
@@ -689,9 +689,79 @@ describe('Roadex session service', () => {
     const active = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
     expect(active.ok).toBe(true);
 
-    expect(reopenSession(state, mockUser, archived.session.id)).toBeUndefined();
+    expect(reopenSession(state, mockUser, archived.session.id)).toMatchObject({
+      reopened: true,
+      session: { id: archived.session.id, lifecycle: 'ready' },
+    });
+    expect(active.ok).toBe(true);
+  });
+
+  it('creates a new owned thread only when explicitly requested', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const first = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    const reused = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    const second = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex', newThread: true });
+
+    expect(first.ok).toBe(true);
+    expect(reused.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    if (!first.ok || !reused.ok || !second.ok) return;
+
+    expect(reused.session.id).toBe(first.session.id);
+    expect(second.session.id).not.toBe(first.session.id);
+    expect(state.sessions.sessions.filter((candidate) => candidate.lifecycle !== 'closed')).toHaveLength(2);
+  });
+
+  it('limits explicit active thread creation per user', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    state.maxActiveSessionsPerUser = 1;
+    const first = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    const denied = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex', newThread: true });
+
+    expect(first.ok).toBe(true);
+    expect(denied).toMatchObject({ ok: false, gate: 'session-limit' });
+    expect(state.audit.events.at(-1)).toMatchObject({
+      action: 'security.denied',
+      resource: 'session-limit',
+      outcome: 'denied',
+    });
+  });
+
+  it('applies the active thread limit when opening another project', async () => {
+    const original = process.env.ROADEX_WORKSPACES_JSON;
+    process.env.ROADEX_WORKSPACES_JSON = JSON.stringify([
+      { id: 'roadex', name: 'Roadex Portal', root: process.cwd() },
+      { id: 'gateway', name: 'Gateway', root: '/srv/gateway' },
+    ]);
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      state.maxActiveSessionsPerUser = 1;
+      expect((await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' })).ok).toBe(true);
+      expect(await createSessionFromApi(state, mockUser, { workspaceId: 'gateway' })).toMatchObject({
+        ok: false,
+        gate: 'session-limit',
+      });
+    } finally {
+      if (original === undefined) delete process.env.ROADEX_WORKSPACES_JSON;
+      else process.env.ROADEX_WORKSPACES_JSON = original;
+    }
+  });
+
+  it('applies the active thread limit when reopening an archived thread', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const archived = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    expect(archived.ok).toBe(true);
+    if (!archived.ok) return;
+    closeSession(state, mockUser, archived.session.id);
+    expect((await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' })).ok).toBe(true);
+    state.maxActiveSessionsPerUser = 1;
+
+    expect(reopenSession(state, mockUser, archived.session.id)).toMatchObject({
+      reopened: false,
+      gate: 'session-limit',
+    });
     expect(archived.session.lifecycle).toBe('closed');
-    expect(state.audit.events.at(-1)?.summary).toContain('active_workspace_session_present');
+    expect(state.audit.events.at(-1)?.summary).toContain('active_session_limit_reached');
   });
 
   it('denies wrong-owner cancellation and records actor/session detail', async () => {

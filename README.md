@@ -34,6 +34,8 @@ The default approved workspace is the Roadex server working directory. Set `ROAD
 
 For multiple server-approved projects, set `ROADEX_WORKSPACES_JSON` to a JSON array of `{ "id", "name", "root" }` records. Roadex accepts only those IDs from the browser; roots are never accepted from client requests.
 
+The transcript toolbar lets authenticated users switch among approved projects and their own active or archived Roadex threads, or create a new thread in the selected project. Roadex-owned thread selection does not expose unrelated local Codex CLI history.
+
 Runtime session, transcript, and audit metadata are written to `data/roadex-state.json` by default. The `data/` directory is ignored and must not be committed.
 
 Prompt submission is asynchronous: `POST /api/sessions/:id/prompts` accepts work and the transcript is read from `GET /api/sessions/:id/stream` while Codex runs. Add `?live=1` for a long-lived SSE stream that sends the existing transcript followed by new runner events. The local API also supports `POST /api/sessions/:id/cancel` and `POST /api/sessions/:id/close`.

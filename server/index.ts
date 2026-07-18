@@ -132,7 +132,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Archived session not found.' } });
       return;
     }
-    sendJson(res, 200, result);
+    sendJson(res, result.reopened ? 200 : 409, result);
     return;
   }
 

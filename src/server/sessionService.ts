@@ -34,6 +34,7 @@ export type RoadexState = {
   streamSubscribers: Map<string, Set<(event: StreamEvent) => void>>;
   maxStreamSubscribersPerSession: number;
   maxActiveRuns: number;
+  maxActiveSessionsPerUser: number;
 };
 
 export function createInitialState(
@@ -54,6 +55,7 @@ export function createInitialState(
     streamSubscribers: new Map(),
     maxStreamSubscribersPerSession: readPositiveInteger(process.env.ROADEX_MAX_STREAMS_PER_SESSION, 4),
     maxActiveRuns: Number(process.env.ROADEX_MAX_ACTIVE_RUNS ?? 2),
+    maxActiveSessionsPerUser: readPositiveInteger(process.env.ROADEX_MAX_ACTIVE_SESSIONS_PER_USER, 8),
   };
 }
 
@@ -101,7 +103,8 @@ export function createSessionFromApi(
     return Promise.resolve(deny(denied.gate, denied.reason));
   }
 
-  const existing = state.sessions.sessions.find(
+  const createNewThread = request.newThread === true;
+  const existing = !createNewThread && state.sessions.sessions.find(
     (session) =>
       session.userId === user.id &&
       session.workspace.id === workspaceDecision.workspace.id &&
@@ -112,6 +115,19 @@ export function createSessionFromApi(
     appendAudit(state.audit, user, 'session.attach', existing.id, 'allowed', 'Attached existing Codex session.');
     saveState(state);
     return Promise.resolve({ ok: true, session: existing });
+  }
+
+  if (activeSessionCountForUser(state, user.id) >= state.maxActiveSessionsPerUser) {
+    appendAudit(
+      state.audit,
+      user,
+      'security.denied',
+      'session-limit',
+      'denied',
+      'New thread denied: active session limit reached.',
+    );
+    saveState(state);
+    return Promise.resolve(deny('session-limit', 'Active thread limit reached. Archive a thread before creating another.'));
   }
 
   const session = state.runner.createSession({
@@ -324,26 +340,22 @@ export function reopenSession(
     saveState(state);
     return undefined;
   }
-  const activeWorkspaceSession = state.sessions.sessions.some(
-    (candidate) =>
-      candidate.id !== sessionId &&
-      candidate.userId === user.id &&
-      candidate.workspace.id === session.workspace.id &&
-      isVisibleSession(candidate),
-  );
-  if (activeWorkspaceSession) {
+  if (activeSessionCountForUser(state, user.id) >= state.maxActiveSessionsPerUser) {
     appendAudit(
       state.audit,
       user,
       'security.denied',
       sessionId,
       'denied',
-      `Reopen denied: actor=${user.id} session=${sessionId} reason=active_workspace_session_present.`,
+      `Reopen denied: actor=${user.id} session=${sessionId} reason=active_session_limit_reached.`,
     );
     saveState(state);
-    return undefined;
+    return {
+      reopened: false,
+      gate: 'session-limit',
+      reason: 'Active thread limit reached. Archive a thread before reopening another.',
+    };
   }
-
   session.lifecycle = 'ready';
   touchSession(session);
   const auditEvent = appendAudit(
@@ -552,6 +564,12 @@ function isVisibleSessionForUser(session: RoadexSession, user: UserProfile): boo
 
 function isVisibleSession(session: RoadexSession): boolean {
   return session.lifecycle !== 'closed' && session.lifecycle !== 'blocked';
+}
+
+function activeSessionCountForUser(state: RoadexState, userId: string): number {
+  return state.sessions.sessions.filter(
+    (session) => session.userId === userId && isVisibleSession(session),
+  ).length;
 }
 
 function touchSession(session: RoadexSession): void {

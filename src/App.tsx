@@ -14,6 +14,7 @@ import {
   Menu,
   MonitorSmartphone,
   PlugZap,
+  Plus,
   RadioTower,
   RotateCcw,
   ShieldCheck,
@@ -29,6 +30,9 @@ function App() {
   const [prompt, setPrompt] = useState('');
   const session = roadex.session;
   const visibleTranscript = roadex.transcript.filter(isVisibleTranscriptEvent);
+  const projectThreads = [...roadex.sessions, ...roadex.archivedSessions]
+    .filter((candidate) => candidate.workspace.id === session?.workspace.id)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   const composerDisabled =
     roadex.connectionState === 'loading' ||
     roadex.connectionState === 'streaming' ||
@@ -135,6 +139,45 @@ function App() {
                 <h2>Transcript</h2>
               </div>
               <span className="status-dot">{session?.lifecycle ?? 'loading'}</span>
+            </div>
+
+            <div className="session-selectors" aria-label="Session connection">
+              <label>
+                <span>Project</span>
+                <select
+                  disabled={roadex.connectionState === 'loading' || roadex.connectionState === 'streaming'}
+                  onChange={(event) => void roadex.openWorkspace(event.target.value)}
+                  value={session?.workspace.id ?? ''}
+                >
+                  {roadex.workspaces.map((workspace) => (
+                    <option key={workspace.id} value={workspace.id}>{workspace.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Thread</span>
+                <select
+                  disabled={!session || roadex.connectionState === 'loading' || roadex.connectionState === 'streaming'}
+                  onChange={(event) => void roadex.selectThread(event.target.value)}
+                  value={session?.id ?? ''}
+                >
+                  {projectThreads.map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>
+                      {candidate.lifecycle === 'closed' ? 'Archived' : 'Active'} · {candidate.id.slice(-8)} · {new Date(candidate.updatedAt).toLocaleString()}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                aria-label="Create new thread"
+                className="new-thread-action"
+                disabled={!session || roadex.connectionState === 'loading' || roadex.connectionState === 'streaming'}
+                onClick={() => session && void roadex.createThread(session.workspace.id)}
+                title="Create new thread"
+                type="button"
+              >
+                <Plus size={18} />
+              </button>
             </div>
 
             <div className="transcript" aria-live="polite">
