@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { mockUser } from '../src/server/authService';
 import { createStreamEvent } from '../src/server/mockRunner';
-import { createMemoryPersistence } from '../src/server/statePersistence';
+import { createMemoryPersistence, type StatePersistence } from '../src/server/statePersistence';
 import {
   bootstrap,
   closeSession,
@@ -14,11 +14,13 @@ import {
   cancelSessionRun,
   listArchivedSessions,
   reopenSession,
+  requestDeviceBridgeIntake,
   streamEventsForSession,
   subscribeToSessionStream,
   submitPrompt,
 } from '../src/server/sessionService';
 import type { UserProfile, WorkspaceRef } from '../src/shared/sessionContracts';
+import type { DeviceArtifactMetadata, DeviceBridgeRequestRecord } from '../src/shared/deviceBridgeContracts';
 import type { RunnerPromptRequest, SessionRunner } from '../src/server/codexRunner';
 
 const workspace: WorkspaceRef = {
@@ -154,6 +156,8 @@ describe('createMockSession', () => {
       state: 'disabled',
       approvedFoundation: true,
       operations: ['esp32.flash'],
+      requestIntakeEnabled: false,
+      operationsEnabled: false,
       reason: expect.stringContaining('disabled'),
     });
     expect(state.deviceArtifacts.size).toBe(0);
@@ -223,6 +227,447 @@ describe('Roadex session service', () => {
       resource: 'device-bridge',
       outcome: 'denied',
     });
+  });
+
+  it('keeps device bridge request intake default-off and records no request records', async () => {
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, protectedGatewayUser(), { workspaceId: 'roadex' });
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+    seedDeviceArtifact(state, response.session.id);
+
+    try {
+      const intake = requestDeviceBridgeIntake(
+        state,
+        protectedGatewayUser(),
+        response.session.id,
+        validDeviceBridgeRequest(),
+      );
+
+      expect(intake).toMatchObject({
+        ok: false,
+        gate: 'device-bridge',
+        reason: 'Device bridge request denied.',
+        classification: 'device-bridge',
+      });
+      expect(state.deviceBridgeRequests.size).toBe(0);
+      expect(state.deviceBridgeApprovals.size).toBe(0);
+      expect(state.deviceBridgeOperations.size).toBe(0);
+      expect(state.audit.events.at(-1)).toMatchObject({
+        action: 'security.denied',
+        outcome: 'denied',
+      });
+      expect(state.audit.events.at(-1)?.resource).not.toBe(response.session.id);
+      expect(state.audit.events.at(-1)?.summary).toContain('classification=device-bridge');
+      expect(state.audit.events.at(-1)?.summary).not.toContain(protectedGatewayUser().id);
+      expect(state.audit.events.at(-1)?.summary).not.toContain(response.session.id);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('creates only a pending device bridge request when intake is enabled and all bindings validate', async () => {
+    const originalIntake = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
+    const originalInventory = process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = '1';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON = JSON.stringify([
+      { projectId: 'roadex', id: 'esp32:device' },
+    ]);
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      seedDeviceArtifact(state, response.session.id);
+
+      const intake = requestDeviceBridgeIntake(state, user, response.session.id, validDeviceBridgeRequest());
+
+      expect(intake).toMatchObject({
+        ok: true,
+        request: {
+          userId: user.id,
+          sessionId: response.session.id,
+          projectId: 'roadex',
+          artifactId: 'artifact',
+          artifactSha256: 'a'.repeat(64),
+          expectedDeviceId: 'esp32:device',
+          operation: 'esp32.flash',
+          status: 'pending',
+        },
+      });
+      expect(state.deviceBridgeRequests.size).toBe(1);
+      expect(state.deviceBridgeApprovals.size).toBe(0);
+      expect(state.deviceBridgeOperations.size).toBe(0);
+      expect(state.audit.events.at(-1)).toMatchObject({
+        action: 'device_bridge.request',
+        outcome: 'allowed',
+      });
+      expect(state.audit.events.at(-1)?.actorId).not.toBe(user.id);
+      expect(state.audit.events.at(-1)?.resource).not.toBe(response.session.id);
+      expect(state.audit.events.at(-1)?.summary).toContain('classification=created');
+      expect(state.audit.events.at(-1)?.summary).not.toContain(response.session.id);
+      if (intake.ok) expect(state.audit.events.at(-1)?.summary).not.toContain(intake.request.id);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_INVENTORY_JSON', originalInventory);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('shows an ordinary owner their pseudonymized bridge audit event through bootstrap', async () => {
+    const originalIntake = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
+    const originalInventory = process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = '1';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON = JSON.stringify([
+      { projectId: 'roadex', id: 'esp32:device' },
+    ]);
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user: UserProfile = {
+        ...protectedGatewayUser(),
+        id: 'ordinary-owner',
+        roles: ['user'],
+      };
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      seedDeviceArtifact(state, response.session.id);
+
+      const intake = requestDeviceBridgeIntake(state, user, response.session.id, validDeviceBridgeRequest());
+      expect(intake.ok).toBe(true);
+      if (!intake.ok) return;
+      const bootstrapped = await bootstrap(state, user);
+      const bridgeAudit = bootstrapped.auditEvents.find((event) => event.action === 'device_bridge.request');
+
+      expect(bridgeAudit).toBeDefined();
+      expect(bridgeAudit).toMatchObject({
+        action: 'device_bridge.request',
+        outcome: 'allowed',
+      });
+      expect(bridgeAudit?.actorId).not.toBe(user.id);
+      expect(bridgeAudit?.resource).not.toBe(response.session.id);
+      expect(bridgeAudit?.summary).toContain('classification=created');
+      expect(bridgeAudit?.summary).not.toContain(user.id);
+      expect(bridgeAudit?.summary).not.toContain(response.session.id);
+      expect(bridgeAudit?.summary).not.toContain(intake.request.id);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_INVENTORY_JSON', originalInventory);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('requires protected gateway identity and an exact device bridge request schema', async () => {
+    const originalIntake = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+
+      expect(requestDeviceBridgeIntake(state, mockUser, response.session.id, validDeviceBridgeRequest())).toMatchObject({
+        ok: false,
+        gate: 'device-bridge',
+        reason: 'Device bridge request denied.',
+        classification: 'auth',
+      });
+      expect(requestDeviceBridgeIntake(
+        state,
+        protectedGatewayUser(),
+        response.session.id,
+        { ...validDeviceBridgeRequest(), extra: true },
+      )).toMatchObject({
+        ok: false,
+        gate: 'device-bridge',
+        reason: 'Device bridge request denied.',
+        classification: 'schema',
+      });
+      expect(requestDeviceBridgeIntake(
+        state,
+        protectedGatewayUser(),
+        response.session.id,
+        { ...validDeviceBridgeRequest(), artifactSha256: 'not-a-digest' },
+      )).toMatchObject({
+        ok: false,
+        gate: 'device-bridge',
+        reason: 'Device bridge request denied.',
+        classification: 'schema',
+      });
+      expect(state.deviceBridgeRequests.size).toBe(0);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('validates ownership, workspace, artifact binding, and inventory before pending intake', async () => {
+    const originalIntake = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
+    const originalInventory = process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = '1';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON = JSON.stringify([
+      { projectId: 'roadex', id: 'esp32:device' },
+    ]);
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      seedDeviceArtifact(state, response.session.id);
+
+      expect(requestDeviceBridgeIntake(
+        state,
+        { ...user, id: 'other-user' },
+        response.session.id,
+        validDeviceBridgeRequest(),
+      )).toMatchObject({ ok: false, gate: 'device-bridge', classification: 'session' });
+      expect(requestDeviceBridgeIntake(
+        state,
+        user,
+        response.session.id,
+        { ...validDeviceBridgeRequest(), workspaceId: 'missing' },
+      )).toMatchObject({ ok: false, gate: 'device-bridge', classification: 'workspace' });
+      expect(requestDeviceBridgeIntake(
+        state,
+        user,
+        response.session.id,
+        { ...validDeviceBridgeRequest(), artifactSha256: 'b'.repeat(64) },
+      )).toMatchObject({ ok: false, gate: 'device-bridge', classification: 'artifact' });
+
+      process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON = JSON.stringify([]);
+      expect(requestDeviceBridgeIntake(state, user, response.session.id, validDeviceBridgeRequest())).toMatchObject({
+        ok: false,
+        gate: 'device-bridge',
+        classification: 'inventory',
+      });
+      expect(state.deviceBridgeRequests.size).toBe(0);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_INVENTORY_JSON', originalInventory);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('fails closed without the dedicated bridge audit HMAC key when intake is enabled', async () => {
+    const originalIntake = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = '1';
+    delete process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      const auditCount = state.audit.events.length;
+
+      expect(requestDeviceBridgeIntake(state, user, response.session.id, validDeviceBridgeRequest())).toMatchObject({
+        ok: false,
+        gate: 'device-bridge',
+        reason: 'Device bridge request denied.',
+        classification: 'audit',
+      });
+      expect(state.deviceBridgeRequests.size).toBe(0);
+      expect(state.audit.events).toHaveLength(auditCount);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('enforces pending device bridge request limits before mutating state', async () => {
+    const originalIntake = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
+    const originalInventory = process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = '1';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON = JSON.stringify([
+      { projectId: 'roadex', id: 'esp32:device' },
+    ]);
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const first = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(first.ok).toBe(true);
+      if (!first.ok) return;
+      seedDeviceArtifact(state, first.session.id);
+
+      for (let index = 0; index < 3; index += 1) {
+        const result = requestDeviceBridgeIntake(state, user, first.session.id, validDeviceBridgeRequest());
+        expect(result.ok).toBe(true);
+      }
+      expect(requestDeviceBridgeIntake(state, user, first.session.id, validDeviceBridgeRequest())).toMatchObject({
+        ok: false,
+        gate: 'device-bridge',
+        classification: 'quota',
+      });
+      expect([...state.deviceBridgeRequests.values()].filter((request) =>
+        request.sessionId === first.session.id && request.status === 'pending',
+      )).toHaveLength(3);
+
+      const originalWorkspaces = process.env.ROADEX_WORKSPACES_JSON;
+      process.env.ROADEX_WORKSPACES_JSON = JSON.stringify([
+        { id: 'roadex', name: 'Roadex Portal', root: process.cwd() },
+        { id: 'gateway', name: 'Gateway', root: '/home/god/Documents/Codex Workspace/Protected Service Gateway' },
+      ]);
+      try {
+        const second = await createSessionFromApi(state, user, { workspaceId: 'gateway' });
+        expect(second.ok).toBe(true);
+        if (!second.ok) return;
+        seedDeviceArtifact(state, second.session.id, 'gateway');
+        process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON = JSON.stringify([
+          { projectId: 'roadex', id: 'esp32:device' },
+          { projectId: 'gateway', id: 'esp32:device' },
+        ]);
+        for (let index = 0; index < 2; index += 1) {
+          const result = requestDeviceBridgeIntake(
+            state,
+            user,
+            second.session.id,
+            { ...validDeviceBridgeRequest(), workspaceId: 'gateway' },
+          );
+          expect(result.ok).toBe(true);
+        }
+        expect(requestDeviceBridgeIntake(
+          state,
+          user,
+          second.session.id,
+          { ...validDeviceBridgeRequest(), workspaceId: 'gateway' },
+        )).toMatchObject({
+          ok: false,
+          gate: 'device-bridge',
+          classification: 'quota',
+        });
+        expect([...state.deviceBridgeRequests.values()].filter((request) =>
+          request.userId === user.id && request.status === 'pending',
+        )).toHaveLength(5);
+      } finally {
+        restoreEnv('ROADEX_WORKSPACES_JSON', originalWorkspaces);
+      }
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_INVENTORY_JSON', originalInventory);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('does not count expired pending device bridge requests against session or principal quotas', async () => {
+    const originalIntake = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
+    const originalInventory = process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = '1';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON = JSON.stringify([
+      { projectId: 'roadex', id: 'esp32:device' },
+    ]);
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      seedDeviceArtifact(state, response.session.id);
+      const expiredAt = new Date(Date.now() - 1_000).toISOString();
+      for (let index = 0; index < 5; index += 1) {
+        const request = expiredBridgeRequest({
+          id: `expired-${index}`,
+          userId: user.id,
+          sessionId: index < 3 ? response.session.id : `other-session-${index}`,
+          projectId: 'roadex',
+          expiresAt: expiredAt,
+        });
+        state.deviceBridgeRequests.set(request.id, request);
+      }
+
+      const intake = requestDeviceBridgeIntake(state, user, response.session.id, validDeviceBridgeRequest());
+
+      expect(intake).toMatchObject({
+        ok: true,
+        request: {
+          status: 'pending',
+          sessionId: response.session.id,
+          userId: user.id,
+        },
+      });
+      expect([...state.deviceBridgeRequests.values()].filter((request) =>
+        request.userId === user.id && request.status === 'pending',
+      )).toHaveLength(6);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_INVENTORY_JSON', originalInventory);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('rolls back pending request and audit mutation when intake persistence fails', async () => {
+    const originalIntake = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
+    const originalInventory = process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = '1';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    process.env.ROADEX_DEVICE_BRIDGE_INVENTORY_JSON = JSON.stringify([
+      { projectId: 'roadex', id: 'esp32:device' },
+    ]);
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      seedDeviceArtifact(state, response.session.id);
+      const auditCount = state.audit.events.length;
+      state.persistence = failingSavePersistence();
+
+      expect(() => requestDeviceBridgeIntake(state, user, response.session.id, validDeviceBridgeRequest())).toThrow(
+        'injected persistence failure',
+      );
+      expect(state.deviceBridgeRequests.size).toBe(0);
+      expect(state.audit.events).toHaveLength(auditCount);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_INVENTORY_JSON', originalInventory);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('rolls back denied-intake audit mutation when persistence fails', async () => {
+    const originalIntake = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = '1';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      const auditCount = state.audit.events.length;
+      state.persistence = failingSavePersistence();
+
+      expect(() => requestDeviceBridgeIntake(
+        state,
+        user,
+        response.session.id,
+        { ...validDeviceBridgeRequest(), extra: true },
+      )).toThrow('injected persistence failure');
+      expect(state.deviceBridgeRequests.size).toBe(0);
+      expect(state.audit.events).toHaveLength(auditCount);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
   });
 
   it('submits prompts to the real runner abstraction and streams only for the owning user', async () => {
@@ -945,4 +1390,91 @@ describe('Roadex session service', () => {
 async function flushRunner(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function protectedGatewayUser(): UserProfile {
+  return {
+    ...mockUser,
+    authMode: 'protected-gateway',
+  };
+}
+
+function validDeviceBridgeRequest() {
+  return {
+    workspaceId: 'roadex',
+    artifactId: 'artifact',
+    artifactSha256: 'a'.repeat(64),
+    expectedDeviceId: 'esp32:device',
+    operation: 'esp32.flash',
+  };
+}
+
+function seedDeviceArtifact(
+  state: ReturnType<typeof createInitialState>,
+  sessionId: string,
+  projectId = 'roadex',
+): DeviceArtifactMetadata {
+  const artifact: DeviceArtifactMetadata = {
+    id: 'artifact',
+    projectId,
+    sessionId,
+    label: 'firmware.bin',
+    byteLength: 1024,
+    mediaType: 'application/octet-stream',
+    sha256: 'a'.repeat(64),
+    createdAt: new Date().toISOString(),
+  };
+  state.deviceArtifacts.set(artifact.id, artifact);
+  return artifact;
+}
+
+function expiredBridgeRequest(
+  overrides: Pick<DeviceBridgeRequestRecord, 'id' | 'userId' | 'sessionId' | 'projectId' | 'expiresAt'>,
+): DeviceBridgeRequestRecord {
+  const createdAt = new Date(Date.now() - 10_000).toISOString();
+  return {
+    id: overrides.id,
+    userId: overrides.userId,
+    sessionId: overrides.sessionId,
+    projectId: overrides.projectId,
+    artifactId: 'artifact',
+    artifactSha256: 'a'.repeat(64),
+    expectedDeviceId: 'esp32:device',
+    operation: 'esp32.flash',
+    status: 'pending',
+    createdAt,
+    expiresAt: overrides.expiresAt,
+  };
+}
+
+function testAuditHmacKey(): string {
+  return 'test-device-bridge-audit-hmac-key-32';
+}
+
+function failingSavePersistence(): StatePersistence {
+  return {
+    load() {
+      return {
+        sessions: [],
+        streamEvents: [],
+        auditEvents: [],
+        managedThreadClaims: [],
+        deviceArtifacts: [],
+        deviceBridgeRequests: [],
+        deviceBridgeApprovals: [],
+        deviceBridgeOperations: [],
+      };
+    },
+    save() {
+      throw new Error('injected persistence failure');
+    },
+  };
+}
+
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+    return;
+  }
+  process.env[key] = value;
 }

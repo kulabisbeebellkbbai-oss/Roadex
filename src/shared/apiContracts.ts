@@ -7,6 +7,10 @@ import type {
   RoadexSession,
   UserProfile,
 } from './sessionContracts.js';
+import type {
+  DeviceBridgeRequestPayload as BridgeRequestPayload,
+  DeviceBridgeRequestResponse as BridgeRequestResponse,
+} from './deviceBridgeContracts.js';
 
 export type ApiError = {
   error: {
@@ -34,6 +38,10 @@ export type CancelResponse = CancelSessionResponse;
 export type CloseResponse = CloseSessionResponse;
 
 export type ReopenResponse = ReopenSessionResponse;
+
+export type DeviceBridgeRequestIntakePayload = BridgeRequestPayload;
+
+export type DeviceBridgeRequestIntakeResponse = BridgeRequestResponse;
 
 export type ArchivedSessionsResponse = {
   sessions: RoadexSession[];

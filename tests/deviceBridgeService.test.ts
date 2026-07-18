@@ -17,6 +17,28 @@ describe('disabled device bridge state machine', () => {
     expect(store.operations.size).toBe(0);
   });
 
+  it('ignores production operation enablement environment and remains hard-disabled', () => {
+    const original = process.env.ROADEX_DEVICE_BRIDGE_OPERATIONS_ENABLED;
+    process.env.ROADEX_DEVICE_BRIDGE_OPERATIONS_ENABLED = '1';
+    try {
+      const store = createStore();
+      const service = createDeviceBridgeService(store, {
+        resolveSession: () => session(),
+        resolveInventoryDevice: (_projectId, deviceId) => ({ id: deviceId }),
+      });
+
+      expect(service.requestApproval(mockUser, session(), 'artifact', 'esp32:device')).toEqual({
+        ok: false,
+        reason: 'Device bridge operations are disabled.',
+      });
+      expect(store.approvals.size).toBe(0);
+      expect(store.operations.size).toBe(0);
+    } finally {
+      if (original === undefined) delete process.env.ROADEX_DEVICE_BRIDGE_OPERATIONS_ENABLED;
+      else process.env.ROADEX_DEVICE_BRIDGE_OPERATIONS_ENABLED = original;
+    }
+  });
+
   it('consumes approvals once and requires verified probe plus fresh confirmation', () => {
     const store = createStore();
     let id = 0;

@@ -1,6 +1,13 @@
+import { createHmac, randomUUID } from 'node:crypto';
 import { appendAudit, createAuditLogFromEvents, type AuditLog } from './auditLog.js';
 import { createCodexRunner, type SessionRunner } from './codexRunner.js';
-import { denyDeviceBridge, getDeviceBridgePolicy } from './deviceBridgePolicy.js';
+import {
+  denyDeviceBridge,
+  deviceBridgeAuditHmacKey,
+  deviceBridgeRequestIntakeEnabled,
+  getDeviceBridgePolicy,
+  resolveDeviceBridgeInventoryDevice,
+} from './deviceBridgePolicy.js';
 import { createRunnerIntro, createStreamEvent } from './mockRunner.js';
 import { addStreamEvents, createSessionStoreFromState, getOwnedSession, type SessionStore } from './sessionStore.js';
 import {
@@ -20,6 +27,7 @@ import {
   type SessionResponse,
   type StreamEvent,
   type UserProfile,
+  type AuditEvent,
   type CancelSessionResponse,
   type CloseSessionResponse,
   type ReopenSessionResponse,
@@ -29,6 +37,9 @@ import type {
   DeviceArtifactMetadata,
   DeviceBridgeApprovalRecord,
   DeviceBridgeOperationRecord,
+  DeviceBridgeRequestPayload,
+  DeviceBridgeRequestRecord,
+  DeviceBridgeRequestResponse,
 } from '../shared/deviceBridgeContracts.js';
 
 export type RoadexState = {
@@ -44,6 +55,7 @@ export type RoadexState = {
   maxActiveSessionsPerUser: number;
   managedThreadClaims: Map<string, ManagedThreadClaim>;
   deviceArtifacts: Map<string, DeviceArtifactMetadata>;
+  deviceBridgeRequests: Map<string, DeviceBridgeRequestRecord>;
   deviceBridgeApprovals: Map<string, DeviceBridgeApprovalRecord>;
   deviceBridgeOperations: Map<string, DeviceBridgeOperationRecord>;
 };
@@ -52,6 +64,17 @@ type StreamSubscriber = {
   user: UserProfile;
   onEvent: (event: StreamEvent) => void;
 };
+
+type DeviceBridgeRequestGate =
+  | 'auth'
+  | 'audit'
+  | 'device-bridge'
+  | 'session'
+  | 'workspace'
+  | 'artifact'
+  | 'inventory'
+  | 'schema'
+  | 'quota';
 
 export function createInitialState(
   runner: SessionRunner = createCodexRunner(),
@@ -84,6 +107,7 @@ export function createInitialState(
     maxActiveSessionsPerUser: readPositiveInteger(process.env.ROADEX_MAX_ACTIVE_SESSIONS_PER_USER, 8),
     managedThreadClaims,
     deviceArtifacts: new Map(persisted.deviceArtifacts.map((record) => [record.id, record])),
+    deviceBridgeRequests: new Map(persisted.deviceBridgeRequests.map((record) => [record.id, record])),
     deviceBridgeApprovals: new Map(persisted.deviceBridgeApprovals.map((record) => [record.id, record])),
     deviceBridgeOperations: new Map(persisted.deviceBridgeOperations.map((record) => [record.id, record])),
   };
@@ -468,6 +492,149 @@ export function reopenSession(
   return { reopened: true, session, auditEvent };
 }
 
+export function requestDeviceBridgeIntake(
+  state: RoadexState,
+  user: UserProfile,
+  sessionId: string,
+  payload: unknown,
+): DeviceBridgeRequestResponse {
+  const auditHmacKey = deviceBridgeAuditHmacKey();
+  if (!deviceBridgeRequestIntakeEnabled()) {
+    if (!auditHmacKey) return publicDeviceBridgeDenial('device-bridge');
+    return denyDeviceBridgeRequest(
+      state,
+      user,
+      sessionId,
+      'device-bridge',
+      auditHmacKey,
+    );
+  }
+  if (!auditHmacKey) {
+    return publicDeviceBridgeDenial('audit');
+  }
+
+  if (user.authMode !== 'protected-gateway') {
+    return denyDeviceBridgeRequest(
+      state,
+      user,
+      sessionId,
+      'auth',
+      auditHmacKey,
+    );
+  }
+
+  const parsed = parseDeviceBridgeRequestPayload(payload);
+  if (!parsed.ok) {
+    return denyDeviceBridgeRequest(state, user, sessionId, 'schema', auditHmacKey);
+  }
+
+  const session = getOwnedSession(state.sessions, user.id, sessionId);
+  if (
+    !session ||
+    !isManagedSessionAuthorized(state, user, session) ||
+    session.lifecycle !== 'ready'
+  ) {
+    return denyDeviceBridgeRequest(state, user, sessionId, 'session', auditHmacKey);
+  }
+
+  const workspaceDecision = resolveWorkspaceForUser(user, parsed.payload.workspaceId);
+  if (
+    !workspaceDecision.ok ||
+    workspaceDecision.workspace.id !== session.workspace.id ||
+    workspaceDecision.workspace.root !== session.workspace.root
+  ) {
+    return denyDeviceBridgeRequest(
+      state,
+      user,
+      sessionId,
+      'workspace',
+      auditHmacKey,
+    );
+  }
+
+  const artifact = state.deviceArtifacts.get(parsed.payload.artifactId);
+  if (
+    !artifact ||
+    artifact.projectId !== session.workspace.id ||
+    artifact.sessionId !== session.id ||
+    artifact.sha256.toLowerCase() !== parsed.payload.artifactSha256.toLowerCase()
+  ) {
+    return denyDeviceBridgeRequest(
+      state,
+      user,
+      sessionId,
+      'artifact',
+      auditHmacKey,
+    );
+  }
+
+  const inventoryDevice = resolveDeviceBridgeInventoryDevice(session.workspace.id, parsed.payload.expectedDeviceId);
+  if (!inventoryDevice || inventoryDevice.id !== parsed.payload.expectedDeviceId) {
+    return denyDeviceBridgeRequest(
+      state,
+      user,
+      sessionId,
+      'inventory',
+      auditHmacKey,
+    );
+  }
+
+  if (pendingDeviceBridgeRequestCountForSession(state, session.id) >= 3) {
+    return denyDeviceBridgeRequest(
+      state,
+      user,
+      sessionId,
+      'quota',
+      auditHmacKey,
+    );
+  }
+  if (pendingDeviceBridgeRequestCountForUser(state, user.id) >= 5) {
+    return denyDeviceBridgeRequest(
+      state,
+      user,
+      sessionId,
+      'quota',
+      auditHmacKey,
+    );
+  }
+
+  const createdAt = new Date().toISOString();
+  const request: DeviceBridgeRequestRecord = {
+    id: `bridge-request-${randomUUID()}`,
+    userId: user.id,
+    sessionId: session.id,
+    projectId: session.workspace.id,
+    artifactId: artifact.id,
+    artifactSha256: artifact.sha256.toLowerCase(),
+    expectedDeviceId: parsed.payload.expectedDeviceId,
+    operation: 'esp32.flash',
+    status: 'pending',
+    createdAt,
+    expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+  };
+  const auditEvent = createBridgeAuditEvent(
+    state,
+    auditHmacKey,
+    user,
+    'device_bridge.request',
+    session.id,
+    'allowed',
+    bridgeAuditSummary(auditHmacKey, {
+      classification: 'created',
+      userId: user.id,
+      sessionId: session.id,
+      requestId: request.id,
+    }),
+  );
+  persistStateSnapshot(state, {
+    deviceBridgeRequests: [...state.deviceBridgeRequests.values(), request],
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.deviceBridgeRequests.set(request.id, request);
+  state.audit.events.push(auditEvent);
+  return { ok: true, request };
+}
+
 export function cancelSessionRun(
   state: RoadexState,
   user: UserProfile,
@@ -622,6 +789,144 @@ function deny(gate: string, reason: string): SessionResponse {
   };
 }
 
+function denyDeviceBridgeRequest(
+  state: RoadexState,
+  user: UserProfile,
+  sessionId: string,
+  gate: DeviceBridgeRequestGate,
+  auditHmacKey: string,
+): DeviceBridgeRequestResponse {
+  const auditEvent = createBridgeAuditEvent(
+    state,
+    auditHmacKey,
+    user,
+    'security.denied',
+    sessionId,
+    'denied',
+    bridgeAuditSummary(auditHmacKey, {
+      classification: gate,
+      userId: user.id,
+      sessionId,
+    }),
+  );
+  persistStateSnapshot(state, {
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.audit.events.push(auditEvent);
+  return publicDeviceBridgeDenial(gate);
+}
+
+function publicDeviceBridgeDenial(classification: DeviceBridgeRequestGate): DeviceBridgeRequestResponse {
+  return {
+    ok: false,
+    gate: 'device-bridge',
+    reason: 'Device bridge request denied.',
+    classification,
+  };
+}
+
+function createBridgeAuditEvent(
+  state: RoadexState,
+  auditHmacKey: string,
+  user: UserProfile,
+  action: AuditEvent['action'],
+  resource: string,
+  outcome: AuditEvent['outcome'],
+  summary: string,
+): AuditEvent {
+  return {
+    id: `audit-${state.audit.events.length + 1}`,
+    at: new Date().toISOString(),
+    actorId: auditTag(auditHmacKey, user.id),
+    action,
+    resource: auditTag(auditHmacKey, resource),
+    outcome,
+    summary,
+  };
+}
+
+function bridgeAuditSummary(
+  key: string,
+  fields: {
+    classification: string;
+    userId: string;
+    sessionId: string;
+    requestId?: string;
+  },
+): string {
+  return [
+    'Device bridge intake event.',
+    `classification=${fields.classification}`,
+    `actor_tag=${auditTag(key, fields.userId)}`,
+    `session_tag=${auditTag(key, fields.sessionId)}`,
+    ...(fields.requestId ? [`request_tag=${auditTag(key, fields.requestId)}`] : []),
+  ].join(' ');
+}
+
+function auditTag(key: string, value: string): string {
+  return createHmac('sha256', key).update(value).digest('hex').slice(0, 16);
+}
+
+function pendingDeviceBridgeRequestCountForSession(state: RoadexState, sessionId: string): number {
+  const now = Date.now();
+  return [...state.deviceBridgeRequests.values()].filter(
+    (request) => request.sessionId === sessionId && request.status === 'pending' && Date.parse(request.expiresAt) > now,
+  ).length;
+}
+
+function pendingDeviceBridgeRequestCountForUser(state: RoadexState, userId: string): number {
+  const now = Date.now();
+  return [...state.deviceBridgeRequests.values()].filter(
+    (request) => request.userId === userId && request.status === 'pending' && Date.parse(request.expiresAt) > now,
+  ).length;
+}
+
+function parseDeviceBridgeRequestPayload(payload: unknown): {
+  ok: true;
+  payload: DeviceBridgeRequestPayload;
+} | {
+  ok: false;
+  reason: string;
+} {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { ok: false, reason: 'Device bridge request body must be an object.' };
+  }
+  const record = payload as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const expectedKeys = ['artifactId', 'artifactSha256', 'expectedDeviceId', 'operation', 'workspaceId'];
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
+    return { ok: false, reason: 'Device bridge request schema is invalid.' };
+  }
+  if (
+    !boundedToken(record.workspaceId, 128) ||
+    !boundedToken(record.artifactId, 128) ||
+    !validDeviceIdentity(record.expectedDeviceId) ||
+    record.operation !== 'esp32.flash' ||
+    typeof record.artifactSha256 !== 'string' ||
+    !/^[a-f0-9]{64}$/i.test(record.artifactSha256)
+  ) {
+    return { ok: false, reason: 'Device bridge request schema is invalid.' };
+  }
+  return {
+    ok: true,
+    payload: {
+      workspaceId: record.workspaceId.trim(),
+      artifactId: record.artifactId.trim(),
+      artifactSha256: record.artifactSha256.toLowerCase(),
+      expectedDeviceId: record.expectedDeviceId.trim(),
+      operation: 'esp32.flash',
+    },
+  };
+}
+
+function boundedToken(value: unknown, maxLength: number): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.trim().length <= maxLength;
+}
+
+function validDeviceIdentity(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-zA-Z0-9:_-]{1,128}$/.test(value);
+}
+
 function saveState(state: RoadexState): void {
   state.persistence.save(serializeState({
     sessions: state.sessions.sessions,
@@ -629,8 +934,34 @@ function saveState(state: RoadexState): void {
     auditEvents: state.audit.events,
     managedThreadClaims: [...state.managedThreadClaims.values()],
     deviceArtifacts: [...state.deviceArtifacts.values()],
+    deviceBridgeRequests: [...state.deviceBridgeRequests.values()],
     deviceBridgeApprovals: [...state.deviceBridgeApprovals.values()],
     deviceBridgeOperations: [...state.deviceBridgeOperations.values()],
+  }));
+}
+
+function persistStateSnapshot(
+  state: RoadexState,
+  overrides: Partial<{
+    sessions: RoadexSession[];
+    streamEvents: StreamEvent[];
+    auditEvents: AuditEvent[];
+    managedThreadClaims: ManagedThreadClaim[];
+    deviceArtifacts: DeviceArtifactMetadata[];
+    deviceBridgeRequests: DeviceBridgeRequestRecord[];
+    deviceBridgeApprovals: DeviceBridgeApprovalRecord[];
+    deviceBridgeOperations: DeviceBridgeOperationRecord[];
+  }>,
+): void {
+  state.persistence.save(serializeState({
+    sessions: overrides.sessions ?? state.sessions.sessions,
+    streamEvents: overrides.streamEvents ?? state.sessions.streamEvents,
+    auditEvents: overrides.auditEvents ?? state.audit.events,
+    managedThreadClaims: overrides.managedThreadClaims ?? [...state.managedThreadClaims.values()],
+    deviceArtifacts: overrides.deviceArtifacts ?? [...state.deviceArtifacts.values()],
+    deviceBridgeRequests: overrides.deviceBridgeRequests ?? [...state.deviceBridgeRequests.values()],
+    deviceBridgeApprovals: overrides.deviceBridgeApprovals ?? [...state.deviceBridgeApprovals.values()],
+    deviceBridgeOperations: overrides.deviceBridgeOperations ?? [...state.deviceBridgeOperations.values()],
   }));
 }
 
@@ -731,7 +1062,11 @@ function visibleAuditEvents(audit: AuditLog, user: UserProfile) {
   if (user.roles.includes('admin') || user.roles.includes('security-reviewer')) {
     return audit.events;
   }
-  return audit.events.filter((event) => event.actorId === user.id);
+  const bridgeAuditKey = deviceBridgeAuditHmacKey();
+  const bridgeActorTag = bridgeAuditKey ? auditTag(bridgeAuditKey, user.id) : undefined;
+  return audit.events.filter(
+    (event) => event.actorId === user.id || (bridgeActorTag !== undefined && event.actorId === bridgeActorTag),
+  );
 }
 
 function readPositiveInteger(value: string | undefined, fallback: number): number {

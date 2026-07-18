@@ -27,6 +27,7 @@ describe('state persistence', () => {
       auditEvents: [],
       managedThreadClaims: [],
       deviceArtifacts: [],
+      deviceBridgeRequests: [],
       deviceBridgeApprovals: [],
       deviceBridgeOperations: [],
     });

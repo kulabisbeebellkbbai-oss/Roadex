@@ -43,6 +43,7 @@ export type AuditEvent = {
     | 'session.close'
     | 'session.reopen'
     | 'session.stream_open'
+    | 'device_bridge.request'
     | 'security.denied';
   resource: string;
   outcome: 'allowed' | 'denied';

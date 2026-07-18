@@ -10,6 +10,7 @@ import {
   createSessionFromApi,
   listArchivedSessions,
   reopenSession,
+  requestDeviceBridgeIntake,
   subscribeToSessionStream,
   streamEventsForSession,
   submitPrompt,
@@ -133,6 +134,25 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return;
     }
     sendJson(res, result.reopened ? 200 : 409, result);
+    return;
+  }
+
+  const deviceBridgeRequestMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/device-bridge\/requests$/);
+  if (deviceBridgeRequestMatch && req.method === 'POST') {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const body = await readJson<unknown>(req);
+    const result = requestDeviceBridgeIntake(
+      state,
+      auth.user,
+      decodeURIComponent(deviceBridgeRequestMatch[1]),
+      body,
+    );
+    sendJson(res, result.ok ? 202 : 403, result.ok ? result : {
+      ok: false,
+      gate: result.gate,
+      reason: result.reason,
+    });
     return;
   }
 

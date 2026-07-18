@@ -30,7 +30,9 @@ export function createDeviceBridgeService(store: DeviceBridgeStore, options: Ser
   const createSecret = options.createSecret ?? (() => randomBytes(32).toString('base64url'));
 
   function disabled(): Denied | undefined {
-    return options.enabledForTestsOnly === true && options.resolveSession && options.resolveInventoryDevice
+    return (options.enabledForTestsOnly === true &&
+      options.resolveSession &&
+      options.resolveInventoryDevice)
       ? undefined
       : { ok: false, reason: 'Device bridge operations are disabled.' };
   }

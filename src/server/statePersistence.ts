@@ -5,6 +5,7 @@ import type {
   DeviceArtifactMetadata,
   DeviceBridgeApprovalRecord,
   DeviceBridgeOperationRecord,
+  DeviceBridgeRequestRecord,
 } from '../shared/deviceBridgeContracts.js';
 
 export type PersistedRoadexState = {
@@ -13,6 +14,7 @@ export type PersistedRoadexState = {
   auditEvents: AuditEvent[];
   managedThreadClaims: ManagedThreadClaim[];
   deviceArtifacts: DeviceArtifactMetadata[];
+  deviceBridgeRequests: DeviceBridgeRequestRecord[];
   deviceBridgeApprovals: DeviceBridgeApprovalRecord[];
   deviceBridgeOperations: DeviceBridgeOperationRecord[];
 };
@@ -29,6 +31,7 @@ export type RetentionOptions = {
   maxAuditEvents?: number;
   sessionRetentionMs?: number;
   maxDeviceArtifacts?: number;
+  maxDeviceRequests?: number;
   maxDeviceApprovals?: number;
   maxDeviceOperations?: number;
   deviceBridgeRetentionMs?: number;
@@ -41,6 +44,7 @@ export function createMemoryPersistence(initial?: Partial<PersistedRoadexState>)
     auditEvents: initial?.auditEvents ?? [],
     managedThreadClaims: initial?.managedThreadClaims ?? [],
     deviceArtifacts: initial?.deviceArtifacts ?? [],
+    deviceBridgeRequests: initial?.deviceBridgeRequests ?? [],
     deviceBridgeApprovals: initial?.deviceBridgeApprovals ?? [],
     deviceBridgeOperations: initial?.deviceBridgeOperations ?? [],
   };
@@ -96,6 +100,7 @@ function sanitizeState(state: Partial<PersistedRoadexState>, now = Date.now()): 
       (claim) => Boolean(cleanOptionalString(claim.threadId) && cleanOptionalString(claim.userId)),
     ),
     deviceArtifacts: (state.deviceArtifacts ?? []).flatMap((record) => sanitizeArtifact(record) ?? []),
+    deviceBridgeRequests: (state.deviceBridgeRequests ?? []).flatMap((record) => sanitizeRequest(record) ?? []),
     deviceBridgeApprovals: (state.deviceBridgeApprovals ?? []).flatMap((record) => sanitizeApproval(record) ?? []),
     deviceBridgeOperations: (state.deviceBridgeOperations ?? []).flatMap((record) => sanitizeOperation(record) ?? []),
   };
@@ -109,6 +114,7 @@ function applyRetention(state: PersistedRoadexState, options: RetentionOptions):
   const sessionRetentionMs = options.sessionRetentionMs ?? numberFromEnv('ROADEX_SESSION_RETENTION_MS', 2_592_000_000);
   const deviceBridgeRetentionMs = options.deviceBridgeRetentionMs ?? numberFromEnv('ROADEX_DEVICE_BRIDGE_RETENTION_MS', 2_592_000_000);
   const maxDeviceArtifacts = options.maxDeviceArtifacts ?? numberFromEnv('ROADEX_MAX_DEVICE_ARTIFACTS', 100);
+  const maxDeviceRequests = options.maxDeviceRequests ?? numberFromEnv('ROADEX_MAX_DEVICE_REQUESTS', 200);
   const maxDeviceApprovals = options.maxDeviceApprovals ?? numberFromEnv('ROADEX_MAX_DEVICE_APPROVALS', 200);
   const maxDeviceOperations = options.maxDeviceOperations ?? numberFromEnv('ROADEX_MAX_DEVICE_OPERATIONS', 200);
   const cutoff = now - sessionRetentionMs;
@@ -126,6 +132,12 @@ function applyRetention(state: PersistedRoadexState, options: RetentionOptions):
       .map((session) => session.id),
   );
 
+  const deviceBridgeRequests = retainByTimestamp(
+    state.deviceBridgeRequests,
+    (record) => record.createdAt,
+    deviceCutoff,
+    maxDeviceRequests,
+  );
   const deviceBridgeApprovals = retainByTimestamp(
     state.deviceBridgeApprovals,
     (record) => record.createdAt,
@@ -139,6 +151,7 @@ function applyRetention(state: PersistedRoadexState, options: RetentionOptions):
     maxDeviceOperations,
   );
   const referencedArtifactIds = new Set([
+    ...deviceBridgeRequests.map((record) => record.artifactId),
     ...deviceBridgeApprovals.map((record) => record.artifactId),
     ...deviceBridgeOperations.map((record) => record.artifactId),
   ]);
@@ -158,6 +171,7 @@ function applyRetention(state: PersistedRoadexState, options: RetentionOptions):
     auditEvents: state.auditEvents.slice(-maxAuditEvents),
     managedThreadClaims: state.managedThreadClaims,
     deviceArtifacts,
+    deviceBridgeRequests,
     deviceBridgeApprovals,
     deviceBridgeOperations,
   };
@@ -185,6 +199,7 @@ function emptyState(): PersistedRoadexState {
     auditEvents: [],
     managedThreadClaims: [],
     deviceArtifacts: [],
+    deviceBridgeRequests: [],
     deviceBridgeApprovals: [],
     deviceBridgeOperations: [],
   };
@@ -211,6 +226,35 @@ function sanitizeArtifact(record: DeviceArtifactMetadata): DeviceArtifactMetadat
     mediaType: 'application/octet-stream',
     sha256: record.sha256.toLowerCase(),
     createdAt: new Date(record.createdAt).toISOString(),
+  };
+}
+
+function sanitizeRequest(record: DeviceBridgeRequestRecord): DeviceBridgeRequestRecord | undefined {
+  if (!(
+    validBoundedString(record.id, 128) &&
+    validBoundedString(record.userId, 128) &&
+    validBoundedString(record.sessionId, 128) &&
+    validBoundedString(record.projectId, 128) &&
+    validBoundedString(record.artifactId, 128) &&
+    /^[a-f0-9]{64}$/i.test(record.artifactSha256) &&
+    validBoundedString(record.expectedDeviceId, 128) &&
+    record.operation === 'esp32.flash' &&
+    ['pending', 'revoked', 'expired'].includes(record.status) &&
+    validIsoDate(record.createdAt) &&
+    validIsoDate(record.expiresAt)
+  )) return undefined;
+  return {
+    id: record.id.trim(),
+    userId: record.userId.trim(),
+    sessionId: record.sessionId.trim(),
+    projectId: record.projectId.trim(),
+    artifactId: record.artifactId.trim(),
+    artifactSha256: record.artifactSha256.toLowerCase(),
+    expectedDeviceId: record.expectedDeviceId.trim(),
+    operation: 'esp32.flash',
+    status: record.status,
+    createdAt: new Date(record.createdAt).toISOString(),
+    expiresAt: new Date(record.expiresAt).toISOString(),
   };
 }
 

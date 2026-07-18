@@ -2,6 +2,8 @@ export type DeviceBridgePolicy = {
   state: 'disabled';
   approvedFoundation: true;
   operations: ['esp32.flash'];
+  requestIntakeEnabled: boolean;
+  operationsEnabled: false;
   reason: string;
 };
 
@@ -34,6 +36,40 @@ export type DeviceBridgeApprovalRecord = {
   createdAt: string;
   expiresAt: string;
 };
+
+export type DeviceBridgeRequestRecord = {
+  id: string;
+  userId: string;
+  sessionId: string;
+  projectId: string;
+  artifactId: string;
+  artifactSha256: string;
+  expectedDeviceId: string;
+  operation: 'esp32.flash';
+  status: 'pending' | 'revoked' | 'expired';
+  createdAt: string;
+  expiresAt: string;
+};
+
+export type DeviceBridgeRequestPayload = {
+  workspaceId: string;
+  artifactId: string;
+  artifactSha256: string;
+  expectedDeviceId: string;
+  operation: 'esp32.flash';
+};
+
+export type DeviceBridgeRequestResponse =
+  | {
+      ok: true;
+      request: DeviceBridgeRequestRecord;
+    }
+  | {
+      ok: false;
+      gate: 'device-bridge';
+      reason: string;
+      classification?: 'auth' | 'audit' | 'device-bridge' | 'session' | 'workspace' | 'artifact' | 'inventory' | 'schema' | 'quota';
+    };
 
 export type DeviceBridgeOperationRecord = {
   id: string;
