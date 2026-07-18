@@ -38,6 +38,9 @@ Roadex exposes powerful server-side Codex capabilities through a browser. The in
 - Workspace path validation prevents traversal outside the approved project root.
 - Session reconnect restores only the caller's authorized sessions.
 - Audit logs include security-sensitive lifecycle and approval events.
+- Bootstrap transcript previews are restricted to sessions owned by the authenticated user.
+- Ordinary users receive only their own audit events; `admin` and `security-reviewer` roles may receive the global audit tail for oversight.
+- Live SSE subscriptions enforce ownership before capacity checks and are capped per session through `ROADEX_MAX_STREAMS_PER_SESSION`.
 - Device bridge code paths remain unavailable in the first milestone.
 
 ## Deferred Device Access

@@ -31,6 +31,7 @@ export type RoadexState = {
   activeRuns: Map<string, AbortController>;
   cancelAttempts: Map<string, number>;
   streamSubscribers: Map<string, Set<(event: StreamEvent) => void>>;
+  maxStreamSubscribersPerSession: number;
   maxActiveRuns: number;
 };
 
@@ -50,24 +51,27 @@ export function createInitialState(
     activeRuns: new Map(),
     cancelAttempts: new Map(),
     streamSubscribers: new Map(),
+    maxStreamSubscribersPerSession: readPositiveInteger(process.env.ROADEX_MAX_STREAMS_PER_SESSION, 4),
     maxActiveRuns: Number(process.env.ROADEX_MAX_ACTIVE_RUNS ?? 2),
   };
 }
 
 export async function bootstrap(state: RoadexState, user: UserProfile): Promise<RoadexBootstrap> {
-  const userSessions = state.sessions.sessions.filter((session) => isVisibleSessionForUser(session, user));
+  let userSessions = state.sessions.sessions.filter((session) => isVisibleSessionForUser(session, user));
   if (userSessions.length === 0) {
     const defaultWorkspace = getApprovedWorkspaces()[0];
     if (defaultWorkspace) {
       await createSessionFromApi(state, user, { workspaceId: defaultWorkspace.id });
+      userSessions = state.sessions.sessions.filter((session) => isVisibleSessionForUser(session, user));
     }
   }
+  const visibleSessionIds = new Set(userSessions.map((session) => session.id));
   return {
     user,
     workspaces: getApprovedWorkspaces(),
-    sessions: state.sessions.sessions.filter((session) => isVisibleSessionForUser(session, user)),
-    auditEvents: state.audit.events.slice(-8).reverse(),
-    streamPreview: state.sessions.streamEvents.slice(-8),
+    sessions: userSessions,
+    auditEvents: visibleAuditEvents(state.audit, user).slice(-8).reverse(),
+    streamPreview: state.sessions.streamEvents.filter((event) => visibleSessionIds.has(event.sessionId)).slice(-8),
   };
 }
 
@@ -239,6 +243,7 @@ export function closeSession(
 
   const activeRun = state.activeRuns.get(sessionId);
   activeRun?.abort();
+  state.streamSubscribers.delete(sessionId);
   session.lifecycle = 'closed';
   touchSession(session);
   const auditEvent = appendAudit(
@@ -326,8 +331,30 @@ export function subscribeToSessionStream(
   sessionId: string,
   onEvent: (event: StreamEvent) => void,
 ): { snapshot: StreamEvent[]; unsubscribe: () => void } | undefined {
-  const snapshot = streamEventsForSession(state, user, sessionId);
-  if (!snapshot) return undefined;
+  const session = getOwnedSession(state.sessions, user.id, sessionId);
+  if (!session || session.lifecycle === 'closed') {
+    appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'SSE stream denied.');
+    saveState(state);
+    return undefined;
+  }
+
+  const existingSubscribers = state.streamSubscribers.get(sessionId);
+  if (existingSubscribers && existingSubscribers.size >= state.maxStreamSubscribersPerSession) {
+    appendAudit(
+      state.audit,
+      user,
+      'security.denied',
+      sessionId,
+      'denied',
+      `Live stream subscriber limit reached: actor=${user.id} session=${sessionId}.`,
+    );
+    saveState(state);
+    return undefined;
+  }
+
+  appendAudit(state.audit, user, 'session.stream_open', sessionId, 'allowed', 'Opened scoped SSE stream.');
+  saveState(state);
+  const snapshot = state.sessions.streamEvents.filter((event) => event.sessionId === sessionId);
 
   const subscribers = state.streamSubscribers.get(sessionId) ?? new Set<(event: StreamEvent) => void>();
   subscribers.add(onEvent);
@@ -435,4 +462,16 @@ function updateCodexThreadId(session: RoadexSession, codexThreadId: string | und
   if (!codexThreadId || session.codexThreadId === codexThreadId) return;
   session.codexThreadId = codexThreadId;
   touchSession(session);
+}
+
+function visibleAuditEvents(audit: AuditLog, user: UserProfile) {
+  if (user.roles.includes('admin') || user.roles.includes('security-reviewer')) {
+    return audit.events;
+  }
+  return audit.events.filter((event) => event.actorId === user.id);
+}
+
+function readPositiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }

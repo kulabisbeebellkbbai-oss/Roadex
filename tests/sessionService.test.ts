@@ -13,7 +13,7 @@ import {
   subscribeToSessionStream,
   submitPrompt,
 } from '../src/server/sessionService';
-import type { WorkspaceRef } from '../src/shared/sessionContracts';
+import type { UserProfile, WorkspaceRef } from '../src/shared/sessionContracts';
 import type { RunnerPromptRequest, SessionRunner } from '../src/server/codexRunner';
 
 const workspace: WorkspaceRef = {
@@ -263,6 +263,70 @@ describe('Roadex session service', () => {
     expect(received.some((message) => message.includes('after unsubscribe'))).toBe(false);
   });
 
+  it('limits live subscribers per session and audits rejected connections', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    state.maxStreamSubscribersPerSession = 1;
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    const first = subscribeToSessionStream(state, mockUser, response.session.id, () => undefined);
+    const rejected = subscribeToSessionStream(state, mockUser, response.session.id, () => undefined);
+
+    expect(first).toBeDefined();
+    expect(rejected).toBeUndefined();
+    expect(state.streamSubscribers.get(response.session.id)?.size).toBe(1);
+    expect(state.audit.events.at(-1)).toMatchObject({
+      action: 'security.denied',
+      actorId: mockUser.id,
+      resource: response.session.id,
+      outcome: 'denied',
+    });
+    expect(state.audit.events.at(-1)?.summary).toContain('Live stream subscriber limit reached');
+
+    first?.unsubscribe();
+  });
+
+  it('checks stream ownership before reporting subscriber capacity', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    state.maxStreamSubscribersPerSession = 1;
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    const first = subscribeToSessionStream(state, mockUser, response.session.id, () => undefined);
+    const intruder = { ...mockUser, id: 'other-user' };
+    const rejected = subscribeToSessionStream(state, intruder, response.session.id, () => undefined);
+
+    expect(rejected).toBeUndefined();
+    expect(state.audit.events.at(-1)).toMatchObject({
+      action: 'security.denied',
+      actorId: intruder.id,
+      resource: response.session.id,
+    });
+    expect(state.audit.events.at(-1)?.summary).toBe('SSE stream denied.');
+    first?.unsubscribe();
+  });
+
+  it('allows a replacement live subscriber after an existing stream unsubscribes', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    state.maxStreamSubscribersPerSession = 1;
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    const first = subscribeToSessionStream(state, mockUser, response.session.id, () => undefined);
+    first?.unsubscribe();
+    const replacement = subscribeToSessionStream(state, mockUser, response.session.id, () => undefined);
+
+    expect(replacement).toBeDefined();
+    expect(state.streamSubscribers.get(response.session.id)?.size).toBe(1);
+    replacement?.unsubscribe();
+  });
+
   it('blocks additional prompts after a failed runner while keeping failure events readable', async () => {
     const state = createInitialState(fakeRunner('failed'), createMemoryPersistence());
     const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
@@ -324,6 +388,32 @@ describe('Roadex session service', () => {
     });
     expect(bootstrapped.streamPreview.some((event) => event.message.includes('persist me'))).toBe(true);
     expect(bootstrapped.auditEvents.some((event) => event.action === 'session.prompt')).toBe(true);
+  });
+
+  it('returns only the authenticated user audit events from bootstrap', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const regularUser = { ...mockUser, id: 'regular-user', roles: ['user'] as UserProfile['roles'] };
+    const otherUser = { ...mockUser, id: 'other-user', displayName: 'Other user', roles: ['user'] as UserProfile['roles'] };
+
+    await createSessionFromApi(state, regularUser, { workspaceId: 'roadex' });
+    await createSessionFromApi(state, otherUser, { workspaceId: 'roadex' });
+
+    const bootstrapped = await bootstrap(state, regularUser);
+
+    expect(bootstrapped.auditEvents.length).toBeGreaterThan(0);
+    expect(bootstrapped.auditEvents.every((event) => event.actorId === regularUser.id)).toBe(true);
+    const visibleSessionIds = new Set(bootstrapped.sessions.map((session) => session.id));
+    expect(bootstrapped.streamPreview.every((event) => visibleSessionIds.has(event.sessionId))).toBe(true);
+  });
+
+  it('allows security reviewers to inspect the global audit tail', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const regularUser = { ...mockUser, id: 'regular-user', roles: ['user'] as UserProfile['roles'] };
+
+    await createSessionFromApi(state, regularUser, { workspaceId: 'roadex' });
+    const bootstrapped = await bootstrap(state, mockUser);
+
+    expect(bootstrapped.auditEvents.some((event) => event.actorId === regularUser.id)).toBe(true);
   });
 
   it('persists Codex thread ids so later prompts can resume the same thread after restart', async () => {
@@ -444,6 +534,8 @@ describe('Roadex session service', () => {
     expect(response.ok).toBe(true);
     if (!response.ok) return;
 
+    const subscription = subscribeToSessionStream(state, mockUser, response.session.id, () => undefined);
+    expect(subscription).toBeDefined();
     const close = closeSession(state, mockUser, response.session.id);
     const bootstrapped = await bootstrap(state, mockUser);
 
@@ -455,6 +547,7 @@ describe('Roadex session service', () => {
       },
     });
     expect(response.session.lifecycle).toBe('closed');
+    expect(state.streamSubscribers.has(response.session.id)).toBe(false);
     expect(bootstrapped.sessions.some((session) => session.id === response.session.id)).toBe(false);
     expect(bootstrapped.sessions[0]).toMatchObject({
       lifecycle: 'ready',

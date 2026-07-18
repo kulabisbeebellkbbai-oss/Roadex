@@ -2,7 +2,7 @@
 
 Roadex is a browser-first portal for server-hosted Codex sessions. It is intended to feel like using Codex locally on the server while the user connects from a desktop, tablet, or mobile browser.
 
-The current implementation provides a secure responsive portal shell plus a server-side Codex runner for approved workspaces. Authentication is still mock/demo-only, and client device bridging remains behind a later security review gate.
+The current implementation provides a secure responsive portal plus a server-side Codex runner for approved workspaces. Production access uses identity asserted by the Protected Service Gateway; mock authentication is available only when gateway authentication is not configured. Client device bridging remains behind a later security review gate.
 
 ## Structure
 
@@ -36,7 +36,9 @@ For multiple server-approved projects, set `ROADEX_WORKSPACES_JSON` to a JSON ar
 
 Runtime session, transcript, and audit metadata are written to `data/roadex-state.json` by default. The `data/` directory is ignored and must not be committed.
 
-Prompt submission is asynchronous: `POST /api/sessions/:id/prompts` accepts work and the transcript is read from `GET /api/sessions/:id/stream` while Codex runs. The local API also supports `POST /api/sessions/:id/cancel`; exposing that cancel route through the Protected Service Gateway requires a separate gateway allowlist approval.
+Prompt submission is asynchronous: `POST /api/sessions/:id/prompts` accepts work and the transcript is read from `GET /api/sessions/:id/stream` while Codex runs. Add `?live=1` for a long-lived SSE stream that sends the existing transcript followed by new runner events. The local API also supports `POST /api/sessions/:id/cancel` and `POST /api/sessions/:id/close`.
+
+Roadex limits live streams per session to protect the long-lived endpoint. Set `ROADEX_MAX_STREAMS_PER_SESSION` to a positive integer to override the default of four. Rejected excess streams are recorded as security denial audit events. Bootstrap audit and transcript previews are scoped to the authenticated user; `admin` and `security-reviewer` roles may inspect the global audit tail, but not another user's session transcript.
 
 ## Protected Gateway
 
