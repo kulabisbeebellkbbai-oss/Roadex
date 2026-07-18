@@ -2,7 +2,7 @@
 
 Date: 2026-07-18
 
-Status: deployed with pending-request intake enabled and device operations hard-disabled. Authenticated MSI-origin verification remains pending.
+Status: deployed with pending-request intake enabled and device operations hard-disabled. Fail-closed MSI verification passed; a short audit-correlation retest remains pending.
 
 ## Deployed Scope
 
@@ -45,3 +45,17 @@ The approved MSI-origin smoke must verify:
 - The active Roadex session, workspace, lifecycle, and thread remain unchanged.
 
 A successful pending-request creation test requires a separately reviewed server-produced firmware artifact and owner-approved inventory binding. This deployment does not authorize inventing or registering those values.
+
+## Fail-Closed MSI Verification
+
+The authenticated MSI smoke from `10.70.0.10` during the UTC window `2026-07-18T17:23:43.3054540Z` through `2026-07-18T17:23:46.3603627Z` used a schema-valid placeholder payload and verified:
+
+- Gateway forwarded the request only after authenticated IDS acknowledgement.
+- Roadex rejected the unbound placeholder with sanitized HTTP `502` reason `backend_denied`.
+- IDS stored the redacted `bridge_request_authorized_to_forward` and `bridge_request_rejected` events.
+- The backend-denial event matched one explicit gateway success record and one durable replay row.
+- Gateway telemetry spool remained empty.
+- Roadex retained zero requests, approvals, and operations.
+- Bootstrap succeeded before and after the request, preserving the active session, workspace, lifecycle, and thread.
+
+Gateway commit `bbd35a5` adds the missing positive success record for the pre-forward authorization event. The gateway-only restart completed under the approved intake deployment scope. A short MSI repeat is required to verify that both IDS event IDs now have explicit gateway success records.
