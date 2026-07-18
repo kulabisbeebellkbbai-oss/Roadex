@@ -9,7 +9,6 @@ import {
   ChevronRight,
   Clock3,
   KeyRound,
-  Laptop,
   LockKeyhole,
   Menu,
   MonitorSmartphone,
@@ -17,7 +16,6 @@ import {
   PlugZap,
   Plus,
   RadioTower,
-  RotateCcw,
   ShieldCheck,
   Smartphone,
   TerminalSquare,
@@ -31,14 +29,19 @@ import { resolveLayoutMode, toggleLayoutMode } from './layoutMode';
 function App() {
   const roadex = useRoadexSession();
   const [prompt, setPrompt] = useState('');
+  const [sidebarPanel, setSidebarPanel] = useState<'projects' | null>('projects');
+  const [selectedProjectId, setSelectedProjectId] = useState('');
   const [layoutMode, setLayoutMode] = useState(() => resolveLayoutMode(
     readLayoutPreference(),
     window.matchMedia('(max-width: 720px)').matches,
   ));
   const session = roadex.session;
+  const selectedProject = roadex.workspaces.find(
+    (workspace) => workspace.id === (selectedProjectId || session?.workspace.id),
+  );
   const visibleTranscript = roadex.transcript.filter(isVisibleTranscriptEvent);
   const roadexProjectThreads = [...roadex.sessions, ...roadex.archivedSessions]
-    .filter((candidate) => candidate.workspace.id === session?.workspace.id)
+    .filter((candidate) => candidate.workspace.id === selectedProject?.id)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   const attachedCodexThreadIds = new Set(
     [...roadex.sessions, ...roadex.archivedSessions]
@@ -46,8 +49,9 @@ function App() {
       .filter((threadId): threadId is string => Boolean(threadId)),
   );
   const managedProjectThreads = roadex.managedThreads.filter(
-    (candidate) => candidate.project.id === session?.workspace.id && !attachedCodexThreadIds.has(candidate.id),
+    (candidate) => candidate.project.id === selectedProject?.id && !attachedCodexThreadIds.has(candidate.id),
   );
+  const selectedRoadexThread = session && session.workspace.id === selectedProject?.id ? `roadex:${session.id}` : '';
   const composerDisabled =
     roadex.connectionState === 'loading' ||
     roadex.connectionState === 'streaming' ||
@@ -62,6 +66,10 @@ function App() {
       // Storage can be unavailable in privacy-restricted browser contexts.
     }
   }, [layoutMode]);
+
+  useEffect(() => {
+    if (session?.workspace.id) setSelectedProjectId(session.workspace.id);
+  }, [session?.id, session?.workspace.id]);
 
   async function handlePrompt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -87,8 +95,24 @@ function App() {
         <nav className="nav-list">
           {navItems.map((item) => (
             <button
-              className={`nav-item${item.active ? ' active' : ''}`}
+              aria-expanded={item.label === 'Projects' ? sidebarPanel === 'projects' : undefined}
+              aria-label={item.label}
+              className={`nav-item${
+                (item.label === 'Projects' && sidebarPanel === 'projects') ||
+                (item.label === 'Sessions' && sidebarPanel === null)
+                  ? ' active'
+                  : ''
+              }`}
               key={item.label}
+              onClick={() => {
+                if (item.label === 'Projects') {
+                  setSidebarPanel((current) => current === 'projects' ? null : 'projects');
+                  return;
+                }
+                setSidebarPanel(null);
+                if (item.label === 'Security') document.getElementById('security-checks')?.scrollIntoView({ behavior: 'smooth' });
+                if (item.label === 'Devices') document.getElementById('device-status')?.scrollIntoView({ behavior: 'smooth' });
+              }}
               type="button"
             >
               <item.icon size={18} />
@@ -96,6 +120,66 @@ function App() {
             </button>
           ))}
         </nav>
+
+        {sidebarPanel === 'projects' ? (
+          <section className="sidebar-projects" aria-label="Project and thread connection">
+            <div className="sidebar-panel-heading">
+              <div>
+                <span>Connection</span>
+                <strong>Projects</strong>
+              </div>
+              <button
+                aria-label="Create new thread"
+                disabled={!selectedProject || roadex.connectionState === 'loading'}
+                onClick={() => selectedProject && void roadex.createThread(selectedProject.id)}
+                title="Create new thread"
+                type="button"
+              >
+                <Plus size={17} />
+              </button>
+            </div>
+            <label>
+              <span>Project</span>
+              <select
+                disabled={roadex.connectionState === 'loading'}
+                onChange={(event) => setSelectedProjectId(event.target.value)}
+                value={selectedProject?.id ?? ''}
+              >
+                {roadex.workspaces.map((workspace) => (
+                  <option key={workspace.id} value={workspace.id}>{workspace.name}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Thread</span>
+              <select
+                disabled={!selectedProject || roadex.connectionState === 'loading'}
+                onChange={(event) => {
+                  const [source, id] = event.target.value.split(':', 2);
+                  if (source === 'roadex') void roadex.selectThread(id);
+                  if (source === 'managed' && selectedProject) void roadex.attachManagedThread(id, selectedProject.id);
+                }}
+                value={selectedRoadexThread}
+              >
+                {!selectedRoadexThread ? <option value="">Select a thread</option> : null}
+                {roadexProjectThreads.map((candidate) => (
+                  <option key={candidate.id} value={`roadex:${candidate.id}`}>
+                    {candidate.lifecycle === 'closed' ? 'Archived' : 'Active'} · {candidate.id.slice(-8)} · {new Date(candidate.updatedAt).toLocaleString()}
+                  </option>
+                ))}
+                {managedProjectThreads.map((candidate) => (
+                  <option key={candidate.id} value={`managed:${candidate.id}`}>
+                    Codex Projects · {candidate.label} · {new Date(candidate.updatedAt).toLocaleString()}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="sidebar-project-meta" title={selectedProject?.root}>
+              <span>{selectedProject?.name ?? 'No project selected'}</span>
+              <strong>{session && session.workspace.id === selectedProject?.id ? session.lifecycle : 'browse'}</strong>
+            </div>
+          </section>
+        ) : null}
 
         <section className="trust-panel" aria-label="Security posture">
           <ShieldCheck size={20} />
@@ -172,54 +256,6 @@ function App() {
                 <h2>Transcript</h2>
               </div>
               <span className="status-dot">{session?.lifecycle ?? 'loading'}</span>
-            </div>
-
-            <div className="session-selectors" aria-label="Session connection">
-              <label>
-                <span>Project</span>
-                <select
-                  disabled={roadex.connectionState === 'loading'}
-                  onChange={(event) => void roadex.openWorkspace(event.target.value)}
-                  value={session?.workspace.id ?? ''}
-                >
-                  {roadex.workspaces.map((workspace) => (
-                    <option key={workspace.id} value={workspace.id}>{workspace.name}</option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span>Thread</span>
-                <select
-                  disabled={!session || roadex.connectionState === 'loading'}
-                  onChange={(event) => {
-                    const [source, id] = event.target.value.split(':', 2);
-                    if (source === 'roadex') void roadex.selectThread(id);
-                    if (source === 'managed' && session) void roadex.attachManagedThread(id, session.workspace.id);
-                  }}
-                  value={session ? `roadex:${session.id}` : ''}
-                >
-                  {roadexProjectThreads.map((candidate) => (
-                    <option key={candidate.id} value={`roadex:${candidate.id}`}>
-                      {candidate.lifecycle === 'closed' ? 'Archived' : 'Active'} · {candidate.id.slice(-8)} · {new Date(candidate.updatedAt).toLocaleString()}
-                    </option>
-                  ))}
-                  {managedProjectThreads.map((candidate) => (
-                    <option key={candidate.id} value={`managed:${candidate.id}`}>
-                      Codex Projects · {candidate.label} · {new Date(candidate.updatedAt).toLocaleString()}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                aria-label="Create new thread"
-                className="new-thread-action"
-                disabled={!session || roadex.connectionState === 'loading' || roadex.connectionState === 'streaming'}
-                onClick={() => session && void roadex.createThread(session.workspace.id)}
-                title="Create new thread"
-                type="button"
-              >
-                <Plus size={18} />
-              </button>
             </div>
 
             <div className="transcript" aria-live="polite">
@@ -317,68 +353,7 @@ function App() {
         </section>
 
         <section className="lower-grid">
-          <article className="section-card">
-            <div className="panel-heading compact">
-              <div>
-                <span className="section-label">Projects</span>
-                <h2>Server workspaces</h2>
-              </div>
-              <Laptop size={20} />
-            </div>
-            <div className="session-list">
-              {roadex.workspaces.map((workspace) => (
-                <div className="session-row" key={workspace.id}>
-                  <div>
-                    <strong>{workspace.name}</strong>
-                    <span>{workspace.id}</span>
-                  </div>
-                  <p title={workspace.root}>{workspace.root}</p>
-                  {session?.workspace.id === workspace.id ? (
-                    <span className="signal">Active</span>
-                  ) : (
-                    <button
-                      className="inline-action"
-                      disabled={roadex.connectionState === 'loading' || roadex.connectionState === 'streaming'}
-                      onClick={() => void roadex.openWorkspace(workspace.id)}
-                      type="button"
-                    >
-                      Open
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-            <div className="archive-heading">
-              <span className="section-label">History</span>
-              <h3>Archived sessions</h3>
-            </div>
-            <div className="session-list archived-list">
-              {roadex.archivedSessions.map((archived) => (
-                <div className="session-row" key={archived.id}>
-                  <div>
-                    <strong>{archived.workspace.name}</strong>
-                    <span>{archived.id}</span>
-                  </div>
-                  <p>{new Date(archived.updatedAt).toLocaleString()}</p>
-                  <button
-                    aria-label={`Reopen ${archived.workspace.name} session`}
-                    className="inline-action icon-action"
-                    disabled={roadex.connectionState === 'loading' || roadex.connectionState === 'streaming'}
-                    onClick={() => void roadex.reopenArchivedSession(archived.id)}
-                    title="Reopen session"
-                    type="button"
-                  >
-                    <RotateCcw size={17} />
-                  </button>
-                </div>
-              ))}
-              {roadex.archivedSessions.length === 0 ? (
-                <p className="empty-state">No archived sessions.</p>
-              ) : null}
-            </div>
-          </article>
-
-          <article className="section-card security-card">
+          <article className="section-card security-card" id="security-checks">
             <div className="panel-heading compact">
               <div>
                 <span className="section-label">Oversight</span>
@@ -401,7 +376,7 @@ function App() {
             <div className="safeguard-note">Device bridge remains disabled.</div>
           </article>
 
-          <article className="section-card device-card">
+          <article className="section-card device-card" id="device-status">
             <div className="panel-heading compact">
               <div>
                 <span className="section-label">Audit</span>
