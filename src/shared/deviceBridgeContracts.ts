@@ -90,7 +90,8 @@ export type DeviceBridgeApprovalRecord = {
   projectId: string;
   artifactId: string;
   artifactSha256: string;
-  expectedDeviceId: string;
+  inventoryBindingId: string;
+  deviceIdentityTag: string;
   operation: 'esp32.flash';
   status: 'pending' | 'consumed' | 'revoked' | 'expired';
   createdAt: string;
@@ -104,25 +105,28 @@ export type DeviceBridgeRequestRecord = {
   projectId: string;
   artifactId: string;
   artifactSha256: string;
-  expectedDeviceId: string;
+  inventoryBindingId: string;
+  deviceIdentityTag: string;
   operation: 'esp32.flash';
   status: 'pending' | 'revoked' | 'expired';
   createdAt: string;
   expiresAt: string;
 };
 
+export type DeviceBridgeRequestPublic = Omit<DeviceBridgeRequestRecord, 'deviceIdentityTag'>;
+
 export type DeviceBridgeRequestPayload = {
   workspaceId: string;
   artifactId: string;
   artifactSha256: string;
-  expectedDeviceId: string;
+  inventoryBindingId: string;
   operation: 'esp32.flash';
 };
 
 export type DeviceBridgeRequestResponse =
   | {
       ok: true;
-      request: DeviceBridgeRequestRecord;
+      request: DeviceBridgeRequestPublic;
     }
   | {
       ok: false;
@@ -139,11 +143,12 @@ export type DeviceBridgeOperationRecord = {
   projectId: string;
   artifactId: string;
   artifactSha256: string;
-  expectedDeviceId: string;
+  inventoryBindingId: string;
+  deviceIdentityTag: string;
   operation: 'esp32.flash';
   phase: 'probe' | 'confirmation' | 'destructive' | 'reporting' | 'completed' | 'failed' | 'cancelled';
   credentialDigest: string;
-  actualDeviceId?: string;
+  actualDeviceIdentityTag?: string;
   verifiedArtifactSha256?: string;
   confirmationChallengeDigest?: string;
   destructiveNonceDigest?: string;

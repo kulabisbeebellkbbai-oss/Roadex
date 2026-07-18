@@ -18,7 +18,6 @@ import {
   deviceBridgeMetadataRegistryEnabled,
   deviceBridgeRequestIntakeEnabled,
   getDeviceBridgePolicy,
-  resolveDeviceBridgeInventoryDevice,
 } from './deviceBridgePolicy.js';
 import { createRunnerIntro, createStreamEvent } from './mockRunner.js';
 import { addStreamEvents, createSessionStoreFromState, getOwnedSession, type SessionStore } from './sessionStore.js';
@@ -53,6 +52,7 @@ import type {
   DeviceBridgeMetadataResponse,
   DeviceBridgeOperationRecord,
   DeviceBridgeRequestPayload,
+  DeviceBridgeRequestPublic,
   DeviceBridgeRequestRecord,
   DeviceBridgeRequestResponse,
   DeviceInventoryBindingPayload,
@@ -605,8 +605,8 @@ export function requestDeviceBridgeIntake(
     );
   }
 
-  const inventoryDevice = resolveDeviceBridgeInventoryDevice(session.workspace.id, parsed.payload.expectedDeviceId);
-  if (!inventoryDevice || inventoryDevice.id !== parsed.payload.expectedDeviceId) {
+  const inventoryBinding = state.deviceInventoryBindings.get(parsed.payload.inventoryBindingId);
+  if (!validActiveInventoryBindingForRequest(inventoryBinding, session.workspace.id)) {
     return denyDeviceBridgeRequest(
       state,
       user,
@@ -643,7 +643,8 @@ export function requestDeviceBridgeIntake(
     projectId: session.workspace.id,
     artifactId: artifact.id,
     artifactSha256: artifact.sha256.toLowerCase(),
-    expectedDeviceId: parsed.payload.expectedDeviceId,
+    inventoryBindingId: inventoryBinding.id,
+    deviceIdentityTag: inventoryBinding.deviceIdentityTag.toLowerCase(),
     operation: 'esp32.flash',
     status: 'pending',
     createdAt,
@@ -669,7 +670,7 @@ export function requestDeviceBridgeIntake(
   });
   state.deviceBridgeRequests.set(request.id, request);
   state.audit.events.push(auditEvent);
-  return { ok: true, request };
+  return { ok: true, request: publicDeviceBridgeRequest(request) };
 }
 
 export function registerDeviceArtifactMetadata(
@@ -1218,6 +1219,22 @@ function publicDeviceArtifactMetadata(artifact: DeviceArtifactMetadata): DeviceA
   };
 }
 
+function publicDeviceBridgeRequest(request: DeviceBridgeRequestRecord): DeviceBridgeRequestPublic {
+  return {
+    id: request.id,
+    userId: request.userId,
+    sessionId: request.sessionId,
+    projectId: request.projectId,
+    artifactId: request.artifactId,
+    artifactSha256: request.artifactSha256,
+    inventoryBindingId: request.inventoryBindingId,
+    operation: request.operation,
+    status: request.status,
+    createdAt: request.createdAt,
+    expiresAt: request.expiresAt,
+  };
+}
+
 function denyDeviceInventoryBinding(
   state: RoadexState,
   user: UserProfile,
@@ -1527,14 +1544,14 @@ function parseDeviceBridgeRequestPayload(payload: unknown): {
   }
   const record = payload as Record<string, unknown>;
   const keys = Object.keys(record).sort();
-  const expectedKeys = ['artifactId', 'artifactSha256', 'expectedDeviceId', 'operation', 'workspaceId'];
+  const expectedKeys = ['artifactId', 'artifactSha256', 'inventoryBindingId', 'operation', 'workspaceId'];
   if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
     return { ok: false, reason: 'Device bridge request schema is invalid.' };
   }
   if (
     !boundedToken(record.workspaceId, 128) ||
     !boundedToken(record.artifactId, 128) ||
-    !validDeviceIdentity(record.expectedDeviceId) ||
+    !boundedToken(record.inventoryBindingId, 128) ||
     record.operation !== 'esp32.flash' ||
     typeof record.artifactSha256 !== 'string' ||
     !/^[a-f0-9]{64}$/i.test(record.artifactSha256)
@@ -1547,7 +1564,7 @@ function parseDeviceBridgeRequestPayload(payload: unknown): {
       workspaceId: record.workspaceId.trim(),
       artifactId: record.artifactId.trim(),
       artifactSha256: record.artifactSha256.toLowerCase(),
-      expectedDeviceId: record.expectedDeviceId.trim(),
+      inventoryBindingId: record.inventoryBindingId.trim(),
       operation: 'esp32.flash',
     },
   };
@@ -1557,8 +1574,18 @@ function boundedToken(value: unknown, maxLength: number): value is string {
   return typeof value === 'string' && value.trim().length > 0 && value.trim().length <= maxLength;
 }
 
-function validDeviceIdentity(value: unknown): value is string {
-  return typeof value === 'string' && /^[a-zA-Z0-9:_-]{1,128}$/.test(value);
+function validActiveInventoryBindingForRequest(
+  binding: DeviceInventoryBindingRecord | undefined,
+  projectId: string,
+): binding is DeviceInventoryBindingRecord {
+  return Boolean(
+    binding &&
+    binding.projectId === projectId &&
+    binding.allowedOperation === 'esp32.flash' &&
+    binding.lifecycle === 'active' &&
+    !binding.revokedAt &&
+    /^[a-f0-9]{64}$/i.test(binding.deviceIdentityTag),
+  );
 }
 
 function saveState(state: RoadexState): void {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createDeviceBridgeService, type DeviceBridgeStore } from '../src/server/deviceBridgeService';
 import { mockUser } from '../src/server/authService';
-import type { DeviceArtifactMetadata } from '../src/shared/deviceBridgeContracts';
+import type { DeviceArtifactMetadata, DeviceInventoryBindingRecord } from '../src/shared/deviceBridgeContracts';
 import type { RoadexSession } from '../src/shared/sessionContracts';
 
 describe('disabled device bridge state machine', () => {
@@ -9,7 +9,7 @@ describe('disabled device bridge state machine', () => {
     const store = createStore();
     const service = createDeviceBridgeService(store);
 
-    expect(service.requestApproval(mockUser, session(), 'artifact', 'esp32:device')).toEqual({
+    expect(service.requestApproval(mockUser, session(), 'artifact', 'binding')).toEqual({
       ok: false,
       reason: 'Device bridge operations are disabled.',
     });
@@ -24,10 +24,10 @@ describe('disabled device bridge state machine', () => {
       const store = createStore();
       const service = createDeviceBridgeService(store, {
         resolveSession: () => session(),
-        resolveInventoryDevice: (_projectId, deviceId) => ({ id: deviceId }),
+        resolveInventoryBinding: (_projectId, bindingId) => createBinding(bindingId),
       });
 
-      expect(service.requestApproval(mockUser, session(), 'artifact', 'esp32:device')).toEqual({
+      expect(service.requestApproval(mockUser, session(), 'artifact', 'binding')).toEqual({
         ok: false,
         reason: 'Device bridge operations are disabled.',
       });
@@ -49,7 +49,7 @@ describe('disabled device bridge state machine', () => {
       createId: () => `id-${++id}`,
       createSecret: () => `secret-${++secret}`,
     });
-    const approval = service.requestApproval(mockUser, session(), 'artifact', 'esp32:device');
+    const approval = service.requestApproval(mockUser, session(), 'artifact', 'binding');
     expect(approval.ok).toBe(true);
     if (!approval.ok) return;
     const started = service.startProbe(mockUser, approval.value.id);
@@ -61,7 +61,7 @@ describe('disabled device bridge state machine', () => {
       mockUser,
       started.value.operation.id,
       started.value.credential,
-      'esp32:device',
+      'c'.repeat(64),
       'a'.repeat(64),
     );
     expect(probe.ok).toBe(true);
@@ -87,7 +87,7 @@ describe('disabled device bridge state machine', () => {
     )).toMatchObject({ ok: false });
     expect(started.value.operation).toMatchObject({
       phase: 'destructive',
-      actualDeviceId: 'esp32:device',
+      actualDeviceIdentityTag: 'c'.repeat(64),
       confirmationChallengeDigest: undefined,
     });
     const persistedRecords = JSON.stringify([...store.operations.values()]);
@@ -105,7 +105,7 @@ describe('disabled device bridge state machine', () => {
       createId: () => crypto.randomUUID(),
       createSecret: () => crypto.randomUUID(),
     });
-    const approval = service.requestApproval(mockUser, session(), 'artifact', 'esp32:device');
+    const approval = service.requestApproval(mockUser, session(), 'artifact', 'binding');
     if (!approval.ok) return;
     const started = service.startProbe(mockUser, approval.value.id);
     if (!started.ok) return;
@@ -115,14 +115,14 @@ describe('disabled device bridge state machine', () => {
       otherUser,
       started.value.operation.id,
       started.value.credential,
-      'esp32:device',
+      'c'.repeat(64),
       'a'.repeat(64),
     )).toMatchObject({ ok: false });
     expect(service.submitProbe(
       mockUser,
       started.value.operation.id,
       started.value.credential,
-      'esp32:wrong',
+      'd'.repeat(64),
       'a'.repeat(64),
     )).toMatchObject({ ok: false });
     expect(started.value.operation.phase).toBe('failed');
@@ -137,13 +137,13 @@ describe('disabled device bridge state machine', () => {
       createId: () => crypto.randomUUID(),
       createSecret: () => crypto.randomUUID(),
     });
-    const expiredApproval = service.requestApproval(mockUser, session(), 'artifact', 'esp32:device');
+    const expiredApproval = service.requestApproval(mockUser, session(), 'artifact', 'binding');
     if (!expiredApproval.ok) return;
     now += 5 * 60_000;
     expect(service.startProbe(mockUser, expiredApproval.value.id)).toMatchObject({ ok: false });
 
     now = Date.UTC(2026, 6, 18);
-    const approval = service.requestApproval(mockUser, session(), 'artifact', 'esp32:device');
+    const approval = service.requestApproval(mockUser, session(), 'artifact', 'binding');
     if (!approval.ok) return;
     const started = service.startProbe(mockUser, approval.value.id);
     if (!started.ok) return;
@@ -155,27 +155,32 @@ describe('disabled device bridge state machine', () => {
     const store = createStore();
     let now = Date.UTC(2026, 6, 18);
     let currentSession = session();
-    let inventoryAvailable = true;
+    let binding = createBinding();
     const service = createDeviceBridgeService(store, {
       enabledForTestsOnly: true,
       now: () => now,
       createId: () => crypto.randomUUID(),
       createSecret: () => crypto.randomUUID(),
       resolveSession: () => currentSession,
-      resolveInventoryDevice: (_projectId, deviceId) => inventoryAvailable ? { id: deviceId } : undefined,
+      resolveInventoryBinding: (_projectId, bindingId) => bindingId === binding.id ? binding : undefined,
     });
-    const approval = service.requestApproval(mockUser, currentSession, 'artifact', 'esp32:device');
+    const approval = service.requestApproval(mockUser, currentSession, 'artifact', 'binding');
     if (!approval.ok) return;
     currentSession = { ...currentSession, lifecycle: 'closed' };
     expect(service.startProbe(mockUser, approval.value.id)).toMatchObject({ ok: false });
 
     currentSession = session();
-    const replacedApproval = service.requestApproval(mockUser, currentSession, 'artifact', 'esp32:device');
+    const replacedApproval = service.requestApproval(mockUser, currentSession, 'artifact', 'binding');
     if (!replacedApproval.ok) return;
     store.artifacts.set('artifact', { ...createArtifact(), sha256: 'b'.repeat(64) });
     expect(service.startProbe(mockUser, replacedApproval.value.id)).toMatchObject({ ok: false });
     store.artifacts.set('artifact', createArtifact());
-    const nextApproval = service.requestApproval(mockUser, currentSession, 'artifact', 'esp32:device');
+    const mutatedBindingApproval = service.requestApproval(mockUser, currentSession, 'artifact', 'binding');
+    if (!mutatedBindingApproval.ok) return;
+    binding = { ...binding, deviceIdentityTag: 'd'.repeat(64) };
+    expect(service.startProbe(mockUser, mutatedBindingApproval.value.id)).toMatchObject({ ok: false });
+    binding = createBinding();
+    const nextApproval = service.requestApproval(mockUser, currentSession, 'artifact', 'binding');
     if (!nextApproval.ok) return;
     const started = service.startProbe(mockUser, nextApproval.value.id);
     if (!started.ok) return;
@@ -183,11 +188,11 @@ describe('disabled device bridge state machine', () => {
       mockUser,
       started.value.operation.id,
       started.value.credential,
-      'esp32:device',
+      'c'.repeat(64),
       'a'.repeat(64),
     );
     if (!probe.ok) return;
-    inventoryAvailable = false;
+    binding = { ...binding, lifecycle: 'revoked', revokedAt: new Date(now).toISOString() };
     expect(service.authorizeWrite(
       mockUser,
       started.value.operation.id,
@@ -195,7 +200,7 @@ describe('disabled device bridge state machine', () => {
       probe.value.challenge,
     )).toMatchObject({ ok: false });
 
-    inventoryAvailable = true;
+    binding = createBinding();
     store.artifacts.set('artifact', { ...createArtifact(), sha256: 'b'.repeat(64) });
     expect(service.authorizeWrite(
       mockUser,
@@ -216,10 +221,26 @@ describe('disabled device bridge state machine', () => {
 
 function createStore(): DeviceBridgeStore {
   const artifact = createArtifact();
+  const binding = createBinding();
   return {
     artifacts: new Map([[artifact.id, artifact]]),
     approvals: new Map(),
     operations: new Map(),
+    inventoryBindings: new Map([[binding.id, binding]]),
+  };
+}
+
+function createBinding(id = 'binding'): DeviceInventoryBindingRecord {
+  return {
+    id,
+    projectId: 'roadex',
+    deviceIdentityTag: 'c'.repeat(64),
+    allowedOperation: 'esp32.flash',
+    secureBootExpected: 'required',
+    flashEncryptionExpected: 'required',
+    lifecycle: 'active',
+    createdBy: mockUser.id,
+    createdAt: new Date().toISOString(),
   };
 }
 
@@ -262,7 +283,7 @@ function enabledOptions() {
   return {
     enabledForTestsOnly: true,
     resolveSession: () => session(),
-    resolveInventoryDevice: (_projectId: string, deviceId: string) =>
-      deviceId === 'esp32:device' ? { id: deviceId } : undefined,
+    resolveInventoryBinding: (_projectId: string, bindingId: string) =>
+      bindingId === 'binding' ? createBinding(bindingId) : undefined,
   };
 }

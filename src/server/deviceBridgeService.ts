@@ -3,6 +3,7 @@ import type {
   DeviceArtifactMetadata,
   DeviceBridgeApprovalRecord,
   DeviceBridgeOperationRecord,
+  DeviceInventoryBindingRecord,
 } from '../shared/deviceBridgeContracts.js';
 import type { RoadexSession, UserProfile } from '../shared/sessionContracts.js';
 
@@ -10,6 +11,7 @@ export type DeviceBridgeStore = {
   artifacts: Map<string, DeviceArtifactMetadata>;
   approvals: Map<string, DeviceBridgeApprovalRecord>;
   operations: Map<string, DeviceBridgeOperationRecord>;
+  inventoryBindings: Map<string, DeviceInventoryBindingRecord>;
 };
 
 type ServiceOptions = {
@@ -18,7 +20,7 @@ type ServiceOptions = {
   createId?: () => string;
   createSecret?: () => string;
   resolveSession?: (user: UserProfile, sessionId: string) => RoadexSession | undefined;
-  resolveInventoryDevice?: (projectId: string, deviceId: string) => { id: string } | undefined;
+  resolveInventoryBinding?: (projectId: string, inventoryBindingId: string) => DeviceInventoryBindingRecord | undefined;
 };
 
 type Denied = { ok: false; reason: string };
@@ -32,7 +34,7 @@ export function createDeviceBridgeService(store: DeviceBridgeStore, options: Ser
   function disabled(): Denied | undefined {
     return (options.enabledForTestsOnly === true &&
       options.resolveSession &&
-      options.resolveInventoryDevice)
+      options.resolveInventoryBinding)
       ? undefined
       : { ok: false, reason: 'Device bridge operations are disabled.' };
   }
@@ -44,8 +46,23 @@ export function createDeviceBridgeService(store: DeviceBridgeStore, options: Ser
       : undefined;
   }
 
-  function inventoryDevice(projectId: string, deviceId: string): { id: string } | undefined {
-    return options.resolveInventoryDevice?.(projectId, deviceId);
+  function activeBinding(
+    projectId: string,
+    inventoryBindingId: string,
+    deviceIdentityTag: string,
+  ): DeviceInventoryBindingRecord | undefined {
+    const binding = options.resolveInventoryBinding?.(projectId, inventoryBindingId);
+    const normalizedTag = deviceIdentityTag.toLowerCase();
+    return binding &&
+      binding.id === inventoryBindingId &&
+      binding.projectId === projectId &&
+      binding.allowedOperation === 'esp32.flash' &&
+      binding.lifecycle === 'active' &&
+      !binding.revokedAt &&
+      /^[a-f0-9]{64}$/i.test(binding.deviceIdentityTag) &&
+      binding.deviceIdentityTag.toLowerCase() === normalizedTag
+      ? binding
+      : undefined;
   }
 
   return {
@@ -53,19 +70,19 @@ export function createDeviceBridgeService(store: DeviceBridgeStore, options: Ser
       user: UserProfile,
       session: RoadexSession,
       artifactId: string,
-      expectedDeviceId: string,
+      inventoryBindingId: string,
     ): Allowed<DeviceBridgeApprovalRecord> | Denied {
       const gate = disabled();
       if (gate) return gate;
       const artifact = store.artifacts.get(artifactId);
-      const expectedDevice = inventoryDevice(session.workspace.id, expectedDeviceId);
+      const binding = options.resolveInventoryBinding?.(session.workspace.id, inventoryBindingId);
       if (
         !artifact ||
         !currentSession(user, session.id, session.workspace.id) ||
         artifact.sessionId !== session.id ||
         artifact.projectId !== session.workspace.id ||
-        !validIdentity(expectedDeviceId) ||
-        expectedDevice?.id !== expectedDeviceId
+        !binding ||
+        !activeBinding(session.workspace.id, inventoryBindingId, binding.deviceIdentityTag)
       ) return { ok: false, reason: 'Device bridge approval is unavailable.' };
       const createdAt = new Date(now()).toISOString();
       const record: DeviceBridgeApprovalRecord = {
@@ -75,7 +92,8 @@ export function createDeviceBridgeService(store: DeviceBridgeStore, options: Ser
         projectId: session.workspace.id,
         artifactId,
         artifactSha256: artifact.sha256.toLowerCase(),
-        expectedDeviceId,
+        inventoryBindingId,
+        deviceIdentityTag: binding.deviceIdentityTag.toLowerCase(),
         operation: 'esp32.flash',
         status: 'pending',
         createdAt,
@@ -100,7 +118,7 @@ export function createDeviceBridgeService(store: DeviceBridgeStore, options: Ser
         artifact.sessionId !== approval.sessionId ||
         artifact.projectId !== approval.projectId ||
         artifact.sha256.toLowerCase() !== approval.artifactSha256 ||
-        inventoryDevice(approval.projectId, approval.expectedDeviceId)?.id !== approval.expectedDeviceId
+        !activeBinding(approval.projectId, approval.inventoryBindingId, approval.deviceIdentityTag)
       ) {
         return { ok: false, reason: 'Device bridge approval is unavailable.' };
       }
@@ -115,7 +133,8 @@ export function createDeviceBridgeService(store: DeviceBridgeStore, options: Ser
         projectId: approval.projectId,
         artifactId: approval.artifactId,
         artifactSha256: approval.artifactSha256,
-        expectedDeviceId: approval.expectedDeviceId,
+        inventoryBindingId: approval.inventoryBindingId,
+        deviceIdentityTag: approval.deviceIdentityTag,
         operation: 'esp32.flash',
         phase: 'probe',
         credentialDigest: digest(credential),
@@ -133,7 +152,7 @@ export function createDeviceBridgeService(store: DeviceBridgeStore, options: Ser
       user: UserProfile,
       operationId: string,
       credential: string,
-      actualDeviceId: string,
+      actualDeviceIdentityTag: string,
       artifactSha256: string,
     ): Allowed<{ challenge: string }> | Denied {
       const gate = disabled();
@@ -147,8 +166,8 @@ export function createDeviceBridgeService(store: DeviceBridgeStore, options: Ser
         artifact.sessionId !== operation.sessionId ||
         artifact.projectId !== operation.projectId ||
         artifact.sha256.toLowerCase() !== operation.artifactSha256 ||
-        inventoryDevice(operation.projectId, operation.expectedDeviceId)?.id !== operation.expectedDeviceId ||
-        actualDeviceId !== operation.expectedDeviceId ||
+        !activeBinding(operation.projectId, operation.inventoryBindingId, operation.deviceIdentityTag) ||
+        actualDeviceIdentityTag.toLowerCase() !== operation.deviceIdentityTag ||
         artifactSha256.toLowerCase() !== artifact.sha256.toLowerCase() ||
         artifactSha256.toLowerCase() !== operation.artifactSha256
       ) {
@@ -157,7 +176,7 @@ export function createDeviceBridgeService(store: DeviceBridgeStore, options: Ser
       }
       const challenge = createSecret();
       operation.phase = 'confirmation';
-      operation.actualDeviceId = actualDeviceId;
+      operation.actualDeviceIdentityTag = actualDeviceIdentityTag.toLowerCase();
       operation.verifiedArtifactSha256 = artifactSha256.toLowerCase();
       operation.confirmationChallengeDigest = digest(challenge);
       operation.phaseExpiresAt = new Date(now() + 60_000).toISOString();
@@ -183,8 +202,8 @@ export function createDeviceBridgeService(store: DeviceBridgeStore, options: Ser
         artifact.projectId !== operation.projectId ||
         artifact.sha256.toLowerCase() !== operation.artifactSha256 ||
         operation.verifiedArtifactSha256 !== operation.artifactSha256 ||
-        operation.actualDeviceId !== operation.expectedDeviceId ||
-        inventoryDevice(operation.projectId, operation.expectedDeviceId)?.id !== operation.expectedDeviceId ||
+        operation.actualDeviceIdentityTag !== operation.deviceIdentityTag ||
+        !activeBinding(operation.projectId, operation.inventoryBindingId, operation.deviceIdentityTag) ||
         !matchesDigest(challenge, operation.confirmationChallengeDigest)
       ) {
         return { ok: false, reason: 'Device write confirmation is unavailable.' };
@@ -255,10 +274,6 @@ function matchesDigest(value: string, expected?: string): boolean {
 
 function expired(value: string, now: number): boolean {
   return Date.parse(value) <= now;
-}
-
-function validIdentity(value: string): boolean {
-  return /^[a-zA-Z0-9:_-]{1,128}$/.test(value);
 }
 
 function terminal(phase: DeviceBridgeOperationRecord['phase']): boolean {

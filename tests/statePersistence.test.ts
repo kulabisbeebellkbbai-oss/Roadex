@@ -7,6 +7,7 @@ import type { RoadexSession, StreamEvent } from '../src/shared/sessionContracts'
 import type {
   DeviceArtifactMetadata,
   DeviceBridgeOperationRecord,
+  DeviceBridgeRequestRecord,
   DeviceInventoryBindingRecord,
 } from '../src/shared/deviceBridgeContracts';
 
@@ -194,6 +195,32 @@ describe('state persistence', () => {
         createdBy: 'admin',
         createdAt: now,
       } as DeviceInventoryBindingRecord],
+      deviceBridgeRequests: [{
+        id: 'request',
+        userId: 'user',
+        sessionId: 'session',
+        projectId: 'roadex',
+        artifactId: 'artifact',
+        artifactSha256: 'a'.repeat(64),
+        inventoryBindingId: 'binding',
+        deviceIdentityTag: 'c'.repeat(64),
+        operation: 'esp32.flash',
+        status: 'pending',
+        createdAt: now,
+        expiresAt: now,
+      }, {
+        id: 'legacy-request',
+        userId: 'user',
+        sessionId: 'session',
+        projectId: 'roadex',
+        artifactId: 'artifact',
+        artifactSha256: 'a'.repeat(64),
+        expectedDeviceId: 'raw-device-id',
+        operation: 'esp32.flash',
+        status: 'pending',
+        createdAt: now,
+        expiresAt: now,
+      } as unknown as DeviceBridgeRequestRecord],
       deviceBridgeApprovals: [{
         id: 'approval',
         userId: 'user',
@@ -201,7 +228,8 @@ describe('state persistence', () => {
         projectId: 'roadex',
         artifactId: 'artifact',
         artifactSha256: 'a'.repeat(64),
-        expectedDeviceId: 'inventory-device',
+        inventoryBindingId: 'binding',
+        deviceIdentityTag: 'c'.repeat(64),
         operation: 'esp32.flash',
         status: 'pending',
         createdAt: now,
@@ -215,7 +243,8 @@ describe('state persistence', () => {
         projectId: 'roadex',
         artifactId: 'artifact',
         artifactSha256: 'a'.repeat(64),
-        expectedDeviceId: 'inventory-device',
+        inventoryBindingId: 'binding',
+        deviceIdentityTag: 'c'.repeat(64),
         operation: 'esp32.flash',
         phase: 'probe',
         credentialDigest: 'b'.repeat(64),
@@ -231,6 +260,7 @@ describe('state persistence', () => {
 
     expect(state.deviceArtifacts.map((record) => record.id)).toEqual(['artifact']);
     expect(state.deviceInventoryBindings.map((record) => record.id)).toEqual(['binding']);
+    expect(state.deviceBridgeRequests.map((record) => record.id)).toEqual(['request']);
     expect(state.deviceBridgeApprovals.map((record) => record.id)).toEqual(['approval']);
     expect(state.deviceBridgeOperations.map((record) => record.id)).toEqual(['operation']);
     expect(JSON.stringify(state)).not.toContain('must-be-stripped');
@@ -280,10 +310,11 @@ describe('state persistence', () => {
       userId: 'user',
       sessionId: 'session',
       projectId: 'roadex',
-      artifactId,
-      artifactSha256: 'a'.repeat(64),
-      expectedDeviceId: 'inventory-device',
-      operation: 'esp32.flash',
+        artifactId,
+        artifactSha256: 'a'.repeat(64),
+        inventoryBindingId: 'binding',
+        deviceIdentityTag: 'c'.repeat(64),
+        operation: 'esp32.flash',
       phase: 'probe',
       credentialDigest: 'b'.repeat(64),
       nextEventSequence: 0,

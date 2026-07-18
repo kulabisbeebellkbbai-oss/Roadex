@@ -288,7 +288,8 @@ function sanitizeRequest(record: DeviceBridgeRequestRecord): DeviceBridgeRequest
     validBoundedString(record.projectId, 128) &&
     validBoundedString(record.artifactId, 128) &&
     /^[a-f0-9]{64}$/i.test(record.artifactSha256) &&
-    validBoundedString(record.expectedDeviceId, 128) &&
+    validBoundedString(record.inventoryBindingId, 128) &&
+    /^[a-f0-9]{64}$/i.test(record.deviceIdentityTag) &&
     record.operation === 'esp32.flash' &&
     ['pending', 'revoked', 'expired'].includes(record.status) &&
     validIsoDate(record.createdAt) &&
@@ -301,7 +302,8 @@ function sanitizeRequest(record: DeviceBridgeRequestRecord): DeviceBridgeRequest
     projectId: record.projectId.trim(),
     artifactId: record.artifactId.trim(),
     artifactSha256: record.artifactSha256.toLowerCase(),
-    expectedDeviceId: record.expectedDeviceId.trim(),
+    inventoryBindingId: record.inventoryBindingId.trim(),
+    deviceIdentityTag: record.deviceIdentityTag.toLowerCase(),
     operation: 'esp32.flash',
     status: record.status,
     createdAt: new Date(record.createdAt).toISOString(),
@@ -317,7 +319,8 @@ function sanitizeApproval(record: DeviceBridgeApprovalRecord): DeviceBridgeAppro
     validBoundedString(record.projectId, 128) &&
     validBoundedString(record.artifactId, 128) &&
     /^[a-f0-9]{64}$/i.test(record.artifactSha256) &&
-    validBoundedString(record.expectedDeviceId, 128) &&
+    validBoundedString(record.inventoryBindingId, 128) &&
+    /^[a-f0-9]{64}$/i.test(record.deviceIdentityTag) &&
     record.operation === 'esp32.flash' &&
     ['pending', 'consumed', 'revoked', 'expired'].includes(record.status) &&
     validIsoDate(record.createdAt) &&
@@ -330,7 +333,8 @@ function sanitizeApproval(record: DeviceBridgeApprovalRecord): DeviceBridgeAppro
     projectId: record.projectId.trim(),
     artifactId: record.artifactId.trim(),
     artifactSha256: record.artifactSha256.toLowerCase(),
-    expectedDeviceId: record.expectedDeviceId.trim(),
+    inventoryBindingId: record.inventoryBindingId.trim(),
+    deviceIdentityTag: record.deviceIdentityTag.toLowerCase(),
     operation: 'esp32.flash',
     status: record.status,
     createdAt: new Date(record.createdAt).toISOString(),
@@ -347,11 +351,12 @@ function sanitizeOperation(record: DeviceBridgeOperationRecord): DeviceBridgeOpe
     validBoundedString(record.projectId, 128) &&
     validBoundedString(record.artifactId, 128) &&
     /^[a-f0-9]{64}$/i.test(record.artifactSha256) &&
-    validBoundedString(record.expectedDeviceId, 128) &&
+    validBoundedString(record.inventoryBindingId, 128) &&
+    /^[a-f0-9]{64}$/i.test(record.deviceIdentityTag) &&
     record.operation === 'esp32.flash' &&
     ['probe', 'confirmation', 'destructive', 'reporting', 'completed', 'failed', 'cancelled'].includes(record.phase) &&
     /^[a-f0-9]{64}$/i.test(record.credentialDigest) &&
-    (!record.actualDeviceId || validBoundedString(record.actualDeviceId, 128)) &&
+    (!record.actualDeviceIdentityTag || /^[a-f0-9]{64}$/i.test(record.actualDeviceIdentityTag)) &&
     (!record.verifiedArtifactSha256 || /^[a-f0-9]{64}$/i.test(record.verifiedArtifactSha256)) &&
     (!record.confirmationChallengeDigest || /^[a-f0-9]{64}$/i.test(record.confirmationChallengeDigest)) &&
     (!record.destructiveNonceDigest || /^[a-f0-9]{64}$/i.test(record.destructiveNonceDigest)) &&
@@ -370,11 +375,12 @@ function sanitizeOperation(record: DeviceBridgeOperationRecord): DeviceBridgeOpe
     projectId: record.projectId.trim(),
     artifactId: record.artifactId.trim(),
     artifactSha256: record.artifactSha256.toLowerCase(),
-    expectedDeviceId: record.expectedDeviceId.trim(),
+    inventoryBindingId: record.inventoryBindingId.trim(),
+    deviceIdentityTag: record.deviceIdentityTag.toLowerCase(),
     operation: 'esp32.flash',
     phase: record.phase,
     credentialDigest: record.credentialDigest.toLowerCase(),
-    ...(record.actualDeviceId ? { actualDeviceId: record.actualDeviceId.trim() } : {}),
+    ...(record.actualDeviceIdentityTag ? { actualDeviceIdentityTag: record.actualDeviceIdentityTag.toLowerCase() } : {}),
     ...(record.verifiedArtifactSha256
       ? { verifiedArtifactSha256: record.verifiedArtifactSha256.toLowerCase() }
       : {}),
