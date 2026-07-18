@@ -247,7 +247,7 @@ export function createSessionFromApi(
     }
   }
 
-  if (activeSessionCountForUser(state, user.id) >= state.maxActiveSessionsPerUser) {
+  if (!managedThread && activeSessionCountForUser(state, user.id) >= state.maxActiveSessionsPerUser) {
     appendAudit(
       state.audit,
       user,

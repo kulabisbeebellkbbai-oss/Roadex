@@ -1287,6 +1287,7 @@ describe('Roadex session service', () => {
       expect(managed).toBeDefined();
       if (!managed) return;
 
+      state.maxActiveSessionsPerUser = 0;
       const attached = await createSessionFromApi(state, mockUser, {
         workspaceId: managed.project.id,
         managedThreadId,
