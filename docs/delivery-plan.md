@@ -2,7 +2,7 @@
 
 ## Current Milestone
 
-Roadex is in the secure mock-session milestone. The app may provide browser login, session attach, prompt submission, audit visibility, and SSE-style output using a mock runner only.
+Roadex has completed the browser portal and real server-side Codex session milestone. The current planning milestone is a disabled-by-default client device bridge with explicit consent, session-scoped grants, device identity verification, and independent security review.
 
 ## Approved A-Team Assignments
 
@@ -12,28 +12,29 @@ Roadex is in the secure mock-session milestone. The app may provide browser logi
 - Stockwell owns threat modeling, trust boundaries, and security review gates.
 - Murdock owns automated tests, smoke evidence, and release-readiness reporting.
 
-## Completed In This Slice
+## Completed Core Portal
 
 - Explicit mock authentication endpoint.
 - Authenticated bootstrap, session creation, prompt submission, and SSE stream routes.
 - Server-owned workspace registry by workspace id.
 - Append-only in-memory audit events for session and denial decisions.
-- Mock runner that never invokes Codex, shell, filesystem mutation, or device access.
+- Real Codex CLI runner for server-approved workspaces.
 - Frontend API adapter and hook for loading, connected, streaming, and error states.
 - Responsive session UI with transcript, prompt composer, security gates, workspaces, and audit events.
 
-## Remaining Before Real Codex Runner
+## Completed Session Controls
 
-- Persist sessions and audit events outside process memory.
-- Add real authentication provider integration.
-- Add per-user workspace registry and filesystem isolation checks.
-- Add pause, resume, close, and reconnect lifecycle APIs.
-- Add integration tests around the HTTP server and SSE authorization.
-- Complete Stockwell review before any Codex CLI or process spawning is reachable.
+- Persisted sessions, transcripts, audit events, and managed-thread claims.
+- Protected-gateway identity with mock authentication disabled in production.
+- Server-owned workspace policy and managed `codex-projects` registry integration.
+- Prompt cancellation, archive, reopen, reconnect, live SSE, and active-run thread switching.
+- Responsive project and thread navigation for desktop, tablet, and mobile.
+- Security and regression review for session ownership, streaming, retention, Origin checks, and rate limits.
 
-## Disabled Until Later Review
+## Device Bridge Approval Gates
 
-- Real Codex process spawning.
-- Shell execution through Roadex APIs.
-- Browser-supplied workspace roots.
-- Client device access, USB, serial, firmware flashing, WebUSB, WebSerial, or Android forwarding.
+- Approve the architecture in `docs/device-bridge-design.md` before implementation.
+- Complete a revised Security Architect review after artifact delivery, atomic start, identity assurance, operation leases, Android compatibility, and audit privacy are specified.
+- Implement capability detection, typed contracts, server-side grants, and denial tests with the feature disabled.
+- Review gateway and IDS routes before any external endpoint is exposed.
+- Approve browser USB access and a controlled hardware test separately.
