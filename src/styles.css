@@ -402,6 +402,8 @@ button {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #ffffff;
+  width: min(85%, 760px);
+  justify-self: start;
 }
 
 .message p {
@@ -415,6 +417,8 @@ button {
 }
 
 .message.user {
+  grid-template-columns: minmax(0, 1fr) 24px;
+  justify-self: end;
   border-color: #c7d9ee;
   background: #f5f9ff;
 }

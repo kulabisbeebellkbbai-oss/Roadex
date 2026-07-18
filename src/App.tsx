@@ -18,14 +18,17 @@ import {
   RotateCcw,
   ShieldCheck,
   TerminalSquare,
+  UserRound,
 } from 'lucide-react';
 import { useRoadexSession } from './hooks/useRoadexSession';
 import { navItems } from './roadexModel';
+import { isVisibleTranscriptEvent } from './transcript';
 
 function App() {
   const roadex = useRoadexSession();
   const [prompt, setPrompt] = useState('');
   const session = roadex.session;
+  const visibleTranscript = roadex.transcript.filter(isVisibleTranscriptEvent);
   const composerDisabled =
     roadex.connectionState === 'loading' ||
     roadex.connectionState === 'streaming' ||
@@ -143,14 +146,21 @@ function App() {
                 </>
               ) : null}
 
-              {roadex.transcript.map((event) => (
+              {visibleTranscript.map((event) => (
                 <div className={`message ${event.kind}`} key={event.id}>
-                  {event.kind === 'assistant' ? <Bot size={18} /> : <TerminalSquare size={18} />}
-                  <p>{event.message}</p>
+                  {event.kind === 'user' ? <p>{event.message}</p> : null}
+                  {event.kind === 'assistant' ? (
+                    <Bot size={18} />
+                  ) : event.kind === 'user' ? (
+                    <UserRound size={18} />
+                  ) : (
+                    <TerminalSquare size={18} />
+                  )}
+                  {event.kind !== 'user' ? <p>{event.message}</p> : null}
                 </div>
               ))}
 
-              {roadex.transcript.length === 0 && roadex.connectionState === 'connected' ? (
+              {visibleTranscript.length === 0 && roadex.connectionState === 'connected' ? (
                 <div className="message system">
                   <TerminalSquare size={18} />
                   <p>Codex session is ready. Send a prompt to run on the server workspace.</p>

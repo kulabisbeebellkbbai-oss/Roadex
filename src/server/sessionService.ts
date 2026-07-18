@@ -176,6 +176,7 @@ export function submitPrompt(
     'allowed',
     'Accepted prompt for Codex runner.',
   );
+  addAndPublishStreamEvents(state, [createStreamEvent(session.id, 'user', cleanPrompt)]);
   const controller = new AbortController();
   state.activeRuns.set(session.id, controller);
   void state.runner

@@ -50,7 +50,7 @@ export type AuditEvent = {
 export type StreamEvent = {
   id: string;
   sessionId: string;
-  kind: 'system' | 'assistant' | 'audit';
+  kind: 'system' | 'user' | 'assistant' | 'audit';
   message: string;
   at: string;
 };

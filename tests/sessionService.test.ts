@@ -219,6 +219,7 @@ describe('Roadex session service', () => {
     await flushRunner();
 
     const events = streamEventsForSession(state, mockUser, response.session.id);
+    expect(events).toContainEqual(expect.objectContaining({ kind: 'user', message: 'hello roadex' }));
     expect(events?.map((event) => event.kind)).toContain('assistant');
     expect(events?.some((event) => event.message.includes('hello roadex'))).toBe(true);
 
