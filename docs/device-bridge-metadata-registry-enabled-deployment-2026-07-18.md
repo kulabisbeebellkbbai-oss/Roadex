@@ -52,8 +52,24 @@ a synthetic non-production identity.
 
 ## External Verification Boundary
 
-An authenticated MSI-origin smoke is still required after enablement. It must
-confirm that both public metadata and inventory-binding routes remain rejected
-by the gateway, authentication remains healthy, the existing session and thread
-are preserved, and Roadex bridge state remains empty.
+Completed from the approved MSI VPN source during the UTC window
+`2026-07-18T18:16:44.1948948Z` through `2026-07-18T18:16:46.1018409Z`.
 
+- The portal and bootstrap returned HTTP 200 and the CSRF response header was
+  available to the authenticated helper without being printed.
+- Artifact metadata and inventory-binding POST requests both returned HTTP 404,
+  `Cache-Control: no-store`, `device_bridge_rejected`, and
+  `bridge_route_not_allowed`.
+- Follow-up authentication succeeded and preserved the session, workspace,
+  lifecycle, and thread.
+- Artifact, inventory-binding, bridge-request, approval, and operation counts
+  remained zero.
+- Gateway records contain both route rejections, matching successful IDS
+  forwarding records, and the allowed follow-up bootstrap.
+- Roadex received neither prohibited route and its persisted bridge state
+  remained empty.
+
+The Windows helper again reported Schannel missing-close-notify warnings after
+both complete rejection responses. Status, headers, and bodies were received,
+so the warnings did not invalidate the smoke. Graceful TLS shutdown remains a
+separate transport-hardening follow-up.
