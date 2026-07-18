@@ -171,7 +171,7 @@ describe('state persistence', () => {
         storageReference: 'bad-ref',
         status: 'active',
         createdAt: now,
-        expiresAt: now,
+        expiresAt: new Date(Date.parse(now) + 60_000).toISOString(),
       }],
       deviceInventoryBindings: [{
         id: 'binding',
@@ -207,7 +207,7 @@ describe('state persistence', () => {
         operation: 'esp32.flash',
         status: 'pending',
         createdAt: now,
-        expiresAt: now,
+        expiresAt: new Date(Date.parse(now) + 60_000).toISOString(),
       }, {
         id: 'legacy-request',
         userId: 'user',
@@ -223,6 +223,7 @@ describe('state persistence', () => {
       } as unknown as DeviceBridgeRequestRecord],
       deviceBridgeApprovals: [{
         id: 'approval',
+        requestId: 'request',
         userId: 'user',
         sessionId: 'session',
         projectId: 'roadex',
@@ -230,6 +231,7 @@ describe('state persistence', () => {
         artifactSha256: 'a'.repeat(64),
         inventoryBindingId: 'binding',
         deviceIdentityTag: 'c'.repeat(64),
+        credentialDigest: 'b'.repeat(64),
         operation: 'esp32.flash',
         status: 'pending',
         createdAt: now,

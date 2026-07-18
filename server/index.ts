@@ -4,6 +4,7 @@ import { extname, join, normalize } from 'node:path';
 import { authenticate, gatewayAuthRequired, mockAuthToken, mockUser } from '../src/server/authService.js';
 import {
   bootstrap,
+  approveDeviceBridgeRequest,
   cancelSessionRun,
   closeSession,
   createDeviceInventoryBinding,
@@ -23,6 +24,7 @@ import {
 } from '../src/server/sessionService.js';
 import {
   isAvailableDeviceBridgeIntakeRoute,
+  isAvailableDeviceBridgeApprovalRoute,
   isAvailableDeviceBridgeMetadataRoute,
 } from '../src/server/deviceBridgePolicy.js';
 import type { CreateSessionRequest } from '../src/shared/sessionContracts.js';
@@ -159,6 +161,23 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       body,
     );
     sendJson(res, result.ok ? 202 : 403, result.ok ? result : {
+      ok: false,
+      gate: result.gate,
+      reason: result.reason,
+    });
+    return;
+  }
+
+  const deviceBridgeApprovalMatch = url.pathname.match(/^\/api\/device-bridge\/requests\/([^/]+)\/approve$/);
+  if (deviceBridgeApprovalMatch && isAvailableDeviceBridgeApprovalRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const result = approveDeviceBridgeRequest(
+      state,
+      auth.user,
+      decodeURIComponent(deviceBridgeApprovalMatch[1]),
+    );
+    sendJson(res, result.ok ? 201 : 403, result.ok ? result : {
       ok: false,
       gate: result.gate,
       reason: result.reason,

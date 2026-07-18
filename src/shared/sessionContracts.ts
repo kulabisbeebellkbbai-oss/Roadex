@@ -45,6 +45,7 @@ export type AuditEvent = {
     | 'session.stream_open'
     | 'device_bridge.artifact'
     | 'device_bridge.inventory_binding'
+    | 'device_bridge.approval'
     | 'device_bridge.request'
     | 'security.denied';
   resource: string;

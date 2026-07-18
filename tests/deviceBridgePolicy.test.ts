@@ -3,13 +3,28 @@ import {
   deviceBridgeIdentityHmacKey,
   deviceBridgeMetadataRegistryEnabled,
   deviceBridgeOperationsEnabled,
+  deviceBridgeApprovalEnabled,
   deviceBridgeRequestIntakeEnabled,
   getDeviceBridgePolicy,
+  isAvailableDeviceBridgeApprovalRoute,
   isAvailableDeviceBridgeIntakeRoute,
   isAvailableDeviceBridgeMetadataRoute,
 } from '../src/server/deviceBridgePolicy';
 
 describe('device bridge intake policy', () => {
+  it('keeps approval strictly default-off', () => {
+    const original = process.env.ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED;
+    try {
+      delete process.env.ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED;
+      expect(deviceBridgeApprovalEnabled()).toBe(false);
+      process.env.ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED = 'true';
+      expect(deviceBridgeApprovalEnabled()).toBe(true);
+      process.env.ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED = '1';
+      expect(deviceBridgeApprovalEnabled()).toBe(false);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED', original);
+    }
+  });
   it('defaults request intake false and fails closed for malformed booleans', () => {
     const original = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
     try {
@@ -88,7 +103,7 @@ describe('device bridge intake policy', () => {
     }
   });
 
-  it('exposes only the pending request intake route as an available bridge route', () => {
+  it('exposes only the pending request intake route as an available intake bridge route', () => {
     expect(isAvailableDeviceBridgeIntakeRoute(
       'POST',
       '/api/sessions/session-1/device-bridge/requests',
@@ -104,6 +119,23 @@ describe('device bridge intake policy', () => {
       ['POST', '/api/device-bridge/operations/operation-1/cancel'],
     ] as const) {
       expect(isAvailableDeviceBridgeIntakeRoute(method, path)).toBe(false);
+    }
+  });
+
+  it('exposes only the owner approval route as an available approval bridge route', () => {
+    expect(isAvailableDeviceBridgeApprovalRoute(
+      'POST',
+      '/api/device-bridge/requests/request-1/approve',
+    )).toBe(true);
+
+    for (const [method, path] of [
+      ['GET', '/api/device-bridge/requests/request-1/approve'],
+      ['POST', '/api/device-bridge/requests/request-1'],
+      ['POST', '/api/device-bridge/approvals/approval-1/start'],
+      ['POST', '/api/device-bridge/operations/operation-1/probe'],
+      ['POST', '/api/sessions/session-1/device-bridge/requests'],
+    ] as const) {
+      expect(isAvailableDeviceBridgeApprovalRoute(method, path)).toBe(false);
     }
   });
 
@@ -124,7 +156,6 @@ describe('device bridge intake policy', () => {
       ['GET', '/api/sessions/session-1/device-bridge/artifacts/artifact-1/bytes'],
       ['POST', '/api/sessions/session-1/device-bridge/browser-chooser'],
       ['POST', '/api/sessions/session-1/device-bridge/usb'],
-      ['POST', '/api/device-bridge/requests/request-1/approve'],
       ['POST', '/api/device-bridge/approvals/approval-1/start'],
       ['GET', '/api/device-bridge/operations/operation-1/artifact'],
       ['POST', '/api/device-bridge/operations/operation-1/probe'],

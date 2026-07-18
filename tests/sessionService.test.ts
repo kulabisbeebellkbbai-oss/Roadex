@@ -7,6 +7,7 @@ import { mockUser } from '../src/server/authService';
 import { createStreamEvent } from '../src/server/mockRunner';
 import { createMemoryPersistence, type StatePersistence } from '../src/server/statePersistence';
 import {
+  approveDeviceBridgeRequest,
   bootstrap,
   closeSession,
   createDeviceInventoryBinding,
@@ -380,6 +381,208 @@ describe('Roadex session service', () => {
       expect(bridgeAudit?.summary).not.toContain(intake.request.id);
       expect(bridgeAudit?.summary).not.toContain(binding.id);
       expect(bridgeAudit?.summary).not.toContain(binding.deviceIdentityTag);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('approves one valid pending bridge request with a private digest-only approval record', async () => {
+    const originalApproval = process.env.ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED;
+    const originalIntake = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      const artifact = seedDeviceArtifact(state, response.session.id);
+      const binding = seedDeviceInventoryBinding(state);
+      const intake = requestDeviceBridgeIntake(state, user, response.session.id, validDeviceBridgeRequest());
+      expect(intake.ok).toBe(true);
+      if (!intake.ok) return;
+
+      const approval = approveDeviceBridgeRequest(state, user, intake.request.id);
+
+      expect(approval).toMatchObject({
+        ok: true,
+        approval: {
+          requestId: intake.request.id,
+          sessionId: response.session.id,
+          projectId: 'roadex',
+          artifactId: artifact.id,
+          artifactSha256: artifact.sha256,
+          inventoryBindingId: binding.id,
+          operation: 'esp32.flash',
+          status: 'pending',
+        },
+      });
+      expect(approval.ok && 'userId' in approval.approval).toBe(false);
+      expect(approval.ok && 'deviceIdentityTag' in approval.approval).toBe(false);
+      expect(approval.ok && 'credentialDigest' in approval.approval).toBe(false);
+      expect(state.deviceBridgeRequests.get(intake.request.id)?.status).toBe('approved');
+      expect(state.deviceBridgeApprovals.size).toBe(1);
+      const stored = [...state.deviceBridgeApprovals.values()][0];
+      expect(stored).toMatchObject({
+        requestId: intake.request.id,
+        userId: user.id,
+        deviceIdentityTag: binding.deviceIdentityTag,
+      });
+      expect(stored.credentialDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(stored.credentialDigest).not.toContain('bridge-approval');
+      expect(state.deviceBridgeOperations.size).toBe(0);
+      const audit = state.audit.events.at(-1);
+      expect(audit).toMatchObject({ action: 'device_bridge.approval', outcome: 'allowed' });
+      expect(audit?.summary).not.toContain(user.id);
+      expect(audit?.summary).not.toContain(intake.request.id);
+      expect(audit?.summary).not.toContain(binding.deviceIdentityTag);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED', originalApproval);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('rejects duplicate and alternate approval retries without minting another approval', async () => {
+    const originalApproval = process.env.ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED;
+    const originalIntake = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      seedDeviceArtifact(state, response.session.id);
+      seedDeviceInventoryBinding(state);
+      const intake = requestDeviceBridgeIntake(state, user, response.session.id, validDeviceBridgeRequest());
+      expect(intake.ok).toBe(true);
+      if (!intake.ok) return;
+      expect(approveDeviceBridgeRequest(state, user, intake.request.id).ok).toBe(true);
+
+      expect(approveDeviceBridgeRequest(state, user, intake.request.id)).toMatchObject({
+        ok: false,
+        gate: 'device-bridge',
+        reason: 'Device bridge approval denied.',
+        classification: 'request',
+      });
+      expect(approveDeviceBridgeRequest(state, { ...user, roles: ['user', 'admin'] }, intake.request.id)).toMatchObject({
+        ok: false,
+        gate: 'device-bridge',
+        classification: 'request',
+      });
+      expect(state.deviceBridgeApprovals.size).toBe(1);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED', originalApproval);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('revalidates owner, session, artifact, binding, operation, tag, and expiry before approval', async () => {
+    const originalApproval = process.env.ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED;
+    const originalIntake = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    try {
+      const setup = async () => {
+        const state = createInitialState(fakeRunner(), createMemoryPersistence());
+        const user = protectedGatewayUser();
+        const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+        expect(response.ok).toBe(true);
+        if (!response.ok) throw new Error('session setup failed');
+        seedDeviceArtifact(state, response.session.id);
+        seedDeviceInventoryBinding(state);
+        const intake = requestDeviceBridgeIntake(state, user, response.session.id, validDeviceBridgeRequest());
+        expect(intake.ok).toBe(true);
+        if (!intake.ok) throw new Error('intake setup failed');
+        return { state, user, session: response.session, requestId: intake.request.id };
+      };
+
+      {
+        const { state, user, requestId } = await setup();
+        expect(approveDeviceBridgeRequest(state, { ...user, roles: ['user'] }, requestId)).toMatchObject({
+          ok: false,
+          classification: 'auth',
+        });
+        expect(approveDeviceBridgeRequest(state, { ...user, authMode: 'mock' }, requestId)).toMatchObject({
+          ok: false,
+          classification: 'auth',
+        });
+        expect(approveDeviceBridgeRequest(state, { ...user, id: 'other-user' }, requestId)).toMatchObject({
+          ok: false,
+          classification: 'auth',
+        });
+      }
+      {
+        const { state, user, session, requestId } = await setup();
+        session.lifecycle = 'closed';
+        expect(approveDeviceBridgeRequest(state, user, requestId)).toMatchObject({ ok: false, classification: 'session' });
+      }
+      {
+        const { state, user, requestId } = await setup();
+        const artifact = state.deviceArtifacts.get('artifact');
+        if (artifact) state.deviceArtifacts.set('artifact', { ...artifact, sha256: 'b'.repeat(64) });
+        expect(approveDeviceBridgeRequest(state, user, requestId)).toMatchObject({ ok: false, classification: 'artifact' });
+      }
+      {
+        const { state, user, requestId } = await setup();
+        const binding = state.deviceInventoryBindings.get('binding');
+        if (binding) state.deviceInventoryBindings.set('binding', { ...binding, deviceIdentityTag: 'd'.repeat(64) });
+        expect(approveDeviceBridgeRequest(state, user, requestId)).toMatchObject({ ok: false, classification: 'inventory' });
+      }
+      {
+        const { state, user, requestId } = await setup();
+        const binding = state.deviceInventoryBindings.get('binding');
+        if (binding) state.deviceInventoryBindings.set('binding', { ...binding, allowedOperation: 'esp8266.flash' as 'esp32.flash' });
+        expect(approveDeviceBridgeRequest(state, user, requestId)).toMatchObject({ ok: false, classification: 'inventory' });
+      }
+      {
+        const { state, user, requestId } = await setup();
+        const request = state.deviceBridgeRequests.get(requestId);
+        if (request) state.deviceBridgeRequests.set(requestId, { ...request, expiresAt: new Date(Date.now() - 1_000).toISOString() });
+        expect(approveDeviceBridgeRequest(state, user, requestId)).toMatchObject({ ok: false, classification: 'request' });
+      }
+      expect((await setup()).state.deviceBridgeApprovals.size).toBe(0);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED', originalApproval);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('rolls back request approval, approval record, and audit mutation when approval persistence fails', async () => {
+    const originalIntake = process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = 'true';
+    process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+    try {
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const response = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      seedDeviceArtifact(state, response.session.id);
+      seedDeviceInventoryBinding(state);
+      const intake = requestDeviceBridgeIntake(state, user, response.session.id, validDeviceBridgeRequest());
+      expect(intake.ok).toBe(true);
+      if (!intake.ok) return;
+      const auditCount = state.audit.events.length;
+      state.persistence = failingSavePersistence();
+
+      expect(() => approveDeviceBridgeRequest(state, user, intake.request.id)).toThrow('injected persistence failure');
+      expect(state.deviceBridgeRequests.get(intake.request.id)?.status).toBe('pending');
+      expect(state.deviceBridgeApprovals.size).toBe(0);
+      expect(state.audit.events).toHaveLength(auditCount);
     } finally {
       restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
       restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);

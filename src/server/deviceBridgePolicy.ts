@@ -5,6 +5,7 @@ import type { DeviceBridgePolicy } from '../shared/deviceBridgeContracts.js';
 const disabledReason = 'Client device bridge implementation is disabled pending separate exposure and hardware approvals.';
 const inventoryJsonEnv = 'ROADEX_DEVICE_BRIDGE_INVENTORY_JSON';
 const requestIntakeEnabledEnv = 'ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED';
+const approvalEnabledEnv = 'ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED';
 const metadataRegistryEnabledEnv = 'ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED';
 const auditHmacKeyEnv = 'ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY';
 const identityHmacKeyEnv = 'ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY';
@@ -27,6 +28,10 @@ export function getDeviceBridgePolicy(): DeviceBridgePolicy {
 
 export function deviceBridgeRequestIntakeEnabled(): boolean {
   return strictEnabledByEnv(process.env[requestIntakeEnabledEnv]);
+}
+
+export function deviceBridgeApprovalEnabled(): boolean {
+  return strictEnabledByEnv(process.env[approvalEnabledEnv]);
 }
 
 export function deviceBridgeMetadataRegistryEnabled(): boolean {
@@ -83,6 +88,10 @@ export function denyDeviceBridge(log: AuditLog, user: UserProfile): DeviceBridge
 
 export function isAvailableDeviceBridgeIntakeRoute(method: string | undefined, pathname: string): boolean {
   return method === 'POST' && /^\/api\/sessions\/[^/]+\/device-bridge\/requests$/.test(pathname);
+}
+
+export function isAvailableDeviceBridgeApprovalRoute(method: string | undefined, pathname: string): boolean {
+  return method === 'POST' && /^\/api\/device-bridge\/requests\/[^/]+\/approve$/.test(pathname);
 }
 
 export function isAvailableDeviceBridgeMetadataRoute(method: string | undefined, pathname: string): boolean {

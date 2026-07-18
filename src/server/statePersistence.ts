@@ -291,7 +291,7 @@ function sanitizeRequest(record: DeviceBridgeRequestRecord): DeviceBridgeRequest
     validBoundedString(record.inventoryBindingId, 128) &&
     /^[a-f0-9]{64}$/i.test(record.deviceIdentityTag) &&
     record.operation === 'esp32.flash' &&
-    ['pending', 'revoked', 'expired'].includes(record.status) &&
+    ['pending', 'approved', 'revoked', 'expired'].includes(record.status) &&
     validIsoDate(record.createdAt) &&
     validIsoDate(record.expiresAt)
   )) return undefined;
@@ -314,6 +314,7 @@ function sanitizeRequest(record: DeviceBridgeRequestRecord): DeviceBridgeRequest
 function sanitizeApproval(record: DeviceBridgeApprovalRecord): DeviceBridgeApprovalRecord | undefined {
   if (!(
     validBoundedString(record.id, 128) &&
+    validBoundedString(record.requestId, 128) &&
     validBoundedString(record.userId, 128) &&
     validBoundedString(record.sessionId, 128) &&
     validBoundedString(record.projectId, 128) &&
@@ -321,6 +322,7 @@ function sanitizeApproval(record: DeviceBridgeApprovalRecord): DeviceBridgeAppro
     /^[a-f0-9]{64}$/i.test(record.artifactSha256) &&
     validBoundedString(record.inventoryBindingId, 128) &&
     /^[a-f0-9]{64}$/i.test(record.deviceIdentityTag) &&
+    /^[a-f0-9]{64}$/i.test(record.credentialDigest) &&
     record.operation === 'esp32.flash' &&
     ['pending', 'consumed', 'revoked', 'expired'].includes(record.status) &&
     validIsoDate(record.createdAt) &&
@@ -328,6 +330,7 @@ function sanitizeApproval(record: DeviceBridgeApprovalRecord): DeviceBridgeAppro
   )) return undefined;
   return {
     id: record.id.trim(),
+    requestId: record.requestId.trim(),
     userId: record.userId.trim(),
     sessionId: record.sessionId.trim(),
     projectId: record.projectId.trim(),
@@ -335,6 +338,7 @@ function sanitizeApproval(record: DeviceBridgeApprovalRecord): DeviceBridgeAppro
     artifactSha256: record.artifactSha256.toLowerCase(),
     inventoryBindingId: record.inventoryBindingId.trim(),
     deviceIdentityTag: record.deviceIdentityTag.toLowerCase(),
+    credentialDigest: record.credentialDigest.toLowerCase(),
     operation: 'esp32.flash',
     status: record.status,
     createdAt: new Date(record.createdAt).toISOString(),

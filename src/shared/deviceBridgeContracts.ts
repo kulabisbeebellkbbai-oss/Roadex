@@ -85,6 +85,7 @@ export type DeviceInventoryBindingResponse =
 
 export type DeviceBridgeApprovalRecord = {
   id: string;
+  requestId: string;
   userId: string;
   sessionId: string;
   projectId: string;
@@ -92,6 +93,7 @@ export type DeviceBridgeApprovalRecord = {
   artifactSha256: string;
   inventoryBindingId: string;
   deviceIdentityTag: string;
+  credentialDigest: string;
   operation: 'esp32.flash';
   status: 'pending' | 'consumed' | 'revoked' | 'expired';
   createdAt: string;
@@ -108,12 +110,13 @@ export type DeviceBridgeRequestRecord = {
   inventoryBindingId: string;
   deviceIdentityTag: string;
   operation: 'esp32.flash';
-  status: 'pending' | 'revoked' | 'expired';
+  status: 'pending' | 'approved' | 'revoked' | 'expired';
   createdAt: string;
   expiresAt: string;
 };
 
 export type DeviceBridgeRequestPublic = Omit<DeviceBridgeRequestRecord, 'deviceIdentityTag'>;
+export type DeviceBridgeApprovalPublic = Omit<DeviceBridgeApprovalRecord, 'userId' | 'deviceIdentityTag' | 'credentialDigest'>;
 
 export type DeviceBridgeRequestPayload = {
   workspaceId: string;
@@ -133,6 +136,18 @@ export type DeviceBridgeRequestResponse =
       gate: 'device-bridge';
       reason: string;
       classification?: 'auth' | 'audit' | 'device-bridge' | 'session' | 'workspace' | 'artifact' | 'inventory' | 'schema' | 'quota';
+    };
+
+export type DeviceBridgeApprovalResponse =
+  | {
+      ok: true;
+      approval: DeviceBridgeApprovalPublic;
+    }
+  | {
+      ok: false;
+      gate: 'device-bridge';
+      reason: string;
+      classification?: 'auth' | 'audit' | 'device-bridge' | 'request' | 'session' | 'artifact' | 'inventory';
     };
 
 export type DeviceBridgeOperationRecord = {

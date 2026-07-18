@@ -85,8 +85,10 @@ export function createDeviceBridgeService(store: DeviceBridgeStore, options: Ser
         !activeBinding(session.workspace.id, inventoryBindingId, binding.deviceIdentityTag)
       ) return { ok: false, reason: 'Device bridge approval is unavailable.' };
       const createdAt = new Date(now()).toISOString();
+      const credential = createSecret();
       const record: DeviceBridgeApprovalRecord = {
         id: createId(),
+        requestId: createId(),
         userId: user.id,
         sessionId: session.id,
         projectId: session.workspace.id,
@@ -94,6 +96,7 @@ export function createDeviceBridgeService(store: DeviceBridgeStore, options: Ser
         artifactSha256: artifact.sha256.toLowerCase(),
         inventoryBindingId,
         deviceIdentityTag: binding.deviceIdentityTag.toLowerCase(),
+        credentialDigest: digest(credential),
         operation: 'esp32.flash',
         status: 'pending',
         createdAt,

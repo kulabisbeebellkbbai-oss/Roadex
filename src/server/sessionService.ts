@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import {
   closeSync,
   constants as fsConstants,
@@ -14,6 +14,7 @@ import { createCodexRunner, type SessionRunner } from './codexRunner.js';
 import {
   denyDeviceBridge,
   deviceBridgeAuditHmacKey,
+  deviceBridgeApprovalEnabled,
   deviceBridgeIdentityHmacKey,
   deviceBridgeMetadataRegistryEnabled,
   deviceBridgeRequestIntakeEnabled,
@@ -48,7 +49,9 @@ import type {
   DeviceArtifactMetadata,
   DeviceArtifactMetadataPublic,
   DeviceArtifactMetadataRegistrationPayload,
+  DeviceBridgeApprovalPublic,
   DeviceBridgeApprovalRecord,
+  DeviceBridgeApprovalResponse,
   DeviceBridgeMetadataResponse,
   DeviceBridgeOperationRecord,
   DeviceBridgeRequestPayload,
@@ -94,6 +97,15 @@ type DeviceBridgeRequestGate =
   | 'inventory'
   | 'schema'
   | 'quota';
+
+type DeviceBridgeApprovalGate =
+  | 'auth'
+  | 'audit'
+  | 'device-bridge'
+  | 'request'
+  | 'session'
+  | 'artifact'
+  | 'inventory';
 
 type DeviceBridgeMetadataGate =
   | 'auth'
@@ -673,6 +685,110 @@ export function requestDeviceBridgeIntake(
   return { ok: true, request: publicDeviceBridgeRequest(request) };
 }
 
+export function approveDeviceBridgeRequest(
+  state: RoadexState,
+  user: UserProfile,
+  requestId: string,
+): DeviceBridgeApprovalResponse {
+  const auditHmacKey = deviceBridgeAuditHmacKey();
+  if (!deviceBridgeApprovalEnabled()) {
+    if (!auditHmacKey) return publicDeviceBridgeApprovalDenial('device-bridge');
+    return denyDeviceBridgeApproval(state, user, requestId, 'device-bridge', auditHmacKey);
+  }
+  if (!auditHmacKey) return publicDeviceBridgeApprovalDenial('audit');
+  if (user.authMode !== 'protected-gateway' || !canAuthorizeInventoryBinding(user)) {
+    return denyDeviceBridgeApproval(state, user, requestId, 'auth', auditHmacKey);
+  }
+
+  const request = state.deviceBridgeRequests.get(requestId);
+  if (!request) return denyDeviceBridgeApproval(state, user, requestId, 'request', auditHmacKey);
+  if (request.userId !== user.id) {
+    return denyDeviceBridgeApproval(state, user, request.id, 'auth', auditHmacKey);
+  }
+
+  const existingApproval = [...state.deviceBridgeApprovals.values()].some(
+    (approval) => approval.requestId === request.id,
+  );
+  if (request.status !== 'pending' || existingApproval || expiredIso(request.expiresAt)) {
+    return denyDeviceBridgeApproval(state, user, request.id, 'request', auditHmacKey);
+  }
+
+  const session = getOwnedSession(state.sessions, request.userId, request.sessionId);
+  if (!session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle !== 'ready') {
+    return denyDeviceBridgeApproval(state, user, request.id, 'session', auditHmacKey);
+  }
+  if (session.workspace.id !== request.projectId) {
+    return denyDeviceBridgeApproval(state, user, request.id, 'session', auditHmacKey);
+  }
+
+  const artifact = state.deviceArtifacts.get(request.artifactId);
+  if (
+    !artifact ||
+    artifact.status !== 'active' ||
+    expiredIso(artifact.expiresAt) ||
+    artifact.projectId !== request.projectId ||
+    artifact.sessionId !== request.sessionId ||
+    artifact.sha256.toLowerCase() !== request.artifactSha256
+  ) {
+    return denyDeviceBridgeApproval(state, user, request.id, 'artifact', auditHmacKey);
+  }
+
+  const binding = state.deviceInventoryBindings.get(request.inventoryBindingId);
+  if (
+    !validActiveInventoryBindingForRequest(binding, request.projectId) ||
+    binding.deviceIdentityTag.toLowerCase() !== request.deviceIdentityTag
+  ) {
+    return denyDeviceBridgeApproval(state, user, request.id, 'inventory', auditHmacKey);
+  }
+
+  const createdAt = new Date().toISOString();
+  const approval: DeviceBridgeApprovalRecord = {
+    id: `bridge-approval-${randomUUID()}`,
+    requestId: request.id,
+    userId: request.userId,
+    sessionId: request.sessionId,
+    projectId: request.projectId,
+    artifactId: request.artifactId,
+    artifactSha256: request.artifactSha256,
+    inventoryBindingId: request.inventoryBindingId,
+    deviceIdentityTag: request.deviceIdentityTag,
+    credentialDigest: createHash('sha256').update(randomBytes(32)).digest('hex'),
+    operation: 'esp32.flash',
+    status: 'pending',
+    createdAt,
+    expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+  };
+  const approvedRequest: DeviceBridgeRequestRecord = {
+    ...request,
+    status: 'approved',
+  };
+  const auditEvent = createBridgeAuditEvent(
+    state,
+    auditHmacKey,
+    user,
+    'device_bridge.approval',
+    request.id,
+    'allowed',
+    bridgeAuditSummary(auditHmacKey, {
+      classification: 'approved',
+      userId: user.id,
+      sessionId: request.sessionId,
+      requestId: request.id,
+    }),
+  );
+  persistStateSnapshot(state, {
+    deviceBridgeRequests: [...state.deviceBridgeRequests.values()].map((record) =>
+      record.id === request.id ? approvedRequest : record,
+    ),
+    deviceBridgeApprovals: [...state.deviceBridgeApprovals.values(), approval],
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.deviceBridgeRequests.set(request.id, approvedRequest);
+  state.deviceBridgeApprovals.set(approval.id, approval);
+  state.audit.events.push(auditEvent);
+  return { ok: true, approval: publicDeviceBridgeApproval(approval) };
+}
+
 export function registerDeviceArtifactMetadata(
   state: RoadexState,
   user: UserProfile,
@@ -1163,6 +1279,42 @@ function publicDeviceBridgeDenial(classification: DeviceBridgeRequestGate): Devi
   };
 }
 
+function denyDeviceBridgeApproval(
+  state: RoadexState,
+  user: UserProfile,
+  requestId: string,
+  gate: DeviceBridgeApprovalGate,
+  auditHmacKey: string,
+): DeviceBridgeApprovalResponse {
+  const auditEvent = createBridgeAuditEvent(
+    state,
+    auditHmacKey,
+    user,
+    'security.denied',
+    requestId,
+    'denied',
+    bridgeAuditSummary(auditHmacKey, {
+      classification: gate,
+      userId: user.id,
+      sessionId: requestId,
+    }),
+  );
+  persistStateSnapshot(state, {
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.audit.events.push(auditEvent);
+  return publicDeviceBridgeApprovalDenial(gate);
+}
+
+function publicDeviceBridgeApprovalDenial(classification: DeviceBridgeApprovalGate): DeviceBridgeApprovalResponse {
+  return {
+    ok: false,
+    gate: 'device-bridge',
+    reason: 'Device bridge approval denied.',
+    classification,
+  };
+}
+
 function denyDeviceBridgeMetadata(
   state: RoadexState,
   user: UserProfile,
@@ -1232,6 +1384,22 @@ function publicDeviceBridgeRequest(request: DeviceBridgeRequestRecord): DeviceBr
     status: request.status,
     createdAt: request.createdAt,
     expiresAt: request.expiresAt,
+  };
+}
+
+function publicDeviceBridgeApproval(approval: DeviceBridgeApprovalRecord): DeviceBridgeApprovalPublic {
+  return {
+    id: approval.id,
+    requestId: approval.requestId,
+    sessionId: approval.sessionId,
+    projectId: approval.projectId,
+    artifactId: approval.artifactId,
+    artifactSha256: approval.artifactSha256,
+    inventoryBindingId: approval.inventoryBindingId,
+    operation: approval.operation,
+    status: approval.status,
+    createdAt: approval.createdAt,
+    expiresAt: approval.expiresAt,
   };
 }
 
@@ -1586,6 +1754,10 @@ function validActiveInventoryBindingForRequest(
     !binding.revokedAt &&
     /^[a-f0-9]{64}$/i.test(binding.deviceIdentityTag),
   );
+}
+
+function expiredIso(value: string): boolean {
+  return Date.parse(value) <= Date.now();
 }
 
 function saveState(state: RoadexState): void {
