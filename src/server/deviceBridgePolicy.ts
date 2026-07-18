@@ -24,7 +24,7 @@ export function getDeviceBridgePolicy(): DeviceBridgePolicy {
 }
 
 export function deviceBridgeRequestIntakeEnabled(): boolean {
-  return enabledByEnv(process.env[requestIntakeEnabledEnv]);
+  return strictEnabledByEnv(process.env[requestIntakeEnabledEnv]);
 }
 
 export function deviceBridgeOperationsEnabled(): false {
@@ -70,6 +70,12 @@ export function denyDeviceBridge(log: AuditLog, user: UserProfile): DeviceBridge
   };
 }
 
-function enabledByEnv(value: string | undefined): boolean {
-  return value === '1' || value?.toLowerCase() === 'true';
+export function isAvailableDeviceBridgeIntakeRoute(method: string | undefined, pathname: string): boolean {
+  return method === 'POST' && /^\/api\/sessions\/[^/]+\/device-bridge\/requests$/.test(pathname);
+}
+
+function strictEnabledByEnv(value: string | undefined): boolean {
+  if (value === undefined || value === 'false') return false;
+  if (value === 'true') return true;
+  return false;
 }

@@ -15,6 +15,7 @@ import {
   streamEventsForSession,
   submitPrompt,
 } from '../src/server/sessionService.js';
+import { isAvailableDeviceBridgeIntakeRoute } from '../src/server/deviceBridgePolicy.js';
 import type { CreateSessionRequest } from '../src/shared/sessionContracts.js';
 
 const host = process.env.HOST ?? '127.0.0.1';
@@ -138,7 +139,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
 
   const deviceBridgeRequestMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/device-bridge\/requests$/);
-  if (deviceBridgeRequestMatch && req.method === 'POST') {
+  if (deviceBridgeRequestMatch && isAvailableDeviceBridgeIntakeRoute(req.method, url.pathname)) {
     const auth = requireAuth(req, res);
     if (!auth) return;
     const body = await readJson<unknown>(req);
