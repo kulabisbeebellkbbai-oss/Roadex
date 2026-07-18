@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "^6.0.3",
+    "csv-parse": "^6.2.1",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -23,9 +24,9 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
+    "@types/node": "^24.10.1",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
-    "@types/node": "^24.10.1",
     "concurrently": "^9.2.1",
     "eslint": "^9.17.0",
     "eslint-plugin-react-hooks": "^5.1.0",

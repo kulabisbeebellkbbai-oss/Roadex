@@ -8,10 +8,12 @@ import {
   serializeState,
   type StatePersistence,
 } from './statePersistence.js';
-import { getApprovedWorkspaces, resolveWorkspaceForUser } from './workspacePolicy.js';
+import { canAccessManagedCodexProjects, getApprovedWorkspaces, resolveWorkspaceForUser } from './workspacePolicy.js';
+import { loadManagedCodexThreads } from './codexProjectsRegistry.js';
 import {
   firstMilestoneGates,
   type CreateSessionRequest,
+  type ManagedThreadClaim,
   type RoadexBootstrap,
   type RoadexSession,
   type SessionRequest,
@@ -31,10 +33,16 @@ export type RoadexState = {
   persistence: StatePersistence;
   activeRuns: Map<string, AbortController>;
   cancelAttempts: Map<string, number>;
-  streamSubscribers: Map<string, Set<(event: StreamEvent) => void>>;
+  streamSubscribers: Map<string, Set<StreamSubscriber>>;
   maxStreamSubscribersPerSession: number;
   maxActiveRuns: number;
   maxActiveSessionsPerUser: number;
+  managedThreadClaims: Map<string, ManagedThreadClaim>;
+};
+
+type StreamSubscriber = {
+  user: UserProfile;
+  onEvent: (event: StreamEvent) => void;
 };
 
 export function createInitialState(
@@ -42,6 +50,16 @@ export function createInitialState(
   persistence: StatePersistence = createJsonFilePersistence(),
 ): RoadexState {
   const persisted = persistence.load();
+  const managedThreadClaims = new Map(persisted.managedThreadClaims.map((claim) => [claim.threadId, claim]));
+  for (const session of persisted.sessions) {
+    if (session.managedThreadId && !managedThreadClaims.has(session.managedThreadId)) {
+      managedThreadClaims.set(session.managedThreadId, {
+        threadId: session.managedThreadId,
+        userId: session.userId,
+        claimedAt: session.createdAt,
+      });
+    }
+  }
   return {
     sessions: createSessionStoreFromState({
       sessions: persisted.sessions,
@@ -56,28 +74,30 @@ export function createInitialState(
     maxStreamSubscribersPerSession: readPositiveInteger(process.env.ROADEX_MAX_STREAMS_PER_SESSION, 4),
     maxActiveRuns: Number(process.env.ROADEX_MAX_ACTIVE_RUNS ?? 2),
     maxActiveSessionsPerUser: readPositiveInteger(process.env.ROADEX_MAX_ACTIVE_SESSIONS_PER_USER, 8),
+    managedThreadClaims,
   };
 }
 
 export async function bootstrap(state: RoadexState, user: UserProfile): Promise<RoadexBootstrap> {
-  let userSessions = state.sessions.sessions.filter((session) => isVisibleSessionForUser(session, user));
+  let userSessions = state.sessions.sessions.filter((session) => isVisibleSessionForUser(state, session, user));
   const hasArchivedSessions = state.sessions.sessions.some(
     (session) => session.userId === user.id && session.lifecycle === 'closed',
   );
   if (userSessions.length === 0 && !hasArchivedSessions) {
-    const defaultWorkspace = getApprovedWorkspaces()[0];
+    const defaultWorkspace = getApprovedWorkspaces(user)[0];
     if (defaultWorkspace) {
       await createSessionFromApi(state, user, { workspaceId: defaultWorkspace.id });
-      userSessions = state.sessions.sessions.filter((session) => isVisibleSessionForUser(session, user));
+      userSessions = state.sessions.sessions.filter((session) => isVisibleSessionForUser(state, session, user));
     }
   }
   const visibleSessionIds = new Set(userSessions.map((session) => session.id));
   return {
     user,
-    workspaces: getApprovedWorkspaces(),
+    workspaces: getApprovedWorkspaces(user),
     sessions: userSessions,
     auditEvents: visibleAuditEvents(state.audit, user).slice(-8).reverse(),
     streamPreview: state.sessions.streamEvents.filter((event) => visibleSessionIds.has(event.sessionId)).slice(-8),
+    managedThreads: canAccessManagedCodexProjects(user) ? safeManagedThreads(user) : [],
   };
 }
 
@@ -103,18 +123,55 @@ export function createSessionFromApi(
     return Promise.resolve(deny(denied.gate, denied.reason));
   }
 
+  const managedThread = request.managedThreadId ? findManagedThreadForUser(user, request.managedThreadId) : undefined;
+  if (request.managedThreadId && !managedThread) {
+    appendAudit(state.audit, user, 'security.denied', 'managed-thread', 'denied', 'Managed thread attach denied.');
+    saveState(state);
+    return Promise.resolve(deny('managed-thread', 'Managed Codex thread is unavailable.'));
+  }
+  if (
+    managedThread &&
+    (request.newThread === true ||
+      managedThread.project.id !== workspaceDecision.workspace.id ||
+      managedThread.project.root !== workspaceDecision.workspace.root)
+  ) {
+    appendAudit(state.audit, user, 'security.denied', 'managed-thread', 'denied', 'Managed thread project mismatch.');
+    saveState(state);
+    return Promise.resolve(deny('managed-thread', 'Managed Codex thread is unavailable.'));
+  }
+  if (managedThread) {
+    const claim = state.managedThreadClaims.get(managedThread.id);
+    if (claim && claim.userId !== user.id) {
+      appendAudit(state.audit, user, 'security.denied', 'managed-thread', 'denied', 'Managed thread is already claimed.');
+      saveState(state);
+      return Promise.resolve(deny('managed-thread', 'Managed Codex thread is unavailable.'));
+    }
+  }
+
   const createNewThread = request.newThread === true;
   const existing = !createNewThread && state.sessions.sessions.find(
     (session) =>
       session.userId === user.id &&
       session.workspace.id === workspaceDecision.workspace.id &&
-      isVisibleSession(session),
+      isVisibleSession(session) &&
+      (!managedThread || session.managedThreadId === managedThread.id),
   );
   if (existing) {
     touchSession(existing);
     appendAudit(state.audit, user, 'session.attach', existing.id, 'allowed', 'Attached existing Codex session.');
     saveState(state);
     return Promise.resolve({ ok: true, session: existing });
+  }
+
+  if (managedThread) {
+    const archived = state.sessions.sessions.find(
+      (session) => session.userId === user.id && session.managedThreadId === managedThread.id,
+    );
+    if (archived) {
+      appendAudit(state.audit, user, 'security.denied', archived.id, 'denied', 'Managed thread is archived in Roadex.');
+      saveState(state);
+      return Promise.resolve(deny('managed-thread', 'Reopen the archived Roadex thread instead.'));
+    }
   }
 
   if (activeSessionCountForUser(state, user.id) >= state.maxActiveSessionsPerUser) {
@@ -134,6 +191,17 @@ export function createSessionFromApi(
     userId: user.id,
     workspace: workspaceDecision.workspace,
   });
+  if (managedThread) {
+    session.codexThreadId = managedThread.id;
+    session.managedThreadId = managedThread.id;
+    if (!state.managedThreadClaims.has(managedThread.id)) {
+      state.managedThreadClaims.set(managedThread.id, {
+        threadId: managedThread.id,
+        userId: user.id,
+        claimedAt: session.createdAt,
+      });
+    }
+  }
   state.sessions.sessions.push(session);
   addStreamEvents(state.sessions, [
     ...createRunnerIntro(session.id),
@@ -145,7 +213,9 @@ export function createSessionFromApi(
     'session.create',
     session.id,
     'allowed',
-    `Created Codex session for ${workspaceDecision.workspace.name}.`,
+    managedThread
+      ? `Attached managed Codex thread for ${workspaceDecision.workspace.name}.`
+      : `Created Codex session for ${workspaceDecision.workspace.name}.`,
   );
   saveState(state);
 
@@ -159,7 +229,7 @@ export function submitPrompt(
   prompt: string,
 ): PromptAcceptedResponse | undefined {
   const session = getOwnedSession(state.sessions, user.id, sessionId);
-  if (!session || session.lifecycle === 'closed' || session.lifecycle === 'blocked' || session.lifecycle === 'streaming') {
+  if (!session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle === 'closed' || session.lifecycle === 'blocked' || session.lifecycle === 'streaming') {
     appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Session is unavailable to this user.');
     saveState(state);
     return undefined;
@@ -206,6 +276,19 @@ export function submitPrompt(
     })
     .then((result) => {
       if (session.lifecycle === 'closed') return;
+      if (session.managedThreadId && result.codexThreadId && result.codexThreadId !== session.managedThreadId) {
+        session.lifecycle = 'blocked';
+        touchSession(session);
+        appendAudit(
+          state.audit,
+          user,
+          'security.denied',
+          sessionId,
+          'denied',
+          'Managed Codex runner returned a mismatched thread identity.',
+        );
+        return;
+      }
       updateCodexThreadId(session, result.codexThreadId);
       if (result.ok) {
         session.lifecycle = 'ready';
@@ -249,7 +332,7 @@ export function closeSession(
   sessionId: string,
 ): CloseSessionResponse | undefined {
   const session = getOwnedSession(state.sessions, user.id, sessionId);
-  if (!session) {
+  if (!session || !isManagedSessionAuthorized(state, user, session)) {
     appendAudit(
       state.audit,
       user,
@@ -281,7 +364,7 @@ export function closeSession(
 
 export function listArchivedSessions(state: RoadexState, user: UserProfile): RoadexSession[] {
   return state.sessions.sessions
-    .filter((session) => session.userId === user.id && session.lifecycle === 'closed')
+    .filter((session) => session.userId === user.id && session.lifecycle === 'closed' && isManagedSessionAuthorized(state, user, session))
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
@@ -291,7 +374,7 @@ export function reopenSession(
   sessionId: string,
 ): ReopenSessionResponse | undefined {
   const session = getOwnedSession(state.sessions, user.id, sessionId);
-  if (!session) {
+  if (!session || !isManagedSessionAuthorized(state, user, session)) {
     appendAudit(
       state.audit,
       user,
@@ -376,7 +459,7 @@ export function cancelSessionRun(
   sessionId: string,
 ): CancelSessionResponse | undefined {
   const session = getOwnedSession(state.sessions, user.id, sessionId);
-  if (!session) {
+  if (!session || !isManagedSessionAuthorized(state, user, session)) {
     appendAudit(
       state.audit,
       user,
@@ -426,7 +509,7 @@ export function streamEventsForSession(
   sessionId: string,
 ): StreamEvent[] | undefined {
   const session = getOwnedSession(state.sessions, user.id, sessionId);
-  if (!session || session.lifecycle === 'closed') {
+  if (!session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle === 'closed') {
     appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'SSE stream denied.');
     saveState(state);
     return undefined;
@@ -442,9 +525,9 @@ export function subscribeToSessionStream(
   user: UserProfile,
   sessionId: string,
   onEvent: (event: StreamEvent) => void,
-): { snapshot: StreamEvent[]; unsubscribe: () => void } | undefined {
+): { snapshot: StreamEvent[]; isAuthorized: () => boolean; unsubscribe: () => void } | undefined {
   const session = getOwnedSession(state.sessions, user.id, sessionId);
-  if (!session || session.lifecycle === 'closed') {
+  if (!session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle === 'closed') {
     appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'SSE stream denied.');
     saveState(state);
     return undefined;
@@ -468,13 +551,19 @@ export function subscribeToSessionStream(
   saveState(state);
   const snapshot = state.sessions.streamEvents.filter((event) => event.sessionId === sessionId);
 
-  const subscribers = state.streamSubscribers.get(sessionId) ?? new Set<(event: StreamEvent) => void>();
-  subscribers.add(onEvent);
+  const subscribers = state.streamSubscribers.get(sessionId) ?? new Set<StreamSubscriber>();
+  const subscriber = { user: { ...user, roles: [...user.roles] }, onEvent };
+  subscribers.add(subscriber);
   state.streamSubscribers.set(sessionId, subscribers);
   return {
     snapshot,
+    isAuthorized() {
+      if (isManagedSessionAuthorized(state, user, session)) return true;
+      revokeManagedSessionAccess(state, session);
+      return false;
+    },
     unsubscribe() {
-      subscribers.delete(onEvent);
+      subscribers.delete(subscriber);
       if (subscribers.size === 0) {
         state.streamSubscribers.delete(sessionId);
       }
@@ -523,6 +612,7 @@ function saveState(state: RoadexState): void {
     sessions: state.sessions.sessions,
     streamEvents: state.sessions.streamEvents,
     auditEvents: state.audit.events,
+    managedThreadClaims: [...state.managedThreadClaims.values()],
   }));
 }
 
@@ -531,9 +621,16 @@ function addAndPublishStreamEvents(state: RoadexState, events: StreamEvent[]): v
   for (const event of events) {
     const subscribers = state.streamSubscribers.get(event.sessionId);
     if (!subscribers) continue;
+    const session = state.sessions.sessions.find((candidate) => candidate.id === event.sessionId);
     for (const subscriber of subscribers) {
-      subscriber(event);
+      if (!session || !isManagedSessionAuthorized(state, subscriber.user, session)) {
+        subscribers.delete(subscriber);
+        if (session) revokeManagedSessionAccess(state, session);
+        continue;
+      }
+      subscriber.onEvent(event);
     }
+    if (subscribers.size === 0) state.streamSubscribers.delete(event.sessionId);
   }
   saveState(state);
 }
@@ -558,8 +655,21 @@ function cancelAttemptKey(user: UserProfile, sessionId: string): string {
   return `${user.id}:${sessionId}`;
 }
 
-function isVisibleSessionForUser(session: RoadexSession, user: UserProfile): boolean {
-  return session.userId === user.id && isVisibleSession(session);
+function isVisibleSessionForUser(state: RoadexState, session: RoadexSession, user: UserProfile): boolean {
+  return session.userId === user.id && isVisibleSession(session) && isManagedSessionAuthorized(state, user, session);
+}
+
+function isManagedSessionAuthorized(state: RoadexState, user: UserProfile, session: RoadexSession): boolean {
+  if (!session.managedThreadId) return true;
+  const claim = state.managedThreadClaims.get(session.managedThreadId);
+  return claim?.userId === user.id && Boolean(findManagedThreadForUser(user, session.managedThreadId));
+}
+
+function revokeManagedSessionAccess(state: RoadexState, session: RoadexSession): void {
+  if (!session.managedThreadId) return;
+  state.activeRuns.get(session.id)?.abort();
+  state.streamSubscribers.delete(session.id);
+  saveState(state);
 }
 
 function isVisibleSession(session: RoadexSession): boolean {
@@ -570,6 +680,23 @@ function activeSessionCountForUser(state: RoadexState, userId: string): number {
   return state.sessions.sessions.filter(
     (session) => session.userId === userId && isVisibleSession(session),
   ).length;
+}
+
+function safeManagedThreads(user: UserProfile) {
+  try {
+    const workspaces = getApprovedWorkspaces(user);
+    return loadManagedCodexThreads().flatMap((thread) => {
+      const workspace = workspaces.find((candidate) => candidate.root === thread.project.root);
+      return workspace ? [{ ...thread, project: workspace }] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function findManagedThreadForUser(user: UserProfile, threadId: string) {
+  if (!canAccessManagedCodexProjects(user)) return undefined;
+  return safeManagedThreads(user).find((thread) => thread.id === threadId);
 }
 
 function touchSession(session: RoadexSession): void {

@@ -1,5 +1,6 @@
 import { isAbsolute, resolve } from 'node:path';
 import type { UserProfile, WorkspaceRef } from '../shared/sessionContracts.js';
+import { managedCodexWorkspaces } from './codexProjectsRegistry.js';
 
 const defaultWorkspace = (): WorkspaceRef => ({
   id: 'roadex',
@@ -7,15 +8,28 @@ const defaultWorkspace = (): WorkspaceRef => ({
   root: process.env.ROADEX_WORKSPACE_ROOT ?? process.cwd(),
 });
 
-export function getApprovedWorkspaces(): WorkspaceRef[] {
+export function getApprovedWorkspaces(user?: UserProfile): WorkspaceRef[] {
   const raw = process.env.ROADEX_WORKSPACES_JSON;
-  if (!raw) return [defaultWorkspace()];
+  if (!raw) return combineManagedWorkspaces([defaultWorkspace()], user);
   try {
     const parsed = JSON.parse(raw) as WorkspaceRef[];
     const workspaces = parsed.map(normalizeWorkspace).filter((workspace): workspace is WorkspaceRef => Boolean(workspace));
-    return workspaces.length > 0 ? workspaces : [defaultWorkspace()];
+    return combineManagedWorkspaces(workspaces.length > 0 ? workspaces : [defaultWorkspace()], user);
   } catch {
-    return [defaultWorkspace()];
+    return combineManagedWorkspaces([defaultWorkspace()], user);
+  }
+}
+
+function combineManagedWorkspaces(configured: WorkspaceRef[], user?: UserProfile): WorkspaceRef[] {
+  if (!user || !canAccessManagedCodexProjects(user)) return configured;
+  try {
+    const roots = new Set(configured.map((workspace) => workspace.root));
+    return [
+      ...configured,
+      ...managedCodexWorkspaces().filter((workspace) => !roots.has(workspace.root)),
+    ];
+  } catch {
+    return configured;
   }
 }
 
@@ -49,7 +63,7 @@ export function resolveWorkspaceForUser(user: UserProfile, workspaceId: string):
     };
   }
 
-  const workspace = getApprovedWorkspaces().find((candidate) => candidate.id === workspaceId);
+  const workspace = getApprovedWorkspaces(user).find((candidate) => candidate.id === workspaceId);
   if (!workspace) {
     return {
       ok: false,
@@ -61,4 +75,15 @@ export function resolveWorkspaceForUser(user: UserProfile, workspaceId: string):
     ok: true,
     workspace,
   };
+}
+
+export function canAccessManagedCodexProjects(user: UserProfile): boolean {
+  if (!user.roles.includes('security-reviewer')) return false;
+  const approvedUsers = new Set(
+    (process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS ?? '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  return approvedUsers.has(user.id);
 }

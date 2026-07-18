@@ -37,9 +37,17 @@ function App() {
   ));
   const session = roadex.session;
   const visibleTranscript = roadex.transcript.filter(isVisibleTranscriptEvent);
-  const projectThreads = [...roadex.sessions, ...roadex.archivedSessions]
+  const roadexProjectThreads = [...roadex.sessions, ...roadex.archivedSessions]
     .filter((candidate) => candidate.workspace.id === session?.workspace.id)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  const attachedCodexThreadIds = new Set(
+    [...roadex.sessions, ...roadex.archivedSessions]
+      .map((candidate) => candidate.codexThreadId)
+      .filter((threadId): threadId is string => Boolean(threadId)),
+  );
+  const managedProjectThreads = roadex.managedThreads.filter(
+    (candidate) => candidate.project.id === session?.workspace.id && !attachedCodexThreadIds.has(candidate.id),
+  );
   const composerDisabled =
     roadex.connectionState === 'loading' ||
     roadex.connectionState === 'streaming' ||
@@ -183,12 +191,21 @@ function App() {
                 <span>Thread</span>
                 <select
                   disabled={!session || roadex.connectionState === 'loading' || roadex.connectionState === 'streaming'}
-                  onChange={(event) => void roadex.selectThread(event.target.value)}
-                  value={session?.id ?? ''}
+                  onChange={(event) => {
+                    const [source, id] = event.target.value.split(':', 2);
+                    if (source === 'roadex') void roadex.selectThread(id);
+                    if (source === 'managed' && session) void roadex.attachManagedThread(id, session.workspace.id);
+                  }}
+                  value={session ? `roadex:${session.id}` : ''}
                 >
-                  {projectThreads.map((candidate) => (
-                    <option key={candidate.id} value={candidate.id}>
+                  {roadexProjectThreads.map((candidate) => (
+                    <option key={candidate.id} value={`roadex:${candidate.id}`}>
                       {candidate.lifecycle === 'closed' ? 'Archived' : 'Active'} · {candidate.id.slice(-8)} · {new Date(candidate.updatedAt).toLocaleString()}
+                    </option>
+                  ))}
+                  {managedProjectThreads.map((candidate) => (
+                    <option key={candidate.id} value={`managed:${candidate.id}`}>
+                      Codex Projects · {candidate.label} · {new Date(candidate.updatedAt).toLocaleString()}
                     </option>
                   ))}
                 </select>

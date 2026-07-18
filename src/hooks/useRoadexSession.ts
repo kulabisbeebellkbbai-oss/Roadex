@@ -12,6 +12,7 @@ import {
 } from '../client/sessionApi';
 import type {
   AuditEvent,
+  ManagedCodexThread,
   RoadexSession,
   StreamEvent,
   UserProfile,
@@ -26,6 +27,7 @@ export type RoadexSessionState = {
   user?: UserProfile;
   workspaces: WorkspaceRef[];
   sessions: RoadexSession[];
+  managedThreads: ManagedCodexThread[];
   session?: RoadexSession;
   archivedSessions: RoadexSession[];
   transcript: StreamEvent[];
@@ -39,6 +41,7 @@ export type RoadexSessionState = {
   openWorkspace: (workspaceId: string) => Promise<void>;
   createThread: (workspaceId: string) => Promise<void>;
   selectThread: (sessionId: string) => Promise<void>;
+  attachManagedThread: (threadId: string, workspaceId: string) => Promise<void>;
   retry: () => Promise<void>;
 };
 
@@ -48,6 +51,7 @@ export function useRoadexSession(): RoadexSessionState {
   const [user, setUser] = useState<UserProfile>();
   const [workspaces, setWorkspaces] = useState<WorkspaceRef[]>([]);
   const [sessions, setSessions] = useState<RoadexSession[]>([]);
+  const [managedThreads, setManagedThreads] = useState<ManagedCodexThread[]>([]);
   const [session, setSession] = useState<RoadexSession>();
   const [archivedSessions, setArchivedSessions] = useState<RoadexSession[]>([]);
   const [transcript, setTranscript] = useState<StreamEvent[]>([]);
@@ -78,6 +82,7 @@ export function useRoadexSession(): RoadexSessionState {
       setUser(result.bootstrap.user);
       setWorkspaces(result.bootstrap.workspaces);
       setSessions(result.bootstrap.sessions);
+      setManagedThreads(result.bootstrap.managedThreads);
       setSession(activeSession);
       const archived = await listArchivedSessions(result.token);
       setArchivedSessions(archived.sessions);
@@ -171,6 +176,7 @@ export function useRoadexSession(): RoadexSessionState {
       setUser(result.bootstrap.user);
       setWorkspaces(result.bootstrap.workspaces);
       setSessions(result.bootstrap.sessions);
+      setManagedThreads(result.bootstrap.managedThreads);
       setSession(activeSession);
       setArchivedSessions(archived.sessions);
       setAuditEvents([response.auditEvent, ...result.bootstrap.auditEvents].slice(0, 8));
@@ -202,6 +208,7 @@ export function useRoadexSession(): RoadexSessionState {
       setUser(result.bootstrap.user);
       setWorkspaces(result.bootstrap.workspaces);
       setSessions(result.bootstrap.sessions);
+      setManagedThreads(result.bootstrap.managedThreads);
       setSession(response.session);
       setArchivedSessions(archived.sessions);
       setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
@@ -225,6 +232,7 @@ export function useRoadexSession(): RoadexSessionState {
         const result = await createSession(token, { workspaceId });
         const nextSession = result.session;
         setSessions(result.bootstrap.sessions);
+        setManagedThreads(result.bootstrap.managedThreads);
         setSession(nextSession);
         setAuditEvents(result.bootstrap.auditEvents);
         setTranscript(result.bootstrap.streamPreview.filter((event) => event.sessionId === nextSession.id));
@@ -248,6 +256,7 @@ export function useRoadexSession(): RoadexSessionState {
       try {
         const result = await createSession(token, { workspaceId, newThread: true });
         setSessions(result.bootstrap.sessions);
+        setManagedThreads(result.bootstrap.managedThreads);
         setSession(result.session);
         setAuditEvents(result.bootstrap.auditEvents);
         await refreshStream(result.session);
@@ -292,6 +301,30 @@ export function useRoadexSession(): RoadexSessionState {
     [reopenArchivedSession, session, sessions, token],
   );
 
+  const attachManagedThread = useCallback(
+    async (threadId: string, workspaceId: string) => {
+      activeStreamSessionId.current = undefined;
+      setConnectionState('loading');
+      setError(undefined);
+      setNotice(undefined);
+      try {
+        const result = await createSession(token, { workspaceId, managedThreadId: threadId });
+        setSessions(result.bootstrap.sessions);
+        setManagedThreads(result.bootstrap.managedThreads);
+        setSession(result.session);
+        setAuditEvents(result.bootstrap.auditEvents);
+        await refreshStream(result.session);
+        setNotice('Managed Codex thread attached.');
+        setConnectionState('connected');
+      } catch (caught) {
+        activeStreamSessionId.current = session?.id;
+        setError(caught instanceof Error ? caught.message : 'Managed thread attach failed.');
+        setConnectionState('error');
+      }
+    },
+    [refreshStream, session, token],
+  );
+
   const retry = useCallback(async () => {
     if (!workspaces[0]) {
       await attach();
@@ -301,6 +334,7 @@ export function useRoadexSession(): RoadexSessionState {
     try {
       const result = await createSession(token, { workspaceId: workspaces[0].id });
       setSessions(result.bootstrap.sessions);
+      setManagedThreads(result.bootstrap.managedThreads);
       setSession(result.session);
       setAuditEvents(result.bootstrap.auditEvents);
       setTranscript(result.bootstrap.streamPreview);
@@ -317,6 +351,7 @@ export function useRoadexSession(): RoadexSessionState {
       user,
       workspaces,
       sessions,
+      managedThreads,
       session,
       archivedSessions,
       transcript,
@@ -330,17 +365,20 @@ export function useRoadexSession(): RoadexSessionState {
       openWorkspace,
       createThread,
       selectThread,
+      attachManagedThread,
       retry,
     }),
     [
       auditEvents,
       archivedSessions,
+      attachManagedThread,
       cancelPrompt,
       closeCurrentSession,
       connectionState,
       createThread,
       error,
       notice,
+      managedThreads,
       openWorkspace,
       reopenArchivedSession,
       retry,

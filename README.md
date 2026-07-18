@@ -36,6 +36,10 @@ For multiple server-approved projects, set `ROADEX_WORKSPACES_JSON` to a JSON ar
 
 The transcript toolbar lets authenticated users switch among approved projects and their own active or archived Roadex threads, or create a new thread in the selected project. Roadex-owned thread selection does not expose unrelated local Codex CLI history.
 
+Roadex can also list and attach conversations registered by the local `codex-projects` manager. Set `ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS` to a comma-separated allowlist of protected gateway user IDs. Access requires both an allowlisted ID and the `security-reviewer` role. The registry path defaults to `/home/god/.codex/codex-projects.csv` and can be overridden with `ROADEX_CODEX_PROJECTS_REGISTRY`.
+
+Managed registry projects are canonicalized and limited to the manager roots under the Codex workspace, private memory project, and inventory. A managed conversation is durably claimed by the first authorized Roadex principal that attaches it; another principal cannot concurrently attach the same Codex history.
+
 Runtime session, transcript, and audit metadata are written to `data/roadex-state.json` by default. The `data/` directory is ignored and must not be committed.
 
 Prompt submission is asynchronous: `POST /api/sessions/:id/prompts` accepts work and the transcript is read from `GET /api/sessions/:id/stream` while Codex runs. Add `?live=1` for a long-lived SSE stream that sends the existing transcript followed by new runner events. The local API also supports `POST /api/sessions/:id/cancel` and `POST /api/sessions/:id/close`.

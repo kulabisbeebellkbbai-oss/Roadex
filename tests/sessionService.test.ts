@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { mockUser } from '../src/server/authService';
 import { createStreamEvent } from '../src/server/mockRunner';
@@ -458,8 +461,96 @@ describe('Roadex session service', () => {
     expect(response.session.codexThreadId).toBe('thread-2');
   });
 
+  it('attaches only registered managed Codex threads for security reviewers', async () => {
+    const originalRegistry = process.env.ROADEX_CODEX_PROJECTS_REGISTRY;
+    const originalAuthorizedUsers = process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS;
+    const registry = join(mkdtempSync(join(tmpdir(), 'roadex-managed-')), 'codex-projects.csv');
+    const managedThreadId = '019f7337-df2e-75c1-b245-5e3588a6c5aa';
+    writeFileSync(
+      registry,
+      `conversation_id,label,project,created_at,updated_at\n${managedThreadId},Managed thread,"${process.cwd()}",2026-07-17T00:00:00Z,2026-07-18T00:00:00Z\n`,
+    );
+    process.env.ROADEX_CODEX_PROJECTS_REGISTRY = registry;
+    process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS = `${mockUser.id},other-reviewer`;
+    try {
+      const persistence = createMemoryPersistence();
+      const state = createInitialState(controllableRunner(), persistence);
+      const initial = await bootstrap(state, mockUser);
+      const managed = initial.managedThreads.find((thread) => thread.id === managedThreadId);
+      expect(managed).toBeDefined();
+      if (!managed) return;
+
+      const attached = await createSessionFromApi(state, mockUser, {
+        workspaceId: managed.project.id,
+        managedThreadId,
+      });
+      expect(attached).toMatchObject({
+        ok: true,
+        session: {
+          codexThreadId: managedThreadId,
+          managedThreadId,
+          workspace: { id: managed.project.id },
+        },
+      });
+      if (!attached.ok) return;
+
+      const otherReviewer = { ...mockUser, id: 'other-reviewer' };
+      expect(await createSessionFromApi(state, otherReviewer, {
+        workspaceId: managed.project.id,
+        managedThreadId,
+      })).toMatchObject({ ok: false, gate: 'managed-thread' });
+
+      const ordinaryUser = { ...mockUser, roles: ['user'] as UserProfile['roles'] };
+      expect(await createSessionFromApi(state, ordinaryUser, {
+        workspaceId: managed.project.id,
+        managedThreadId,
+      })).toMatchObject({ ok: false, gate: 'managed-thread' });
+
+      const subscription = subscribeToSessionStream(state, mockUser, attached.session.id, () => undefined);
+      expect(subscription).toBeDefined();
+      expect(submitPrompt(state, mockUser, attached.session.id, 'in-flight before revocation')).toMatchObject({
+        accepted: true,
+      });
+      process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS = 'other-reviewer';
+      expect(subscription?.isAuthorized()).toBe(false);
+      expect(state.streamSubscribers.has(attached.session.id)).toBe(false);
+      await flushRunner();
+      expect(state.activeRuns.has(attached.session.id)).toBe(false);
+      expect((await bootstrap(state, mockUser)).managedThreads).toEqual([]);
+      expect(streamEventsForSession(state, mockUser, attached.session.id)).toBeUndefined();
+      expect(submitPrompt(state, mockUser, attached.session.id, 'denied after revocation')).toBeUndefined();
+
+      process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS = `${mockUser.id},other-reviewer`;
+      const reloaded = createInitialState(fakeRunner(), persistence);
+      reloaded.sessions.sessions = [];
+      expect(await createSessionFromApi(reloaded, otherReviewer, {
+        workspaceId: managed.project.id,
+        managedThreadId,
+      })).toMatchObject({ ok: false, gate: 'managed-thread' });
+
+      state.runner = fakeRunner('ok', '019f7337-df2e-75c1-b245-5e3588a6c5ff');
+      attached.session.lifecycle = 'ready';
+      expect(submitPrompt(state, mockUser, attached.session.id, 'mismatched managed identity')).toMatchObject({
+        accepted: true,
+      });
+      await flushRunner();
+      expect(attached.session).toMatchObject({
+        lifecycle: 'blocked',
+        codexThreadId: managedThreadId,
+        managedThreadId,
+      });
+    } finally {
+      if (originalRegistry === undefined) delete process.env.ROADEX_CODEX_PROJECTS_REGISTRY;
+      else process.env.ROADEX_CODEX_PROJECTS_REGISTRY = originalRegistry;
+      if (originalAuthorizedUsers === undefined) delete process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS;
+      else process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS = originalAuthorizedUsers;
+    }
+  });
+
   it('supports multiple server-approved workspaces by id only', async () => {
     const original = process.env.ROADEX_WORKSPACES_JSON;
+    const originalRegistry = process.env.ROADEX_CODEX_PROJECTS_REGISTRY;
+    process.env.ROADEX_CODEX_PROJECTS_REGISTRY = '/nonexistent/test-codex-projects.csv';
     process.env.ROADEX_WORKSPACES_JSON = JSON.stringify([
       { id: 'roadex', name: 'Roadex Portal', root: process.cwd() },
       { id: 'gateway', name: 'Protected Gateway', root: '/home/god/Documents/Codex Workspace/Protected Service Gateway' },
@@ -487,6 +578,8 @@ describe('Roadex session service', () => {
       } else {
         process.env.ROADEX_WORKSPACES_JSON = original;
       }
+      if (originalRegistry === undefined) delete process.env.ROADEX_CODEX_PROJECTS_REGISTRY;
+      else process.env.ROADEX_CODEX_PROJECTS_REGISTRY = originalRegistry;
     }
   });
 

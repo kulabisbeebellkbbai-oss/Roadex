@@ -93,6 +93,13 @@ export type RoadexSession = {
   createdAt: string;
   updatedAt: string;
   codexThreadId?: string;
+  managedThreadId?: string;
+};
+
+export type ManagedThreadClaim = {
+  threadId: string;
+  userId: string;
+  claimedAt: string;
 };
 
 export type SessionRequest = {
@@ -105,6 +112,15 @@ export type CreateSessionRequest = {
   workspaceId: string;
   requestedDeviceBridge?: boolean;
   newThread?: boolean;
+  managedThreadId?: string;
+};
+
+export type ManagedCodexThread = {
+  id: string;
+  label: string;
+  project: WorkspaceRef;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type RoadexBootstrap = {
@@ -113,6 +129,7 @@ export type RoadexBootstrap = {
   sessions: RoadexSession[];
   auditEvents: AuditEvent[];
   streamPreview: StreamEvent[];
+  managedThreads: ManagedCodexThread[];
 };
 
 export type SessionResponse =

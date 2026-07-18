@@ -1,11 +1,12 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { AuditEvent, RoadexSession, StreamEvent } from '../shared/sessionContracts.js';
+import type { AuditEvent, ManagedThreadClaim, RoadexSession, StreamEvent } from '../shared/sessionContracts.js';
 
 export type PersistedRoadexState = {
   sessions: RoadexSession[];
   streamEvents: StreamEvent[];
   auditEvents: AuditEvent[];
+  managedThreadClaims: ManagedThreadClaim[];
 };
 
 export type StatePersistence = {
@@ -26,6 +27,7 @@ export function createMemoryPersistence(initial?: Partial<PersistedRoadexState>)
     sessions: initial?.sessions ?? [],
     streamEvents: initial?.streamEvents ?? [],
     auditEvents: initial?.auditEvents ?? [],
+    managedThreadClaims: initial?.managedThreadClaims ?? [],
   };
   return {
     load() {
@@ -71,9 +73,13 @@ function sanitizeState(state: Partial<PersistedRoadexState>, now = Date.now()): 
       createdAt: session.createdAt ?? timestamp,
       updatedAt: session.updatedAt ?? session.createdAt ?? timestamp,
       codexThreadId: cleanOptionalString(session.codexThreadId),
+      managedThreadId: cleanOptionalString(session.managedThreadId),
     })),
     streamEvents: state.streamEvents ?? [],
     auditEvents: state.auditEvents ?? [],
+    managedThreadClaims: (state.managedThreadClaims ?? []).filter(
+      (claim) => Boolean(cleanOptionalString(claim.threadId) && cleanOptionalString(claim.userId)),
+    ),
   };
 }
 
@@ -103,6 +109,7 @@ function applyRetention(state: PersistedRoadexState, options: RetentionOptions):
       .filter((event) => retainedSessionIds.has(event.sessionId))
       .slice(-maxStreamEvents),
     auditEvents: state.auditEvents.slice(-maxAuditEvents),
+    managedThreadClaims: state.managedThreadClaims,
   };
 }
 
@@ -126,6 +133,7 @@ function emptyState(): PersistedRoadexState {
     sessions: [],
     streamEvents: [],
     auditEvents: [],
+    managedThreadClaims: [],
   };
 }
 

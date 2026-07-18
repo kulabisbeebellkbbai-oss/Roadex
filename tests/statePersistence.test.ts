@@ -24,6 +24,7 @@ describe('state persistence', () => {
         },
       ],
       auditEvents: [],
+      managedThreadClaims: [],
     });
 
     expect(readFileSync(path, 'utf8')).toContain('persisted');
@@ -104,6 +105,26 @@ describe('state persistence', () => {
     expect(state.sessions.map((session) => session.id)).toEqual(['two', 'three']);
     expect(state.streamEvents.map((event) => event.id)).toEqual(['event-three']);
     expect(state.auditEvents.map((event) => event.id)).toEqual(['audit-two']);
+  });
+
+  it('retains managed thread claims after their Roadex sessions expire', () => {
+    const now = Date.UTC(2026, 6, 17);
+    const stale = {
+      ...sessionFixture('stale', 'closed', new Date(now - 10_000).toISOString()),
+      managedThreadId: '019f7337-df2e-75c1-b245-5e3588a6c5aa',
+    };
+    const state = serializeState(
+      {
+        sessions: [stale],
+        managedThreadClaims: [{ threadId: stale.managedThreadId, userId: 'user', claimedAt: stale.createdAt }],
+      },
+      { now, sessionRetentionMs: 5_000 },
+    );
+
+    expect(state.sessions).toEqual([]);
+    expect(state.managedThreadClaims).toEqual([
+      { threadId: stale.managedThreadId, userId: 'user', claimedAt: stale.createdAt },
+    ]);
   });
 });
 

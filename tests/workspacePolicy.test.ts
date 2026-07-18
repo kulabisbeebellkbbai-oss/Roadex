@@ -1,8 +1,13 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mockUser } from '../src/server/authService';
 import { getApprovedWorkspaces, resolveWorkspaceForUser } from '../src/server/workspacePolicy';
 
 const originalWorkspaces = process.env.ROADEX_WORKSPACES_JSON;
+const originalRegistry = process.env.ROADEX_CODEX_PROJECTS_REGISTRY;
+
+beforeEach(() => {
+  process.env.ROADEX_CODEX_PROJECTS_REGISTRY = '/nonexistent/test-codex-projects.csv';
+});
 
 afterEach(() => {
   if (originalWorkspaces === undefined) {
@@ -10,6 +15,8 @@ afterEach(() => {
   } else {
     process.env.ROADEX_WORKSPACES_JSON = originalWorkspaces;
   }
+  if (originalRegistry === undefined) delete process.env.ROADEX_CODEX_PROJECTS_REGISTRY;
+  else process.env.ROADEX_CODEX_PROJECTS_REGISTRY = originalRegistry;
 });
 
 describe('workspace policy', () => {
@@ -27,6 +34,13 @@ describe('workspace policy', () => {
     expect(resolveWorkspaceForUser(mockUser, '/srv/roadex/projects/roadex')).toMatchObject({
       ok: false,
     });
+  });
+
+  it('does not expose managed projects without an explicit account allowlist', () => {
+    delete process.env.ROADEX_CODEX_PROJECTS_REGISTRY;
+    delete process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS;
+
+    expect(getApprovedWorkspaces(mockUser).every((workspace) => !workspace.id.startsWith('codex-project-'))).toBe(true);
   });
 
   it('loads multiple server-approved workspaces from JSON config', () => {

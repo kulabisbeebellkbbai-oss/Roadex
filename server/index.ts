@@ -152,6 +152,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         writeSseEvent(res, event);
       }
       const keepalive = setInterval(() => {
+        if (!subscription.isAuthorized()) {
+          clearInterval(keepalive);
+          subscription.unsubscribe();
+          res.end();
+          return;
+        }
         res.write(`: keepalive\n\n`);
       }, 25_000);
       req.on('close', () => {

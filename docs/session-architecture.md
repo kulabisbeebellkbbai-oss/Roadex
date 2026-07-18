@@ -20,6 +20,8 @@ The browser may choose a project only from the server-approved workspace registr
 
 Roadex does not enumerate or attach arbitrary Codex CLI history from the server. Thread selection remains constrained to sessions created through Roadex so workspace authorization, ownership checks, audit records, and lifecycle controls continue to apply.
 
+An explicitly allowlisted protected user may additionally attach threads registered in the local `codex-projects` manager. Roadex validates the manager registry, canonical project root, conversation identifier, account allowlist, reviewer role, and exclusive thread claim before creating a session that resumes the existing Codex thread. Unregistered histories and browser-supplied roots remain unavailable.
+
 The first implementation should use a mock session runner and typed API contracts. Real Codex process spawning should be added only after the policy checks, audit hooks, and isolation tests exist.
 
 ## Request Flow
