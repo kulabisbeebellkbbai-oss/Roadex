@@ -1,13 +1,5 @@
 import type { BrowserDeviceCapability } from '../shared/deviceBridgeContracts';
-
-export const approvedUsbFilters = [
-  { vendorId: 0x303a, productId: 0x0002 },
-  { vendorId: 0x303a, productId: 0x1001 },
-  { vendorId: 0x10c4, productId: 0xea60 },
-  { vendorId: 0x1a86, productId: 0x7523 },
-  { vendorId: 0x1a86, productId: 0x55d4 },
-  { vendorId: 0x0403, productId: 0x6001 },
-] as const;
+import type { UsbDeviceFilter } from '../shared/usbDeviceProfileContracts';
 
 export type WebUsbDescriptor = {
   vendorId: number;
@@ -27,11 +19,14 @@ export function detectDeviceCapability(navigatorLike: object): BrowserDeviceCapa
   return { transport: 'unavailable', identityProbeAvailable, deviceAccessRequested: false };
 }
 
-export async function requestUsbDescriptor(navigatorLike: object): Promise<WebUsbDescriptor> {
+export async function requestUsbDescriptor(navigatorLike: object, filters: UsbDeviceFilter[]): Promise<WebUsbDescriptor> {
   if (!('usb' in navigatorLike) || !isUsbChooser(navigatorLike.usb)) {
     throw new Error('WebUSB is not available in this browser.');
   }
-  const device = await navigatorLike.usb.requestDevice({ filters: approvedUsbFilters });
+  const device = await navigatorLike.usb.requestDevice({ filters });
+  if (!filters.some((filter) => filter.vendorId === device.vendorId && filter.productId === device.productId)) {
+    throw new Error('The selected USB device is not allowed for this project.');
+  }
   return {
     vendorId: device.vendorId,
     productId: device.productId,

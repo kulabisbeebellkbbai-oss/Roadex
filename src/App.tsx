@@ -27,6 +27,7 @@ import { isVisibleTranscriptEvent } from './transcript';
 import { resolveLayoutMode, toggleLayoutMode } from './layoutMode';
 import { hasBleRuntimeVerification, verifyBleRuntime } from './client/bleRuntimeVerifier';
 import { hasSerialRuntimeVerification, verifySerialRuntime } from './client/serialRuntimeVerifier';
+import { allowsUsbOperation } from './shared/usbDeviceProfileContracts';
 
 function App() {
   const roadex = useRoadexSession();
@@ -48,6 +49,9 @@ function App() {
     (profile) => profile.workspaceId === session?.workspace.id,
   );
   const bleVerificationProfile = roadex.bleVerificationProfiles.find(
+    (profile) => profile.workspaceId === session?.workspace.id,
+  );
+  const usbDeviceProfile = roadex.usbDeviceProfiles.find(
     (profile) => profile.workspaceId === session?.workspace.id,
   );
   const selectedProject = roadex.workspaces.find(
@@ -117,12 +121,12 @@ function App() {
   }
 
   async function handleSerialVerification() {
-    if (!serialVerificationProfile) return;
+    if (!serialVerificationProfile || !allowsUsbOperation(usbDeviceProfile, 'serial.verify')) return;
     const sequence = ++serialVerificationSequence.current;
     setSerialVerification('checking');
     setSerialVerificationMessage(`Select the serial device for ${serialVerificationProfile.label}, then reset it while Roadex listens.`);
     try {
-      await verifySerialRuntime(window.navigator, serialVerificationProfile);
+      await verifySerialRuntime(window.navigator, serialVerificationProfile, usbDeviceProfile.filters);
       if (sequence !== serialVerificationSequence.current) return;
       setSerialVerification('verified');
       setSerialVerificationMessage(serialVerificationProfile.successMessage);
@@ -472,7 +476,7 @@ function App() {
                 {bleVerification === 'checking' ? 'Checking BLE' : 'Verify BLE runtime'}
               </button>
               <button
-                disabled={!hasSerialRuntimeVerification(window.navigator) || !serialVerificationProfile || serialVerification === 'checking'}
+                disabled={!hasSerialRuntimeVerification(window.navigator) || !serialVerificationProfile || !allowsUsbOperation(usbDeviceProfile, 'serial.verify') || serialVerification === 'checking'}
                 onClick={() => void handleSerialVerification()}
                 type="button"
                 title={serialVerificationProfile ? `Run ${serialVerificationProfile.label}` : 'No serial verification profile is configured for this project'}
@@ -485,6 +489,7 @@ function App() {
                   !roadex.deviceBridgePolicy?.descriptorObservationEnabled ||
                   roadex.browserDeviceCapability.transport !== 'webusb' ||
                   !session ||
+                  !allowsUsbOperation(usbDeviceProfile, 'observe') ||
                   !roadex.deviceInventoryBindingRefs.some((binding) => binding.projectId === session.workspace.id)
                 }
                 onClick={() => void roadex.observeUsbDescriptor()}
@@ -498,6 +503,7 @@ function App() {
                   !roadex.deviceBridgePolicy?.descriptorObservationEnabled ||
                   !roadex.browserDeviceCapability.identityProbeAvailable ||
                   !session ||
+                  !allowsUsbOperation(usbDeviceProfile, 'esp32.identity') ||
                   !roadex.deviceInventoryBindingRefs.some(
                     (binding) => binding.projectId === session.workspace.id && binding.identityVerificationAvailable,
                   )
@@ -549,6 +555,7 @@ function App() {
                   !roadex.deviceBridgePolicy?.writeEnabled ||
                   !roadex.verifiedFirmwareReady ||
                   roadex.pendingProbeConfirmation?.phase !== 'confirmation'
+                  || !allowsUsbOperation(usbDeviceProfile, 'esp32.flash')
                 }
                 onClick={() => void roadex.flashConfirmedFirmware()}
                 type="button"

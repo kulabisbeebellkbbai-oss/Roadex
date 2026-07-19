@@ -46,6 +46,8 @@ Optional read-only serial runtime checks are configured per approved workspace t
 
 Read-only BLE runtime checks use a separate workspace-scoped registry selected with `ROADEX_BLE_VERIFICATION_PROFILES_FILE`. BLE profiles constrain device discovery to one service UUID, read one characteristic, compare bounded expected JSON fields, and apply a shared operation deadline. They cannot request characteristic writes.
 
+USB chooser filters and permitted client operations are configured with `ROADEX_USB_DEVICE_PROFILES_FILE`. Each approved workspace can allow only the required subset of descriptor observation, serial verification, ESP32 identity probing, and ESP32 flashing. Roadex rechecks the selected VID/PID in the browser and enforces observation and flashing capabilities again on the server.
+
 Prompt submission is asynchronous: `POST /api/sessions/:id/prompts` accepts work and the transcript is read from `GET /api/sessions/:id/stream` while Codex runs. Add `?live=1` for a long-lived SSE stream that sends the existing transcript followed by new runner events. The local API also supports `POST /api/sessions/:id/cancel` and `POST /api/sessions/:id/close`.
 
 Archived sessions are listed through `GET /api/sessions` and restored through `POST /api/sessions/:id/reopen`. History is owner-scoped. Reopen preserves the session transcript and Codex thread, revalidates the workspace against current server policy, and is denied when that workspace already has an active session or stale runner state exists.

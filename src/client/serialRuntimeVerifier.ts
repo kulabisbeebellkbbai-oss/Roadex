@@ -1,10 +1,11 @@
-import { approvedUsbFilters } from './deviceCapability';
 import type { SerialVerificationProfile } from '../shared/serialVerificationContracts';
+import type { UsbDeviceFilter } from '../shared/usbDeviceProfileContracts';
 
 type RuntimeSerialPort = {
   open: (options: { baudRate: number; bufferSize: number }) => Promise<void>;
   close: () => Promise<void>;
   readable: ReadableStream<Uint8Array> | null;
+  getInfo: () => { usbVendorId?: number; usbProductId?: number };
 };
 
 type SerialNavigator = {
@@ -28,11 +29,16 @@ export function hasSerialRuntimeVerification(navigatorLike: object): navigatorLi
 export async function verifySerialRuntime(
   navigatorLike: object,
   profile: SerialVerificationProfile,
+  filters: UsbDeviceFilter[],
 ): Promise<SerialRuntimeVerification> {
   if (!hasSerialRuntimeVerification(navigatorLike)) throw new Error('Web Serial is not available in this browser.');
   const port = await navigatorLike.serial.requestPort({
-    filters: approvedUsbFilters.map(({ vendorId, productId }) => ({ usbVendorId: vendorId, usbProductId: productId })),
+    filters: filters.map(({ vendorId, productId }) => ({ usbVendorId: vendorId, usbProductId: productId })),
   });
+  const info = port.getInfo();
+  if (!filters.some(({ vendorId, productId }) => vendorId === info.usbVendorId && productId === info.usbProductId)) {
+    throw new Error('The selected serial device is not allowed for this project.');
+  }
   try {
     await port.open({ baudRate: profile.baudRate, bufferSize: profile.bufferSize });
     const deadline = Date.now() + profile.timeoutMs;

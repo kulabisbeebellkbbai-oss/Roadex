@@ -36,6 +36,7 @@ import { canAccessManagedCodexProjects, getApprovedWorkspaces, resolveWorkspaceF
 import { loadManagedCodexThreads } from './codexProjectsRegistry.js';
 import { loadSerialVerificationProfiles } from './serialVerificationProfiles.js';
 import { loadBleVerificationProfiles } from './bleVerificationProfiles.js';
+import { loadUsbDeviceProfiles } from './usbDeviceProfiles.js';
 import { maxDeviceArtifactBytes, readDeviceArtifact, storeDeviceArtifact } from './deviceArtifactVault.js';
 import {
   firstMilestoneGates,
@@ -82,6 +83,7 @@ import type {
 } from '../shared/deviceBridgeContracts.js';
 import type { SerialVerificationProfile } from '../shared/serialVerificationContracts.js';
 import type { BleVerificationProfile } from '../shared/bleVerificationContracts.js';
+import type { UsbDeviceOperation, UsbDeviceProfile } from '../shared/usbDeviceProfileContracts.js';
 
 export type RoadexState = {
   sessions: SessionStore;
@@ -103,6 +105,7 @@ export type RoadexState = {
   deviceDescriptorObservations: Map<string, DeviceDescriptorObservationRecord>;
   serialVerificationProfiles: SerialVerificationProfile[];
   bleVerificationProfiles: BleVerificationProfile[];
+  usbDeviceProfiles: UsbDeviceProfile[];
 };
 
 type StreamSubscriber = {
@@ -194,6 +197,7 @@ export function createInitialState(
     deviceDescriptorObservations: new Map(persisted.deviceDescriptorObservations.map((record) => [record.id, record])),
     serialVerificationProfiles: loadSerialVerificationProfiles(),
     bleVerificationProfiles: loadBleVerificationProfiles(),
+    usbDeviceProfiles: loadUsbDeviceProfiles(),
   };
 }
 
@@ -231,6 +235,8 @@ export async function bootstrap(state: RoadexState, user: UserProfile): Promise<
     serialVerificationProfiles: state.serialVerificationProfiles.filter((profile) =>
       approvedWorkspaces.some((workspace) => workspace.id === profile.workspaceId)),
     bleVerificationProfiles: state.bleVerificationProfiles.filter((profile) =>
+      approvedWorkspaces.some((workspace) => workspace.id === profile.workspaceId)),
+    usbDeviceProfiles: state.usbDeviceProfiles.filter((profile) =>
       approvedWorkspaces.some((workspace) => workspace.id === profile.workspaceId)),
   };
 }
@@ -854,6 +860,9 @@ export function startDeviceBridgeProbe(
   if (!approval || approval.userId !== user.id || approval.status !== 'pending' || expiredIso(approval.expiresAt)) {
     return denyDeviceBridgeProbe(state, user, approvalId, 'approval', auditHmacKey);
   }
+  if (!usbProfileAllowsOperation(state, approval.projectId, 'esp32.flash')) {
+    return denyDeviceBridgeProbe(state, user, approvalId, 'device-profile', auditHmacKey);
+  }
   const session = getOwnedSession(state.sessions, user.id, approval.sessionId);
   const artifact = state.deviceArtifacts.get(approval.artifactId);
   const binding = state.deviceInventoryBindings.get(approval.inventoryBindingId);
@@ -924,7 +933,8 @@ export function submitDeviceBridgeProbe(
   const operation = state.deviceBridgeOperations.get(operationId);
   if (
     user.authMode !== 'protected-gateway' || !parsed || !operation || operation.userId !== user.id ||
-    operation.phase !== 'probe' || expiredIso(operation.phaseExpiresAt)
+    operation.phase !== 'probe' || expiredIso(operation.phaseExpiresAt) ||
+    !usbProfileAllowsOperation(state, operation.projectId, 'esp32.flash')
   ) {
     return denyDeviceBridgeProbe(state, user, operationId, 'auth', auditHmacKey);
   }
@@ -993,6 +1003,7 @@ export function confirmDeviceBridgeProbe(
     !deviceBridgeProbeEnabled() || !auditHmacKey || user.authMode !== 'protected-gateway' ||
     !payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 0 ||
     !operation || operation.userId !== user.id || operation.phase !== 'verified' || expiredIso(operation.phaseExpiresAt) ||
+    !usbProfileAllowsOperation(state, operation.projectId, 'esp32.flash') ||
     !session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle !== 'ready' ||
     !artifact || artifact.status !== 'active' || expiredIso(artifact.expiresAt) ||
     artifact.sha256 !== operation.verifiedArtifactSha256 ||
@@ -1020,6 +1031,7 @@ export function deliverConfirmedDeviceArtifact(
   if (
     !deviceBridgeProbeEnabled() || !auditHmacKey || user.authMode !== 'protected-gateway' ||
     !operation || operation.userId !== user.id || operation.phase !== 'confirmation' || expiredIso(operation.phaseExpiresAt) ||
+    !usbProfileAllowsOperation(state, operation.projectId, 'esp32.flash') ||
     !session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle !== 'ready' ||
     !artifact || artifact.status !== 'active' || expiredIso(artifact.expiresAt) ||
     artifact.projectId !== operation.projectId || artifact.sessionId !== operation.sessionId ||
@@ -1062,11 +1074,13 @@ export function authorizeDeviceBridgeWrite(
   if (
     deviceBridgeWriteEnabled() && auditHmacKey && identityHmacKey && user.authMode === 'protected-gateway' && parsed && writeTokenDigest &&
     operation?.userId === user.id && operation.phase === 'destructive' && operation.destructiveNonceDigest &&
+    usbProfileAllowsOperation(state, operation.projectId, 'esp32.flash') &&
     timingSafeEqual(Buffer.from(writeTokenDigest), Buffer.from(operation.destructiveNonceDigest))
   ) return { ok: true, operation: publicDeviceBridgeOperation(operation) };
   if (
     !deviceBridgeWriteEnabled() || !auditHmacKey || !identityHmacKey || user.authMode !== 'protected-gateway' || !parsed ||
     !operation || operation.userId !== user.id || operation.phase !== 'confirmation' || expiredIso(operation.phaseExpiresAt) ||
+    !usbProfileAllowsOperation(state, operation.projectId, 'esp32.flash') ||
     !operation.confirmationChallengeDigest || parsed.artifactSha256 !== operation.verifiedArtifactSha256 ||
     !session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle !== 'ready' ||
     !artifact || artifact.status !== 'active' || expiredIso(artifact.expiresAt) || artifact.sha256 !== parsed.artifactSha256 ||
@@ -1166,9 +1180,13 @@ export function observeDeviceDescriptor(
     return denyDescriptorObservation(state, user, sessionId, 'session', auditHmacKey);
   }
   const parsed = parseDescriptorObservationPayload(payload);
-  if (!parsed.ok || !approvedUsbDescriptor(parsed.payload.vendorId, parsed.payload.productId)) {
+  if (!parsed.ok) {
     return denyDescriptorObservation(state, user, sessionId, 'schema', auditHmacKey);
   }
+  const requiredUsbOperation = parsed.payload.deviceMac ? 'esp32.identity' : 'observe';
+  if (!usbProfileAllowsDescriptor(
+    state, session.workspace.id, requiredUsbOperation, parsed.payload.vendorId, parsed.payload.productId,
+  )) return denyDescriptorObservation(state, user, sessionId, 'device-bridge', auditHmacKey);
   const binding = state.deviceInventoryBindings.get(parsed.payload.inventoryBindingId);
   if (!validActiveInventoryBindingForRequest(binding, session.workspace.id)) {
     return denyDescriptorObservation(state, user, sessionId, 'inventory', auditHmacKey);
@@ -2196,15 +2214,21 @@ function validDeviceMac(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{2}(?::[a-f0-9]{2}){5}$/i.test(value.trim().replace(/-/g, ':'));
 }
 
-function approvedUsbDescriptor(vendorId: number, productId: number): boolean {
-  return new Set([
-    '303a:0002',
-    '303a:1001',
-    '10c4:ea60',
-    '1a86:7523',
-    '1a86:55d4',
-    '0403:6001',
-  ]).has(`${vendorId.toString(16).padStart(4, '0')}:${productId.toString(16).padStart(4, '0')}`);
+function usbProfileAllowsOperation(state: RoadexState, projectId: string, operation: UsbDeviceOperation): boolean {
+  return state.usbDeviceProfiles.some((profile) =>
+    profile.workspaceId === projectId && profile.operations.includes(operation));
+}
+
+function usbProfileAllowsDescriptor(
+  state: RoadexState,
+  projectId: string,
+  operation: UsbDeviceOperation,
+  vendorId: number,
+  productId: number,
+): boolean {
+  return state.usbDeviceProfiles.some((profile) =>
+    profile.workspaceId === projectId && profile.operations.includes(operation) &&
+    profile.filters.some((filter) => filter.vendorId === vendorId && filter.productId === productId));
 }
 
 function readProjectArtifactMetadata(

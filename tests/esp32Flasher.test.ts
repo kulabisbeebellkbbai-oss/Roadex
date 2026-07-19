@@ -1,12 +1,24 @@
 import { describe, expect, it, vi } from 'vitest';
 import { flashVerifiedEsp32 } from '../src/client/esp32Flasher';
 
+const usbFilters = [{ vendorId: 0x10c4, productId: 0xea60 }];
+
+function flash(
+  navigatorLike: Parameters<typeof flashVerifiedEsp32>[0],
+  firmware: Parameters<typeof flashVerifiedEsp32>[1],
+  expectedDeviceMac: Parameters<typeof flashVerifiedEsp32>[2],
+  authorizeWrite: Parameters<typeof flashVerifiedEsp32>[3],
+  createSession?: Parameters<typeof flashVerifiedEsp32>[6],
+) {
+  return flashVerifiedEsp32(navigatorLike, firmware, expectedDeviceMac, authorizeWrite, usbFilters, () => undefined, createSession);
+}
+
 describe('verified ESP32 flasher', () => {
   it('rechecks identity, authorizes, writes, resets, and disconnects in order', async () => {
     const events: string[] = [];
     const port = { getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) } as SerialPort;
     const navigatorLike = { serial: { requestPort: vi.fn(async () => port) } };
-    await flashVerifiedEsp32(
+    await flash(
       navigatorLike,
       Uint8Array.from([0xe9, 1, 2, 3]).buffer,
       'aa:bb:cc:dd:ee:ff',
@@ -26,7 +38,7 @@ describe('verified ESP32 flasher', () => {
     const write = vi.fn(async () => undefined);
     const disconnect = vi.fn(async () => undefined);
     const port = { getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) } as SerialPort;
-    await expect(flashVerifiedEsp32(
+    await expect(flash(
       { serial: { requestPort: vi.fn(async () => port) } },
       Uint8Array.from([0xe9, 1]).buffer,
       'aa:bb:cc:dd:ee:ff',
@@ -40,7 +52,7 @@ describe('verified ESP32 flasher', () => {
 
   it('rejects non-ESP32 images before opening a serial chooser', async () => {
     const requestPort = vi.fn();
-    await expect(flashVerifiedEsp32(
+    await expect(flash(
       { serial: { requestPort } },
       Uint8Array.from([0, 1]).buffer,
       'aa:bb:cc:dd:ee:ff',
@@ -52,13 +64,13 @@ describe('verified ESP32 flasher', () => {
   it('rejects a returned descriptor outside the approved allowlist', async () => {
     const port = { getInfo: () => ({ usbVendorId: 0xffff, usbProductId: 0xffff }) } as SerialPort;
     const createSession = vi.fn();
-    await expect(flashVerifiedEsp32(
+    await expect(flash(
       { serial: { requestPort: vi.fn(async () => port) } },
       Uint8Array.from([0xe9, 1]).buffer,
       'aa:bb:cc:dd:ee:ff',
       vi.fn(),
       createSession,
-    )).rejects.toThrow('not on the approved USB allowlist');
+    )).rejects.toThrow('not allowed for this project');
     expect(createSession).not.toHaveBeenCalled();
   });
 
@@ -67,7 +79,7 @@ describe('verified ESP32 flasher', () => {
     const reset = vi.fn();
     const disconnect = vi.fn(async () => undefined);
     const port = { getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) } as SerialPort;
-    await expect(flashVerifiedEsp32(
+    await expect(flash(
       { serial: { requestPort: vi.fn(async () => port) } },
       Uint8Array.from([0xe9, 1]).buffer,
       'aa:bb:cc:dd:ee:ff',
@@ -84,7 +96,7 @@ describe('verified ESP32 flasher', () => {
     const write = vi.fn();
     const disconnect = vi.fn(async () => undefined);
     const port = { getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) } as SerialPort;
-    await expect(flashVerifiedEsp32(
+    await expect(flash(
       { serial: { requestPort: vi.fn(async () => port) } },
       Uint8Array.from([0xe9, 1]).buffer,
       'aa:bb:cc:dd:ee:ff',
@@ -105,7 +117,7 @@ describe('verified ESP32 flasher', () => {
     const reset = vi.fn();
     const disconnect = vi.fn(async () => undefined);
     const port = { getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) } as SerialPort;
-    await expect(flashVerifiedEsp32(
+    await expect(flash(
       { serial: { requestPort: vi.fn(async () => port) } },
       Uint8Array.from([0xe9, 1]).buffer,
       'aa:bb:cc:dd:ee:ff',
@@ -125,7 +137,7 @@ describe('verified ESP32 flasher', () => {
     const write = vi.fn();
     const disconnect = vi.fn(async () => undefined);
     const port = { getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) } as SerialPort;
-    await expect(flashVerifiedEsp32(
+    await expect(flash(
       { serial: { requestPort: vi.fn(async () => port) } },
       Uint8Array.from([0xe9, 1]).buffer,
       'aa:bb:cc:dd:ee:ff',

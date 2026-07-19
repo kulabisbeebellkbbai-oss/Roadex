@@ -1,6 +1,6 @@
 import { ESPLoader, Transport } from 'esptool-js';
 import SparkMD5 from 'spark-md5';
-import { approvedUsbFilters } from './deviceCapability';
+import type { UsbDeviceFilter } from '../shared/usbDeviceProfileContracts';
 
 type SerialNavigator = {
   serial: {
@@ -22,6 +22,8 @@ export async function flashVerifiedEsp32(
   firmware: ArrayBuffer,
   expectedDeviceMac: string,
   authorizeWrite: (observedDeviceMac: string) => Promise<{ phaseExpiresAt: string }>,
+  filters: UsbDeviceFilter[],
+  confirmWriteStillAllowed: () => void | Promise<void>,
   createSession: FlashSessionFactory = createEsp32FlashSession,
 ): Promise<void> {
   if (!hasSerialChooser(navigatorLike)) throw new Error('Web Serial is not available in this browser.');
@@ -29,14 +31,14 @@ export async function flashVerifiedEsp32(
   if (bytes.byteLength === 0 || bytes[0] !== 0xe9) throw new Error('The verified firmware is not an ESP32 application image.');
   const expectedMac = canonicalMac(expectedDeviceMac);
   const port = await navigatorLike.serial.requestPort({
-    filters: approvedUsbFilters.map(({ vendorId, productId }) => ({ usbVendorId: vendorId, usbProductId: productId })),
+    filters: filters.map(({ vendorId, productId }) => ({ usbVendorId: vendorId, usbProductId: productId })),
   });
   const info = port.getInfo();
   if (info.usbVendorId === undefined || info.usbProductId === undefined) {
     throw new Error('The selected serial device has no approved USB identity.');
   }
-  if (!approvedUsbFilters.some(({ vendorId, productId }) => vendorId === info.usbVendorId && productId === info.usbProductId)) {
-    throw new Error('The selected serial device is not on the approved USB allowlist.');
+  if (!filters.some(({ vendorId, productId }) => vendorId === info.usbVendorId && productId === info.usbProductId)) {
+    throw new Error('The selected serial device is not allowed for this project.');
   }
 
   const session = createSession(port);
@@ -58,6 +60,7 @@ export async function flashVerifiedEsp32(
     if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt) {
       throw new Error('Firmware write authorization expired before the write started.');
     }
+    await confirmWriteStillAllowed();
     await session.writeFirmware(bytes);
     await session.reset();
   } finally {

@@ -44,6 +44,7 @@ import type { RunnerPromptRequest, SessionRunner } from '../src/server/codexRunn
 import { storeDeviceArtifact } from '../src/server/deviceArtifactVault';
 import type { SerialVerificationProfile } from '../src/shared/serialVerificationContracts';
 import type { BleVerificationProfile } from '../src/shared/bleVerificationContracts';
+import type { UsbDeviceProfile } from '../src/shared/usbDeviceProfileContracts';
 
 const workspace: WorkspaceRef = {
   id: 'roadex',
@@ -75,6 +76,14 @@ function bleProfile(id: string, workspaceId: string): BleVerificationProfile {
     timeoutMs: 15000,
     expectedFields: { ready: true },
     successMessage: 'BLE verified.',
+  };
+}
+
+function usbProfile(id: string, workspaceId: string): UsbDeviceProfile {
+  return {
+    id, workspaceId, label: 'USB devices',
+    filters: [{ vendorId: 0x10c4, productId: 0xea60 }],
+    operations: ['observe', 'serial.verify', 'esp32.identity', 'esp32.flash'],
   };
 }
 
@@ -216,6 +225,7 @@ describe('createMockSession', () => {
     expect(state.deviceBridgeOperations.size).toBe(0);
     expect(result.serialVerificationProfiles).toEqual([]);
     expect(result.bleVerificationProfiles).toEqual([]);
+    expect(result.usbDeviceProfiles).toEqual([]);
   });
 
   it('returns serial verification profiles only for approved workspaces', async () => {
@@ -240,6 +250,13 @@ describe('createMockSession', () => {
     const result = await bootstrap(state, mockUser);
 
     expect(result.bleVerificationProfiles.map((profile) => profile.id)).toEqual(['roadex-ble']);
+  });
+
+  it('returns USB device profiles only for approved workspaces', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    state.usbDeviceProfiles = [usbProfile('roadex-usb', 'roadex'), usbProfile('hidden-usb', 'unapproved-workspace')];
+    const result = await bootstrap(state, mockUser);
+    expect(result.usbDeviceProfiles.map((profile) => profile.id)).toEqual(['roadex-usb']);
   });
 
   it('creates a ready mock session for an authenticated user and approved workspace', () => {
@@ -271,6 +288,7 @@ describe('Roadex session service', () => {
       process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
       const persistence = createMemoryPersistence();
       const state = createInitialState(fakeRunner(), persistence);
+      state.usbDeviceProfiles = [usbProfile('roadex-usb', 'roadex')];
       const user = protectedGatewayUser();
       const created = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
       expect(created.ok).toBe(true);
@@ -316,6 +334,7 @@ describe('Roadex session service', () => {
       process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY = testIdentityHmacKey();
       process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
       const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      state.usbDeviceProfiles = [usbProfile('roadex-usb', 'roadex')];
       const user = protectedGatewayUser();
       const created = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
       expect(created.ok).toBe(true);
@@ -324,6 +343,15 @@ describe('Roadex session service', () => {
         .update('roadex-device-mac:v1:roadex:aa:bb:cc:dd:ee:ff')
         .digest('hex');
       const binding = seedDeviceInventoryBinding(state, 'binding', 'roadex', { deviceMacTag: expectedMacTag });
+
+      state.usbDeviceProfiles[0] = { ...state.usbDeviceProfiles[0], operations: ['observe'] };
+      expect(observeDeviceDescriptor(state, user, created.session.id, {
+        inventoryBindingId: binding.id,
+        vendorId: 0x10c4,
+        productId: 0xea60,
+        deviceMac: 'AA-BB-CC-DD-EE-FF',
+      })).toMatchObject({ ok: false, classification: 'device-bridge' });
+      state.usbDeviceProfiles[0] = usbProfile('roadex-usb', 'roadex');
 
       const verified = observeDeviceDescriptor(state, user, created.session.id, {
         inventoryBindingId: binding.id,
@@ -362,6 +390,7 @@ describe('Roadex session service', () => {
       process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY = 'descriptor-observation-hmac-key-test-32';
       process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
       const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      state.usbDeviceProfiles = [usbProfile('roadex-usb', 'roadex')];
       const user = protectedGatewayUser();
       const created = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
       expect(created.ok).toBe(true);
@@ -371,7 +400,7 @@ describe('Roadex session service', () => {
         inventoryBindingId: binding.id,
         vendorId: 1,
         productId: 2,
-      })).toMatchObject({ ok: false, classification: 'schema' });
+      })).toMatchObject({ ok: false, classification: 'device-bridge' });
       expect(state.deviceDescriptorObservations.size).toBe(0);
     } finally {
       restoreEnv('ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED', enabled);
@@ -688,6 +717,7 @@ describe('Roadex session service', () => {
       process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY = testIdentityHmacKey();
       const persistence = createMemoryPersistence();
       const state = createInitialState(fakeRunner(), persistence);
+      state.usbDeviceProfiles = [usbProfile('roadex-usb', 'roadex')];
       const user = protectedGatewayUser();
       const session = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
       if (!session.ok) return;
@@ -702,6 +732,9 @@ describe('Roadex session service', () => {
       const approval = approveDeviceBridgeRequest(state, user, intake.request.id);
       if (!approval.ok) return;
 
+      state.usbDeviceProfiles[0] = { ...state.usbDeviceProfiles[0], operations: ['observe'] };
+      expect(startDeviceBridgeProbe(state, user, approval.approval.id)).toMatchObject({ ok: false });
+      state.usbDeviceProfiles[0] = usbProfile('roadex-usb', 'roadex');
       const started = startDeviceBridgeProbe(state, user, approval.approval.id);
       expect(started).toMatchObject({ ok: true, operation: { phase: 'probe' } });
       if (!started.ok) return;
@@ -743,6 +776,7 @@ describe('Roadex session service', () => {
       process.env.ROADEX_DEVICE_ARTIFACT_VAULT = mkdtempSync(join(tmpdir(), 'roadex-artifact-vault-'));
       process.env.ROADEX_DEVICE_BRIDGE_WRITE_ENABLED = 'true';
       const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      state.usbDeviceProfiles = [usbProfile('roadex-usb', 'roadex')];
       const user = protectedGatewayUser();
       const session = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
       if (!session.ok) return;
@@ -802,6 +836,7 @@ describe('Roadex session service', () => {
       process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY = testIdentityHmacKey();
       process.env.ROADEX_DEVICE_ARTIFACT_VAULT = mkdtempSync(join(tmpdir(), 'roadex-write-vault-'));
       const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      state.usbDeviceProfiles = [usbProfile('roadex-usb', 'roadex')];
       const user = protectedGatewayUser();
       const session = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
       if (!session.ok) return;
@@ -825,6 +860,9 @@ describe('Roadex session service', () => {
       const writeToken = 'w'.repeat(43);
 
       expect(authorizeDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, deviceMac: '00:11:22:33:44:55', writeToken })).toMatchObject({ ok: false });
+      state.usbDeviceProfiles[0] = { ...state.usbDeviceProfiles[0], operations: ['observe'] };
+      expect(authorizeDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, deviceMac, writeToken })).toMatchObject({ ok: false });
+      state.usbDeviceProfiles[0] = usbProfile('roadex-usb', 'roadex');
       const authorized = authorizeDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, deviceMac, writeToken });
       expect(authorized).toMatchObject({ ok: true, operation: { phase: 'destructive' } });
       if (!authorized.ok) return;
@@ -832,6 +870,7 @@ describe('Roadex session service', () => {
       expect(state.deviceBridgeOperations.get(operation.id)?.confirmationChallengeDigest).toBeUndefined();
       expect(state.deviceBridgeOperations.get(operation.id)?.destructiveNonceDigest).toMatch(/^[a-f0-9]{64}$/);
       expect(reportDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, outcome: 'completed', writeToken: 'x'.repeat(43) })).toMatchObject({ ok: false });
+      state.usbDeviceProfiles[0] = { ...state.usbDeviceProfiles[0], operations: ['observe'] };
       const reported = reportDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, outcome: 'completed', writeToken });
       expect(reported).toMatchObject({ ok: true, operation: { phase: 'completed' } });
       expect(reportDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, outcome: 'completed', writeToken })).toMatchObject({ ok: true, operation: { phase: 'completed' } });

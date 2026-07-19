@@ -40,6 +40,7 @@ import type {
 } from '../shared/deviceBridgeContracts';
 import type { SerialVerificationProfile } from '../shared/serialVerificationContracts';
 import type { BleVerificationProfile } from '../shared/bleVerificationContracts';
+import { allowsUsbOperation, type UsbDeviceProfile } from '../shared/usbDeviceProfileContracts';
 
 export type ConnectionState = 'loading' | 'connected' | 'streaming' | 'error';
 
@@ -55,6 +56,7 @@ export type RoadexSessionState = {
   deviceInventoryBindingRefs: DeviceInventoryBindingRef[];
   serialVerificationProfiles: SerialVerificationProfile[];
   bleVerificationProfiles: BleVerificationProfile[];
+  usbDeviceProfiles: UsbDeviceProfile[];
   descriptorObservation?: DeviceDescriptorObservationPublic;
   pendingProbeApproval?: DeviceBridgeApprovalPublic;
   pendingProbeConfirmation?: DeviceBridgeOperationPublic;
@@ -94,6 +96,7 @@ export function useRoadexSession(): RoadexSessionState {
   const [deviceInventoryBindingRefs, setDeviceInventoryBindingRefs] = useState<DeviceInventoryBindingRef[]>([]);
   const [serialVerificationProfiles, setSerialVerificationProfiles] = useState<SerialVerificationProfile[]>([]);
   const [bleVerificationProfiles, setBleVerificationProfiles] = useState<BleVerificationProfile[]>([]);
+  const [usbDeviceProfiles, setUsbDeviceProfiles] = useState<UsbDeviceProfile[]>([]);
   const [descriptorObservation, setDescriptorObservation] = useState<DeviceDescriptorObservationPublic>();
   const [pendingProbeApproval, setPendingProbeApproval] = useState<DeviceBridgeApprovalPublic>();
   const [pendingProbeConfirmation, setPendingProbeConfirmation] = useState<DeviceBridgeOperationPublic>();
@@ -135,6 +138,7 @@ export function useRoadexSession(): RoadexSessionState {
       setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
       setSerialVerificationProfiles(result.bootstrap.serialVerificationProfiles);
       setBleVerificationProfiles(result.bootstrap.bleVerificationProfiles);
+      setUsbDeviceProfiles(result.bootstrap.usbDeviceProfiles);
       setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
       setSession(activeSession);
       const archived = await listArchivedSessions(result.token);
@@ -437,6 +441,12 @@ export function useRoadexSession(): RoadexSessionState {
 
   const observeUsbDescriptor = useCallback(async () => {
     if (!session) return;
+    const initiatingSessionId = session.id;
+    const usbProfile = usbDeviceProfiles.find((candidate) => candidate.workspaceId === session.workspace.id);
+    if (!allowsUsbOperation(usbProfile, 'observe')) {
+      setError('USB observation is not configured for this project.');
+      return;
+    }
     const binding = deviceInventoryBindingRefs.find((candidate) => candidate.projectId === session.workspace.id);
     if (!binding) {
       setError('No active inventory binding is available for this project.');
@@ -445,11 +455,13 @@ export function useRoadexSession(): RoadexSessionState {
     setError(undefined);
     setNotice(undefined);
     try {
-      const descriptor = await requestUsbDescriptor(window.navigator);
+      const descriptor = await requestUsbDescriptor(window.navigator, usbProfile.filters);
+      if (activeStreamSessionId.current !== initiatingSessionId) return;
       const result = await submitDeviceDescriptorObservation(token, session.id, {
         inventoryBindingId: binding.id,
         ...descriptor,
       });
+      if (activeStreamSessionId.current !== initiatingSessionId) return;
       setDescriptorObservation(result.observation);
       setNotice('USB descriptor observed. Device identity remains unverified.');
     } catch (caught) {
@@ -459,10 +471,16 @@ export function useRoadexSession(): RoadexSessionState {
       }
       setError(caught instanceof Error ? caught.message : 'USB descriptor observation failed.');
     }
-  }, [deviceInventoryBindingRefs, session, token]);
+  }, [deviceInventoryBindingRefs, session, token, usbDeviceProfiles]);
 
   const verifyEsp32Identity = useCallback(async () => {
     if (!session) return;
+    const initiatingSessionId = session.id;
+    const usbProfile = usbDeviceProfiles.find((candidate) => candidate.workspaceId === session.workspace.id);
+    if (!allowsUsbOperation(usbProfile, 'esp32.identity')) {
+      setError('ESP32 identity verification is not configured for this project.');
+      return;
+    }
     const binding = deviceInventoryBindingRefs.find((candidate) => candidate.projectId === session.workspace.id);
     if (!binding) {
       setError('No active inventory binding is available for this project.');
@@ -475,11 +493,13 @@ export function useRoadexSession(): RoadexSessionState {
     setError(undefined);
     setNotice(undefined);
     try {
-      const identity = await probeEsp32Identity(window.navigator);
+      const identity = await probeEsp32Identity(window.navigator, usbProfile.filters);
+      if (activeStreamSessionId.current !== initiatingSessionId) return;
       const result = await submitDeviceDescriptorObservation(token, session.id, {
         inventoryBindingId: binding.id,
         ...identity,
       });
+      if (activeStreamSessionId.current !== initiatingSessionId) return;
       setDescriptorObservation(result.observation);
       verifiedDeviceMac.current = result.observation.verification === 'verified' ? identity.deviceMac : undefined;
       setNotice(result.observation.verification === 'verified'
@@ -492,7 +512,7 @@ export function useRoadexSession(): RoadexSessionState {
       }
       setError(caught instanceof Error ? caught.message : 'ESP32 identity verification failed.');
     }
-  }, [deviceInventoryBindingRefs, session, token]);
+  }, [deviceInventoryBindingRefs, session, token, usbDeviceProfiles]);
 
   const createProbeApproval = useCallback(async () => {
     if (!session || descriptorObservation?.verification !== 'verified') {
@@ -580,7 +600,19 @@ export function useRoadexSession(): RoadexSessionState {
       !pendingProbeConfirmation || pendingProbeConfirmation.phase !== 'confirmation' ||
       !verifiedFirmwareBytes.current || !verifiedDeviceMac.current || !deviceBridgePolicy?.writeEnabled
     ) return;
+    const usbProfile = usbDeviceProfiles.find((candidate) => candidate.workspaceId === session?.workspace.id);
+    if (!allowsUsbOperation(usbProfile, 'esp32.flash')) {
+      setError('ESP32 flashing is not configured for this project.');
+      return;
+    }
     if (!window.confirm('Flash the verified firmware to the selected ESP32? This writes flash memory and restarts the device.')) return;
+    const initiatingSessionId = session?.id;
+    if (!initiatingSessionId) return;
+    const requireInitiatingSession = () => {
+      if (activeStreamSessionId.current !== initiatingSessionId) {
+        throw new Error('The active project changed. Firmware write authorization was cancelled.');
+      }
+    };
     setError(undefined);
     setNotice('Waiting for the verified ESP32 bootloader.');
     let authorizedOperation: DeviceBridgeOperationPublic | undefined;
@@ -592,12 +624,16 @@ export function useRoadexSession(): RoadexSessionState {
         verifiedFirmwareBytes.current,
         verifiedDeviceMac.current,
         async (observedDeviceMac) => {
+          requireInitiatingSession();
           const authorization = await authorizeVerifiedFirmwareWrite(token, pendingProbeConfirmation, observedDeviceMac);
+          requireInitiatingSession();
           authorizedOperation = authorization.operation;
           writeToken = authorization.writeToken;
           setPendingProbeConfirmation(authorization.operation);
           return { phaseExpiresAt: authorization.operation.phaseExpiresAt };
         },
+        usbProfile.filters,
+        requireInitiatingSession,
       );
       physicalWriteCompleted = true;
       if (!authorizedOperation || !writeToken) throw new Error('Firmware write authorization was not created.');
@@ -622,7 +658,7 @@ export function useRoadexSession(): RoadexSessionState {
       verifiedDeviceMac.current = undefined;
       setVerifiedFirmwareReady(false);
     }
-  }, [deviceBridgePolicy, pendingProbeConfirmation, token]);
+  }, [deviceBridgePolicy, pendingProbeConfirmation, session?.id, session?.workspace.id, token, usbDeviceProfiles]);
 
   return useMemo(
     () => ({
@@ -637,6 +673,7 @@ export function useRoadexSession(): RoadexSessionState {
       deviceInventoryBindingRefs,
       serialVerificationProfiles,
       bleVerificationProfiles,
+      usbDeviceProfiles,
       descriptorObservation,
       pendingProbeApproval,
       pendingProbeConfirmation,
@@ -684,6 +721,7 @@ export function useRoadexSession(): RoadexSessionState {
       deviceInventoryBindingRefs,
       serialVerificationProfiles,
       bleVerificationProfiles,
+      usbDeviceProfiles,
       openWorkspace,
       observeUsbDescriptor,
       verifyEsp32Identity,

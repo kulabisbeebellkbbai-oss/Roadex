@@ -2,6 +2,7 @@ import type { DeviceBridgePolicy } from './deviceBridgeContracts.js';
 import type { DeviceInventoryBindingRef } from './deviceBridgeContracts.js';
 import type { SerialVerificationProfile } from './serialVerificationContracts.js';
 import type { BleVerificationProfile } from './bleVerificationContracts.js';
+import type { UsbDeviceProfile } from './usbDeviceProfileContracts.js';
 
 export type SessionLifecycle =
   | 'pending'
@@ -147,6 +148,7 @@ export type RoadexBootstrap = {
   deviceInventoryBindingRefs: DeviceInventoryBindingRef[];
   serialVerificationProfiles: SerialVerificationProfile[];
   bleVerificationProfiles: BleVerificationProfile[];
+  usbDeviceProfiles: UsbDeviceProfile[];
 };
 
 export type SessionResponse =

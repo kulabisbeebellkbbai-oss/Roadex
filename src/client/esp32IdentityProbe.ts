@@ -1,5 +1,5 @@
 import { ESPLoader, Transport } from 'esptool-js';
-import { approvedUsbFilters } from './deviceCapability';
+import type { UsbDeviceFilter } from '../shared/usbDeviceProfileContracts';
 
 export type Esp32IdentityProbe = {
   vendorId: number;
@@ -22,11 +22,12 @@ type IdentityProbeSessionFactory = (port: SerialPort) => IdentityProbeSession;
 
 export async function probeEsp32Identity(
   navigatorLike: object,
+  filters: UsbDeviceFilter[],
   createSession: IdentityProbeSessionFactory = createEsp32ProbeSession,
 ): Promise<Esp32IdentityProbe> {
   if (!hasSerialChooser(navigatorLike)) throw new Error('Web Serial is not available in this browser.');
   const port = await navigatorLike.serial.requestPort({
-    filters: approvedUsbFilters.map(({ vendorId, productId }) => ({
+    filters: filters.map(({ vendorId, productId }) => ({
       usbVendorId: vendorId,
       usbProductId: productId,
     })),
@@ -34,6 +35,9 @@ export async function probeEsp32Identity(
   const info = port.getInfo();
   if (info.usbVendorId === undefined || info.usbProductId === undefined) {
     throw new Error('The selected serial device has no approved USB identity.');
+  }
+  if (!filters.some(({ vendorId, productId }) => vendorId === info.usbVendorId && productId === info.usbProductId)) {
+    throw new Error('The selected serial device is not allowed for this project.');
   }
 
   const session = createSession(port);

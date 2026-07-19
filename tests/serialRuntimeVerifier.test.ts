@@ -18,6 +18,7 @@ const profile: SerialVerificationProfile = {
 };
 
 const immediateProfile = { ...profile, timeoutMs: 1 };
+const usbFilters = [{ vendorId: 0x10c4, productId: 0xea60 }];
 
 describe('serial runtime verifier', () => {
   it('recognizes bounded startup markers without writing to the device', async () => {
@@ -34,8 +35,8 @@ describe('serial runtime verifier', () => {
         else controller.close();
       },
     });
-    const requestPort = vi.fn(async () => ({ open, close, readable }));
-    await expect(verifySerialRuntime({ serial: { requestPort } }, profile)).resolves.toEqual({
+    const requestPort = vi.fn(async () => ({ open, close, readable, getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) }));
+    await expect(verifySerialRuntime({ serial: { requestPort } }, profile, usbFilters)).resolves.toEqual({
       profileId: 'test-runtime',
       requiredMarkersObserved: true,
     });
@@ -51,7 +52,7 @@ describe('serial runtime verifier', () => {
         controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable, getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) }) } }, profile, usbFilters))
       .rejects.toThrow('Serial output was detected');
     expect(close).toHaveBeenCalledOnce();
   });
@@ -69,7 +70,7 @@ describe('serial runtime verifier', () => {
         else controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable, getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) }) } }, profile, usbFilters))
       .resolves.toEqual({ profileId: 'test-runtime', requiredMarkersObserved: true });
     expect(close).toHaveBeenCalledOnce();
   });
@@ -88,7 +89,7 @@ describe('serial runtime verifier', () => {
         else controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable, getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) }) } }, profile, usbFilters))
       .resolves.toEqual({ profileId: 'test-runtime', requiredMarkersObserved: true });
   });
 
@@ -100,7 +101,7 @@ describe('serial runtime verifier', () => {
         controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable, getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) }) } }, profile, usbFilters))
       .rejects.toThrow('No serial output was detected');
   });
 
@@ -122,11 +123,12 @@ describe('serial runtime verifier', () => {
     const port = {
       open: async () => undefined,
       close,
+      getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }),
       get readable() {
         return current;
       },
     };
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => port } }, profile))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => port } }, profile, usbFilters))
       .resolves.toEqual({ profileId: 'test-runtime', requiredMarkersObserved: true });
     expect(failedReader.releaseLock).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
@@ -136,7 +138,7 @@ describe('serial runtime verifier', () => {
     const close = vi.fn(async () => undefined);
     const cancel = vi.fn();
     const readable = new ReadableStream<Uint8Array>({ cancel });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, immediateProfile))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable, getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) }) } }, immediateProfile, usbFilters))
       .rejects.toThrow('No serial output was detected');
     expect(cancel).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
@@ -153,8 +155,9 @@ describe('serial runtime verifier', () => {
       };
       const readable = { getReader: () => reader } as unknown as ReadableStream<Uint8Array>;
       const verification = verifySerialRuntime(
-        { serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } },
+        { serial: { requestPort: async () => ({ open: async () => undefined, close, readable, getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) }) } },
         immediateProfile,
+        usbFilters,
       );
       const outcome = expect(verification).rejects.toThrow('No serial output was detected');
       await vi.advanceTimersByTimeAsync(1000);
@@ -173,7 +176,7 @@ describe('serial runtime verifier', () => {
       releaseLock: vi.fn(),
     };
     const readable = { getReader: () => reader } as unknown as ReadableStream<Uint8Array>;
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable, getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) }) } }, profile, usbFilters))
       .rejects.toThrow('serial connection failed');
     expect(reader.releaseLock).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
@@ -187,7 +190,7 @@ describe('serial runtime verifier', () => {
         controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable, getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) }) } }, profile, usbFilters))
       .rejects.toThrow('Test runtime verification did not observe every required marker');
   });
 
@@ -201,7 +204,7 @@ describe('serial runtime verifier', () => {
         controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable, getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) }) } }, profile, usbFilters))
       .rejects.toThrow('Test runtime verification stopped while creating the BLE server.');
   });
 
@@ -213,7 +216,7 @@ describe('serial runtime verifier', () => {
         controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable, getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) }) } }, profile, usbFilters))
       .rejects.toThrow('Test runtime verification did not observe every required marker');
   });
 
@@ -224,7 +227,7 @@ describe('serial runtime verifier', () => {
       releaseLock: () => { throw new Error('release failed'); },
     };
     const readable = { getReader: () => reader } as unknown as ReadableStream<Uint8Array>;
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable, getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) }) } }, profile, usbFilters))
       .rejects.toThrow('No serial output was detected');
     expect(close).toHaveBeenCalledOnce();
   });

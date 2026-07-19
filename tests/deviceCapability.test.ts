@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { approvedUsbFilters, detectDeviceCapability, requestUsbDescriptor } from '../src/client/deviceCapability';
+import { detectDeviceCapability, requestUsbDescriptor } from '../src/client/deviceCapability';
+
+const usbFilters = [{ vendorId: 0x10c4, productId: 0xea60 }];
 
 describe('browser device capability detection', () => {
   it('detects Web Serial without opening a chooser', () => {
@@ -52,12 +54,18 @@ describe('browser device capability detection', () => {
             transferOut() { throw new Error('must not be called'); },
           };
         },
-      },
-    });
+    },
+    }, usbFilters);
 
-    expect(receivedFilters).toEqual({ filters: approvedUsbFilters });
+    expect(receivedFilters).toEqual({ filters: usbFilters });
     expect(descriptor).toEqual({ vendorId: 0x10c4, productId: 0xea60, serialNumber: 'private-serial' });
     expect(openCalls).toBe(0);
     expect('open' in descriptor).toBe(false);
+  });
+
+  it('rejects a chooser result outside the project filters', async () => {
+    await expect(requestUsbDescriptor({
+      usb: { requestDevice: async () => ({ vendorId: 0xffff, productId: 0xffff }) },
+    }, usbFilters)).rejects.toThrow('not allowed for this project');
   });
 });
