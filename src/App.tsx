@@ -29,7 +29,7 @@ import { resolveLayoutMode, toggleLayoutMode } from './layoutMode';
 function App() {
   const roadex = useRoadexSession();
   const [prompt, setPrompt] = useState('');
-  const [sidebarPanel, setSidebarPanel] = useState<'projects' | null>('projects');
+  const [sidebarPanel, setSidebarPanel] = useState<'projects' | 'sessions' | 'devices' | 'security'>('projects');
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [layoutMode, setLayoutMode] = useState(() => resolveLayoutMode(
     readLayoutPreference(),
@@ -98,18 +98,17 @@ function App() {
               aria-expanded={item.label === 'Projects' ? sidebarPanel === 'projects' : undefined}
               aria-label={item.label}
               className={`nav-item${
-                (item.label === 'Projects' && sidebarPanel === 'projects') ||
-                (item.label === 'Sessions' && sidebarPanel === null)
+                item.label.toLowerCase() === sidebarPanel
                   ? ' active'
                   : ''
               }`}
               key={item.label}
               onClick={() => {
                 if (item.label === 'Projects') {
-                  setSidebarPanel((current) => current === 'projects' ? null : 'projects');
+                  setSidebarPanel('projects');
                   return;
                 }
-                setSidebarPanel(null);
+                setSidebarPanel(item.label.toLowerCase() as 'sessions' | 'devices' | 'security');
                 if (item.label === 'Security') document.getElementById('security-checks')?.scrollIntoView({ behavior: 'smooth' });
                 if (item.label === 'Devices') document.getElementById('device-status')?.scrollIntoView({ behavior: 'smooth' });
               }}
