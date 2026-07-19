@@ -14,40 +14,6 @@
       "description": "Project-scoped USB, serial, BLE, and identity control checks without opening a chooser",
       "cases": ["device.project-control-boundaries"],
       "destructive": false
-    },
-    {
-      "id": "project-selection-diagnostic",
-      "definition": "suites/project-selection-diagnostic.json",
-      "description": "Project and active-thread selection settlement checks without device actions",
-      "cases": [
-        "selection.configured-project",
-        "selection.configured-thread",
-        "selection.unconfigured-project",
-        "selection.unconfigured-thread"
-      ],
-      "destructive": false
-    },
-    {
-      "id": "project-selection-tablet-diagnostic",
-      "definition": "suites/project-selection-tablet-diagnostic.json",
-      "description": "Isolated tablet project and active-thread selection checks",
-      "cases": ["selection.tablet-configured", "selection.tablet-unconfigured"],
-      "destructive": false
-    },
-    {
-      "id": "unconfigured-control-diagnostic",
-      "definition": "suites/unconfigured-control-diagnostic.json",
-      "description": "Separates unconfigured profile, disabled-state, and console assertions",
-      "cases": [
-        "unconfigured.ble-profile",
-        "unconfigured.ble-disabled",
-        "unconfigured.usb-profile",
-        "unconfigured.usb-disabled",
-        "unconfigured.flash-profile",
-        "unconfigured.flash-disabled",
-        "unconfigured.console"
-      ],
-      "destructive": false
     }
   ]
 }

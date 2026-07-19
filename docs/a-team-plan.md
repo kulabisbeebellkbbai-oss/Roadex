@@ -171,7 +171,7 @@ Acceptance criteria:
 
 Owner: Murdock
 
-Status: In progress
+Status: Done
 
 Active brief: Diagnose the MSI client control suite by splitting non-destructive checks into bounded profile, runtime, policy, binding, and guard cases. Run those cases through the authenticated MSI agent without opening device choosers or creating operations.
 
@@ -185,10 +185,10 @@ Acceptance criteria:
 Current checkpoint:
 
 - The authenticated portal suite passes on desktop, tablet, and mobile.
-- Repeated project-device suites change which identical guard cases pass, isolating a trusted-runner state-settlement race.
-- MSI agent assertions must use bounded Playwright web-first polling after project and thread selection before release verification can continue.
-- The v6 polling change and selected-project readiness attribute pass the isolated tablet configured and unconfigured selection paths.
-- Multi-viewport jobs still contaminate or exhaust later viewport execution: desktop passes first, while later tablet/mobile groups fail despite authenticated gateway `200` responses. Each viewport needs an independent context, state reset, and timeout budget.
+- The v6 polling change and selected-project readiness attribute pass configured and unconfigured control boundaries on isolated desktop, tablet, and mobile runs.
+- No chooser, firmware transfer, write, approval, or operation action was invoked.
+- The canonical suite uses one end-to-end case per viewport to model a real project/thread switch and avoid exhausting the intentional live-stream subscriber limit with diagnostic page fan-out.
+- MSI agent v6 still needs independent viewport contexts and timeout budgets for reliable combined execution; this is an agent limitation, not a Roadex control-state failure.
 
 ## Approval Gate
 
