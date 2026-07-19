@@ -10,12 +10,14 @@ export type DeviceBridgePolicy = {
 
 export type BrowserDeviceCapability = {
   transport: 'webusb' | 'unavailable';
+  identityProbeAvailable: boolean;
   deviceAccessRequested: false;
 };
 
 export type DeviceInventoryBindingRef = {
   id: string;
   projectId: string;
+  identityVerificationAvailable: boolean;
 };
 
 export type DeviceDescriptorObservationRecord = {
@@ -28,7 +30,7 @@ export type DeviceDescriptorObservationRecord = {
   productId: number;
   descriptorFingerprint: string;
   status: 'observed';
-  verification: 'unverified';
+  verification: 'unverified' | 'verified' | 'mismatch';
   createdAt: string;
 };
 
@@ -42,6 +44,7 @@ export type DeviceDescriptorObservationPayload = {
   vendorId: number;
   productId: number;
   serialNumber?: string;
+  deviceMac?: string;
 };
 
 export type DeviceDescriptorObservationResponse =
@@ -78,6 +81,7 @@ export type DeviceInventoryBindingRecord = {
   id: string;
   projectId: string;
   deviceIdentityTag: string;
+  deviceMacTag?: string;
   allowedOperation: 'esp32.flash';
   secureBootExpected: 'required' | 'not-required' | 'unknown';
   flashEncryptionExpected: 'required' | 'not-required' | 'unknown';
@@ -86,6 +90,8 @@ export type DeviceInventoryBindingRecord = {
   createdAt: string;
   revokedAt?: string;
 };
+
+export type DeviceInventoryBindingPublic = Omit<DeviceInventoryBindingRecord, 'deviceMacTag'>;
 
 export type DeviceArtifactMetadataRegistrationPayload = {
   artifactPath: string;
@@ -115,7 +121,7 @@ export type DeviceBridgeMetadataResponse =
 export type DeviceInventoryBindingResponse =
   | {
       ok: true;
-      binding: DeviceInventoryBindingRecord;
+      binding: DeviceInventoryBindingPublic;
     }
   | {
       ok: false;

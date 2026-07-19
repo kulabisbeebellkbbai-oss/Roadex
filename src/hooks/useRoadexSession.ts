@@ -21,6 +21,7 @@ import type {
 } from '../shared/sessionContracts';
 import { isRunnerTerminal, lifecycleAfterTranscript, lifecycleForTerminalEvent } from './sessionSelection';
 import { detectDeviceCapability, requestUsbDescriptor } from '../client/deviceCapability';
+import { probeEsp32Identity } from '../client/esp32IdentityProbe';
 import type {
   BrowserDeviceCapability,
   DeviceBridgePolicy,
@@ -56,6 +57,7 @@ export type RoadexSessionState = {
   selectThread: (sessionId: string) => Promise<void>;
   attachManagedThread: (threadId: string, workspaceId: string) => Promise<void>;
   observeUsbDescriptor: () => Promise<void>;
+  verifyEsp32Identity: () => Promise<void>;
   retry: () => Promise<void>;
 };
 
@@ -419,6 +421,38 @@ export function useRoadexSession(): RoadexSessionState {
     }
   }, [deviceInventoryBindingRefs, session, token]);
 
+  const verifyEsp32Identity = useCallback(async () => {
+    if (!session) return;
+    const binding = deviceInventoryBindingRefs.find((candidate) => candidate.projectId === session.workspace.id);
+    if (!binding) {
+      setError('No active inventory binding is available for this project.');
+      return;
+    }
+    if (!binding.identityVerificationAvailable) {
+      setError('The active inventory binding must be recreated before identity verification is available.');
+      return;
+    }
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      const identity = await probeEsp32Identity(window.navigator);
+      const result = await submitDeviceDescriptorObservation(token, session.id, {
+        inventoryBindingId: binding.id,
+        ...identity,
+      });
+      setDescriptorObservation(result.observation);
+      setNotice(result.observation.verification === 'verified'
+        ? 'ESP32 identity verified against the project inventory binding.'
+        : 'ESP32 identity does not match the project inventory binding.');
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === 'NotFoundError') {
+        setNotice('Serial device selection was cancelled.');
+        return;
+      }
+      setError(caught instanceof Error ? caught.message : 'ESP32 identity verification failed.');
+    }
+  }, [deviceInventoryBindingRefs, session, token]);
+
   return useMemo(
     () => ({
       connectionState,
@@ -446,6 +480,7 @@ export function useRoadexSession(): RoadexSessionState {
       selectThread,
       attachManagedThread,
       observeUsbDescriptor,
+      verifyEsp32Identity,
       retry,
     }),
     [
@@ -465,6 +500,7 @@ export function useRoadexSession(): RoadexSessionState {
       deviceInventoryBindingRefs,
       openWorkspace,
       observeUsbDescriptor,
+      verifyEsp32Identity,
       reopenArchivedSession,
       retry,
       sendPrompt,

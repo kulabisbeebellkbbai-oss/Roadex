@@ -233,7 +233,7 @@ function sanitizeDescriptorObservation(record: DeviceDescriptorObservationRecord
     Number.isInteger(record.productId) && record.productId >= 0 && record.productId <= 65535 &&
     /^[a-f0-9]{64}$/i.test(record.descriptorFingerprint) &&
     record.status === 'observed' &&
-    record.verification === 'unverified' &&
+    ['unverified', 'verified', 'mismatch'].includes(record.verification) &&
     validIsoDate(record.createdAt)
   )) return undefined;
   return {
@@ -246,7 +246,7 @@ function sanitizeDescriptorObservation(record: DeviceDescriptorObservationRecord
     productId: record.productId,
     descriptorFingerprint: record.descriptorFingerprint.toLowerCase(),
     status: 'observed',
-    verification: 'unverified',
+    verification: record.verification,
     createdAt: new Date(record.createdAt).toISOString(),
   };
 }
@@ -298,6 +298,7 @@ function sanitizeInventoryBinding(record: DeviceInventoryBindingRecord): DeviceI
     validBoundedString(record.id, 128) &&
     validBoundedString(record.projectId, 128) &&
     /^[a-f0-9]{64}$/i.test(record.deviceIdentityTag) &&
+    (record.deviceMacTag === undefined || /^[a-f0-9]{64}$/i.test(record.deviceMacTag)) &&
     record.allowedOperation === 'esp32.flash' &&
     ['required', 'not-required', 'unknown'].includes(record.secureBootExpected) &&
     ['required', 'not-required', 'unknown'].includes(record.flashEncryptionExpected) &&
@@ -310,6 +311,7 @@ function sanitizeInventoryBinding(record: DeviceInventoryBindingRecord): DeviceI
     id: record.id.trim(),
     projectId: record.projectId.trim(),
     deviceIdentityTag: record.deviceIdentityTag.toLowerCase(),
+    ...(record.deviceMacTag ? { deviceMacTag: record.deviceMacTag.toLowerCase() } : {}),
     allowedOperation: 'esp32.flash',
     secureBootExpected: record.secureBootExpected,
     flashEncryptionExpected: record.flashEncryptionExpected,

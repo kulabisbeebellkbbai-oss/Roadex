@@ -400,7 +400,7 @@ function App() {
                 <strong>USB descriptor</strong>
                 <span>
                   {roadex.descriptorObservation
-                    ? `${formatUsbId(roadex.descriptorObservation.vendorId)}:${formatUsbId(roadex.descriptorObservation.productId)} · observed / unverified`
+                    ? `${formatUsbId(roadex.descriptorObservation.vendorId)}:${formatUsbId(roadex.descriptorObservation.productId)} · observed / ${roadex.descriptorObservation.verification}`
                     : 'No client descriptor observed'}
                 </span>
               </div>
@@ -416,6 +416,21 @@ function App() {
               >
                 <PlugZap size={17} />
                 Observe USB
+              </button>
+              <button
+                disabled={
+                  !roadex.deviceBridgePolicy?.descriptorObservationEnabled ||
+                  !roadex.browserDeviceCapability.identityProbeAvailable ||
+                  !session ||
+                  !roadex.deviceInventoryBindingRefs.some(
+                    (binding) => binding.projectId === session.workspace.id && binding.identityVerificationAvailable,
+                  )
+                }
+                onClick={() => void roadex.verifyEsp32Identity()}
+                type="button"
+              >
+                <KeyRound size={17} />
+                Verify ESP32
               </button>
             </div>
             <div className="timeline-note">

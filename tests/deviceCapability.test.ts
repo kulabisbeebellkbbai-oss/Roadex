@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { approvedUsbFilters, detectDeviceCapability, requestUsbDescriptor } from '../src/client/deviceCapability';
 
 describe('browser device capability detection', () => {
-  it('does not advertise Web Serial', () => {
+  it('detects Web Serial without opening a chooser', () => {
     let calls = 0;
     const capability = detectDeviceCapability({
       serial: { requestPort: () => { calls += 1; } },
       userAgent: 'Chrome desktop',
     });
 
-    expect(capability).toEqual({ transport: 'unavailable', deviceAccessRequested: false });
+    expect(capability).toEqual({ transport: 'unavailable', identityProbeAvailable: true, deviceAccessRequested: false });
     expect(calls).toBe(0);
   });
 
@@ -20,17 +20,19 @@ describe('browser device capability detection', () => {
       userAgent: 'Chrome Android',
     });
 
-    expect(capability).toEqual({ transport: 'webusb', deviceAccessRequested: false });
+    expect(capability).toEqual({ transport: 'webusb', identityProbeAvailable: false, deviceAccessRequested: false });
     expect(calls).toBe(0);
   });
 
   it('advertises desktop WebUSB without invoking it', () => {
     expect(detectDeviceCapability({ usb: { requestDevice() {} }, userAgent: 'Chrome desktop' })).toEqual({
       transport: 'webusb',
+      identityProbeAvailable: false,
       deviceAccessRequested: false,
     });
     expect(detectDeviceCapability({ usb: {}, userAgent: 'Chrome desktop' })).toEqual({
       transport: 'unavailable',
+      identityProbeAvailable: false,
       deviceAccessRequested: false,
     });
   });

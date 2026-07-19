@@ -20,10 +20,11 @@ type UsbChooser = {
 };
 
 export function detectDeviceCapability(navigatorLike: object): BrowserDeviceCapability {
+  const identityProbeAvailable = 'serial' in navigatorLike && isSerialChooser(navigatorLike.serial);
   if ('usb' in navigatorLike && isUsbChooser(navigatorLike.usb)) {
-    return { transport: 'webusb', deviceAccessRequested: false };
+    return { transport: 'webusb', identityProbeAvailable, deviceAccessRequested: false };
   }
-  return { transport: 'unavailable', deviceAccessRequested: false };
+  return { transport: 'unavailable', identityProbeAvailable, deviceAccessRequested: false };
 }
 
 export async function requestUsbDescriptor(navigatorLike: object): Promise<WebUsbDescriptor> {
@@ -40,4 +41,8 @@ export async function requestUsbDescriptor(navigatorLike: object): Promise<WebUs
 
 function isUsbChooser(value: unknown): value is UsbChooser {
   return Boolean(value && typeof value === 'object' && 'requestDevice' in value && typeof value.requestDevice === 'function');
+}
+
+function isSerialChooser(value: unknown): value is { requestPort: (...args: unknown[]) => Promise<unknown> } {
+  return Boolean(value && typeof value === 'object' && 'requestPort' in value && typeof value.requestPort === 'function');
 }

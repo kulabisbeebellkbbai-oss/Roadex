@@ -65,6 +65,7 @@ import type {
   DeviceDescriptorObservationRecord,
   DeviceDescriptorObservationResponse,
   DeviceInventoryBindingPayload,
+  DeviceInventoryBindingPublic,
   DeviceInventoryBindingRecord,
   DeviceInventoryBindingResponse,
 } from '../shared/deviceBridgeContracts.js';
@@ -203,7 +204,11 @@ export async function bootstrap(state: RoadexState, user: UserProfile): Promise<
     deviceInventoryBindingRefs: user.authMode === 'protected-gateway' && canAuthorizeInventoryBinding(user)
       ? [...state.deviceInventoryBindings.values()]
         .filter((binding) => binding.lifecycle === 'active' && getApprovedWorkspaces(user).some((workspace) => workspace.id === binding.projectId))
-        .map((binding) => ({ id: binding.id, projectId: binding.projectId }))
+        .map((binding) => ({
+          id: binding.id,
+          projectId: binding.projectId,
+          identityVerificationAvailable: Boolean(binding.deviceMacTag),
+        }))
       : [],
   };
 }
@@ -851,6 +856,13 @@ export function observeDeviceDescriptor(
   const descriptorFingerprint = createHmac('sha256', descriptorHmacKey)
     .update(`roadex-usb-descriptor:v1:${parsed.payload.vendorId}:${parsed.payload.productId}:${serial}`)
     .digest('hex');
+  const identityHmacKey = deviceBridgeIdentityHmacKey();
+  const observedMacTag = parsed.payload.deviceMac && identityHmacKey
+    ? deviceMacTag(identityHmacKey, session.workspace.id, parsed.payload.deviceMac)
+    : undefined;
+  const verification = !observedMacTag || !binding.deviceMacTag
+    ? 'unverified'
+    : observedMacTag === binding.deviceMacTag ? 'verified' : 'mismatch';
   const observation: DeviceDescriptorObservationRecord = {
     id: `descriptor-observation-${randomUUID()}`,
     userId: user.id,
@@ -861,7 +873,7 @@ export function observeDeviceDescriptor(
     productId: parsed.payload.productId,
     descriptorFingerprint,
     status: 'observed',
-    verification: 'unverified',
+    verification,
     createdAt: new Date().toISOString(),
   };
   const auditEvent = createBridgeAuditEvent(
@@ -872,7 +884,7 @@ export function observeDeviceDescriptor(
     session.id,
     'allowed',
     bridgeAuditSummary(auditHmacKey, {
-      classification: 'descriptor_observed',
+      classification: `descriptor_${verification}`,
       userId: user.id,
       sessionId: session.id,
       requestId: observation.id,
@@ -1071,6 +1083,8 @@ export function createDeviceInventoryBinding(
     identityHmacKey,
     normalizedDeviceIdentity(parsed.payload.normalizedDeviceIdentity, workspaceDecision.workspace.id),
   );
+  const mac = canonicalMacFromNormalizedIdentity(parsed.payload.normalizedDeviceIdentity);
+  const deviceMacIdentityTag = mac ? deviceMacTag(identityHmacKey, workspaceDecision.workspace.id, mac) : undefined;
   const duplicate = [...state.deviceInventoryBindings.values()].some(
     (binding) =>
       binding.projectId === workspaceDecision.workspace.id &&
@@ -1086,6 +1100,7 @@ export function createDeviceInventoryBinding(
     id: `inventory-binding-${randomUUID()}`,
     projectId: workspaceDecision.workspace.id,
     deviceIdentityTag,
+    ...(deviceMacIdentityTag ? { deviceMacTag: deviceMacIdentityTag } : {}),
     allowedOperation: 'esp32.flash',
     secureBootExpected: parsed.payload.secureBootExpected,
     flashEncryptionExpected: parsed.payload.flashEncryptionExpected,
@@ -1113,14 +1128,14 @@ export function createDeviceInventoryBinding(
   });
   state.deviceInventoryBindings.set(binding.id, binding);
   state.audit.events.push(auditEvent);
-  return { ok: true, binding };
+  return { ok: true, binding: publicDeviceInventoryBinding(binding) };
 }
 
 export function listDeviceInventoryBindings(
   state: RoadexState,
   user: UserProfile,
   projectId: string,
-): DeviceInventoryBindingRecord[] | undefined {
+): DeviceInventoryBindingPublic[] | undefined {
   if (
     !deviceBridgeMetadataRegistryEnabled() ||
     !deviceBridgeIdentityHmacKey() ||
@@ -1131,9 +1146,15 @@ export function listDeviceInventoryBindings(
   }
   const workspaceDecision = resolveWorkspaceForUser(user, projectId);
   if (!workspaceDecision.ok) return undefined;
-  return [...state.deviceInventoryBindings.values()].filter(
-    (binding) => binding.projectId === workspaceDecision.workspace.id && binding.lifecycle === 'active',
-  );
+  return [...state.deviceInventoryBindings.values()]
+    .filter((binding) => binding.projectId === workspaceDecision.workspace.id && binding.lifecycle === 'active')
+    .map(publicDeviceInventoryBinding);
+}
+
+function publicDeviceInventoryBinding(binding: DeviceInventoryBindingRecord): DeviceInventoryBindingPublic {
+  const publicBinding = { ...binding };
+  delete publicBinding.deviceMacTag;
+  return publicBinding;
 }
 
 export function revokeDeviceInventoryBinding(
@@ -1631,6 +1652,18 @@ function applicationHmacTag(key: string, value: string): string {
   return createHmac('sha256', key).update(value).digest('hex');
 }
 
+function deviceMacTag(key: string, projectId: string, mac: string): string {
+  return applicationHmacTag(key, `roadex-device-mac:v1:${projectId}:${canonicalDeviceMac(mac)}`);
+}
+
+function canonicalDeviceMac(value: string): string {
+  return value.trim().toLowerCase().replace(/-/g, ':');
+}
+
+function canonicalMacFromNormalizedIdentity(value: string): string | undefined {
+  return value.match(/(?:^|\s)mac\s*=\s*([a-f0-9]{2}(?::[a-f0-9]{2}){5})(?:\s|$)/i)?.[1]?.toLowerCase();
+}
+
 function pendingDeviceBridgeRequestCountForSession(state: RoadexState, sessionId: string): number {
   const now = Date.now();
   return [...state.deviceBridgeRequests.values()].filter(
@@ -1703,8 +1736,12 @@ function parseDescriptorObservationPayload(payload: unknown): {
   const record = payload as Record<string, unknown>;
   const keys = Object.keys(record).sort();
   const expectedKeys = record.serialNumber === undefined
-    ? ['inventoryBindingId', 'productId', 'vendorId']
-    : ['inventoryBindingId', 'productId', 'serialNumber', 'vendorId'];
+    ? record.deviceMac === undefined
+      ? ['inventoryBindingId', 'productId', 'vendorId']
+      : ['deviceMac', 'inventoryBindingId', 'productId', 'vendorId']
+    : record.deviceMac === undefined
+      ? ['inventoryBindingId', 'productId', 'serialNumber', 'vendorId']
+      : ['deviceMac', 'inventoryBindingId', 'productId', 'serialNumber', 'vendorId'];
   if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
     return { ok: false };
   }
@@ -1712,7 +1749,8 @@ function parseDescriptorObservationPayload(payload: unknown): {
     !boundedToken(record.inventoryBindingId, 128) ||
     !validUsbIdentifier(record.vendorId) ||
     !validUsbIdentifier(record.productId) ||
-    (record.serialNumber !== undefined && !validUsbSerial(record.serialNumber))
+    (record.serialNumber !== undefined && !validUsbSerial(record.serialNumber)) ||
+    (record.deviceMac !== undefined && !validDeviceMac(record.deviceMac))
   ) return { ok: false };
   return {
     ok: true,
@@ -1721,6 +1759,7 @@ function parseDescriptorObservationPayload(payload: unknown): {
       vendorId: record.vendorId,
       productId: record.productId,
       ...(record.serialNumber === undefined ? {} : { serialNumber: record.serialNumber.normalize('NFC').trim() }),
+      ...(record.deviceMac === undefined ? {} : { deviceMac: canonicalDeviceMac(record.deviceMac) }),
     },
   };
 }
@@ -1731,6 +1770,10 @@ function validUsbIdentifier(value: unknown): value is number {
 
 function validUsbSerial(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0 && value.trim().length <= 128 && !/[\r\n\0]/.test(value);
+}
+
+function validDeviceMac(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{2}(?::[a-f0-9]{2}){5}$/i.test(value.trim().replace(/-/g, ':'));
 }
 
 function approvedUsbDescriptor(vendorId: number, productId: number): boolean {

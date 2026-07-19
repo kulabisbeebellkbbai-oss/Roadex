@@ -242,6 +242,54 @@ describe('Roadex session service', () => {
     }
   });
 
+  it('verifies or rejects a probed ESP32 MAC against the inventory binding without creating an operation', async () => {
+    const enabled = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED;
+    const descriptorKey = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY;
+    const identityKey = process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY;
+    const auditKey = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    try {
+      process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY = 'descriptor-observation-hmac-key-test-32';
+      process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY = testIdentityHmacKey();
+      process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const created = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const expectedMacTag = createHmac('sha256', testIdentityHmacKey())
+        .update('roadex-device-mac:v1:roadex:aa:bb:cc:dd:ee:ff')
+        .digest('hex');
+      const binding = seedDeviceInventoryBinding(state, 'binding', 'roadex', { deviceMacTag: expectedMacTag });
+
+      const verified = observeDeviceDescriptor(state, user, created.session.id, {
+        inventoryBindingId: binding.id,
+        vendorId: 0x10c4,
+        productId: 0xea60,
+        deviceMac: 'AA-BB-CC-DD-EE-FF',
+      });
+      const mismatch = observeDeviceDescriptor(state, user, created.session.id, {
+        inventoryBindingId: binding.id,
+        vendorId: 0x10c4,
+        productId: 0xea60,
+        deviceMac: '00:11:22:33:44:55',
+      });
+
+      expect(verified).toMatchObject({ ok: true, observation: { verification: 'verified' } });
+      expect(mismatch).toMatchObject({ ok: true, observation: { verification: 'mismatch' } });
+      expect(JSON.stringify(verified)).not.toContain('aa:bb:cc:dd:ee:ff');
+      expect(JSON.stringify(mismatch)).not.toContain('00:11:22:33:44:55');
+      expect(state.deviceBridgeRequests.size).toBe(0);
+      expect(state.deviceBridgeApprovals.size).toBe(0);
+      expect(state.deviceBridgeOperations.size).toBe(0);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED', enabled);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY', descriptorKey);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY', identityKey);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', auditKey);
+    }
+  });
+
   it('rejects unsupported USB descriptors and leaves observation state unchanged', async () => {
     const enabled = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED;
     const descriptorKey = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY;
@@ -883,6 +931,10 @@ describe('Roadex session service', () => {
       expect(created.binding.deviceIdentityTag).toMatch(/^[a-f0-9]{64}$/);
       expect(created.binding.deviceIdentityTag).toBe(expectedIdentityTag);
       expect(created.binding.deviceIdentityTag).not.toBe(auditKeyTag);
+      expect(state.deviceInventoryBindings.get(created.binding.id)?.deviceMacTag).toBe(createHmac('sha256', testIdentityHmacKey())
+        .update('roadex-device-mac:v1:roadex:aa:bb:cc:dd:ee:ff')
+        .digest('hex'));
+      expect('deviceMacTag' in created.binding).toBe(false);
       expect(JSON.stringify(created.binding)).not.toContain('AA:BB');
       expect(JSON.stringify(created.binding)).not.toContain('USB-SERIAL-123');
       expect(listDeviceInventoryBindings(state, admin, 'roadex')).toEqual([created.binding]);
