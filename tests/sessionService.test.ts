@@ -1,4 +1,4 @@
-import { closeSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, symlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash, createHmac } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -15,6 +15,8 @@ import {
   createMockSession,
   createSessionFromApi,
   cancelSessionRun,
+  confirmDeviceBridgeProbe,
+  deliverConfirmedDeviceArtifact,
   listDeviceArtifactMetadata,
   listDeviceInventoryBindings,
   listArchivedSessions,
@@ -37,6 +39,7 @@ import type {
   DeviceInventoryBindingRecord,
 } from '../src/shared/deviceBridgeContracts';
 import type { RunnerPromptRequest, SessionRunner } from '../src/server/codexRunner';
+import { storeDeviceArtifact } from '../src/server/deviceArtifactVault';
 
 const workspace: WorkspaceRef = {
   id: 'roadex',
@@ -660,6 +663,68 @@ describe('Roadex session service', () => {
     }
   });
 
+  it('delivers only digest-verified vault bytes after fresh owner confirmation', async () => {
+    const names = [
+      'ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED',
+      'ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED',
+      'ROADEX_DEVICE_BRIDGE_PROBE_ENABLED',
+      'ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY',
+      'ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY',
+      'ROADEX_DEVICE_ARTIFACT_VAULT',
+    ] as const;
+    const originals = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    try {
+      process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_PROBE_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+      process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY = testIdentityHmacKey();
+      process.env.ROADEX_DEVICE_ARTIFACT_VAULT = mkdtempSync(join(tmpdir(), 'roadex-artifact-vault-'));
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const session = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      if (!session.ok) return;
+      const bytes = Buffer.from('digest-verified-firmware');
+      const sha256 = createHash('sha256').update(bytes).digest('hex');
+      const seeded = seedDeviceArtifact(state, session.session.id);
+      state.deviceArtifacts.set(seeded.id, {
+        ...seeded,
+        byteLength: bytes.byteLength,
+        sha256,
+        storageReference: storeDeviceArtifact(bytes, sha256),
+      });
+      const deviceMac = 'aa:bb:cc:dd:ee:ff';
+      const macTag = createHmac('sha256', testIdentityHmacKey())
+        .update(`roadex-device-mac:v1:roadex:${deviceMac}`)
+        .digest('hex');
+      seedDeviceInventoryBinding(state, 'binding', 'roadex', { deviceMacTag: macTag });
+      const intake = requestDeviceBridgeIntake(state, user, session.session.id, {
+        ...validDeviceBridgeRequest(), artifactSha256: sha256,
+      });
+      if (!intake.ok) return;
+      const approval = approveDeviceBridgeRequest(state, user, intake.request.id);
+      if (!approval.ok) return;
+      const started = startDeviceBridgeProbe(state, user, approval.approval.id);
+      if (!started.ok) return;
+
+      expect(deliverConfirmedDeviceArtifact(state, user, started.operation.id)).toEqual({ ok: false });
+      const verified = submitDeviceBridgeProbe(state, user, started.operation.id, { deviceMac, artifactSha256: sha256 });
+      if (!verified.ok) return;
+      expect(deliverConfirmedDeviceArtifact(state, user, started.operation.id)).toEqual({ ok: false });
+      expect(confirmDeviceBridgeProbe(state, user, started.operation.id, {})).toMatchObject({
+        ok: true, operation: { phase: 'confirmation' },
+      });
+      expect(deliverConfirmedDeviceArtifact(state, user, started.operation.id)).toEqual({ ok: true, bytes, sha256 });
+      expect(state.deviceBridgeOperations.get(started.operation.id)?.phase).toBe('confirmation');
+      expect(state.audit.events.at(-1)?.summary).toContain('classification=artifact_delivered');
+
+      writeFileSync(join(process.env.ROADEX_DEVICE_ARTIFACT_VAULT, `${storeDeviceArtifact(bytes, sha256)}.bin`), 'tampered');
+      expect(deliverConfirmedDeviceArtifact(state, user, started.operation.id)).toEqual({ ok: false });
+    } finally {
+      for (const name of names) restoreEnv(name, originals[name]);
+    }
+  });
+
   it('closes a probe-only operation on identity mismatch', async () => {
     const names = [
       'ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED',
@@ -846,10 +911,12 @@ describe('Roadex session service', () => {
     const originalRegistry = process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED;
     const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
     const originalWorkspaces = process.env.ROADEX_WORKSPACES_JSON;
+    const originalVault = process.env.ROADEX_DEVICE_ARTIFACT_VAULT;
     const fixture = createArtifactFixture('server-produced-firmware-v1');
     process.env.ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED = 'true';
     process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
     process.env.ROADEX_WORKSPACES_JSON = workspaceEnv(fixture.root);
+    process.env.ROADEX_DEVICE_ARTIFACT_VAULT = join(fixture.root, '.artifact-vault');
     try {
       const state = createInitialState(fakeRunner('ok', 'thread-from-run'), createMemoryPersistence());
       const user: UserProfile = { ...protectedGatewayUser(), id: 'artifact-owner', roles: ['user'] };
@@ -879,8 +946,12 @@ describe('Roadex session service', () => {
       });
       if (!registered.ok) return;
       expect(registered.artifact).not.toHaveProperty('storageReference');
-      expect(state.deviceArtifacts.get(registered.artifact.id)?.storageReference).toMatch(/^artifact-ref-/);
+      const storageReference = state.deviceArtifacts.get(registered.artifact.id)?.storageReference;
+      expect(storageReference).toMatch(/^artifact-sha256-[a-f0-9]{64}$/);
       expect(state.deviceArtifacts.get(registered.artifact.id)?.storageReference).not.toContain('/');
+      expect(readFileSync(join(process.env.ROADEX_DEVICE_ARTIFACT_VAULT, `${storageReference}.bin`))).toEqual(
+        readFileSync(join(fixture.root, 'build/firmware.bin')),
+      );
       expect(registered.artifact.id).toMatch(/^artifact-/);
       expect(Date.parse(registered.artifact.expiresAt)).toBeGreaterThan(Date.parse(registered.artifact.createdAt));
       expect(listDeviceArtifactMetadata(state, user, response.session.id)).toEqual([registered.artifact]);
@@ -904,6 +975,7 @@ describe('Roadex session service', () => {
       restoreEnv('ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED', originalRegistry);
       restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
       restoreEnv('ROADEX_WORKSPACES_JSON', originalWorkspaces);
+      restoreEnv('ROADEX_DEVICE_ARTIFACT_VAULT', originalVault);
     }
   });
 

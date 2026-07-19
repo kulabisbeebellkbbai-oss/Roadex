@@ -50,6 +50,7 @@ export type AuditEvent = {
     | 'device_bridge.descriptor_observation'
     | 'device_bridge.request'
     | 'device_bridge.operation_probe'
+    | 'device_bridge.artifact_delivery'
     | 'security.denied';
   resource: string;
   outcome: 'allowed' | 'denied';

@@ -41,9 +41,9 @@ describe('device bridge intake policy', () => {
       expect(isAvailableDeviceBridgeProbeRoute('POST', '/api/device-bridge/approvals/approval-1/start-probe')).toBe(true);
       expect(isAvailableDeviceBridgeProbeRoute('POST', '/api/device-bridge/operations/operation-1/probe')).toBe(true);
       expect(isAvailableDeviceBridgeProbeRoute('POST', '/api/device-bridge/operations/operation-1/confirm')).toBe(true);
+      expect(isAvailableDeviceBridgeProbeRoute('GET', '/api/device-bridge/operations/operation-1/artifact')).toBe(true);
       for (const [method, path] of [
         ['GET', '/api/device-bridge/operations/operation-1/probe'],
-        ['GET', '/api/device-bridge/operations/operation-1/artifact'],
         ['POST', '/api/device-bridge/operations/operation-1/authorize-write'],
         ['POST', '/api/device-bridge/operations/operation-1/flash'],
         ['POST', '/api/device-bridge/operations/operation-1/cancel'],

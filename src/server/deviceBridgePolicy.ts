@@ -115,6 +115,7 @@ export function isAvailableDeviceBridgeProbeRoute(method: string | undefined, pa
   if (method === 'POST' && /^\/api\/device-bridge\/approvals\/[^/]+\/start-probe$/.test(pathname)) return true;
   if (method === 'POST' && /^\/api\/device-bridge\/operations\/[^/]+\/probe$/.test(pathname)) return true;
   if (method === 'POST' && /^\/api\/device-bridge\/operations\/[^/]+\/confirm$/.test(pathname)) return true;
+  if (method === 'GET' && /^\/api\/device-bridge\/operations\/[^/]+\/artifact$/.test(pathname)) return true;
   return false;
 }
 

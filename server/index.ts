@@ -19,6 +19,7 @@ import {
   requestDeviceBridgeIntake,
   startDeviceBridgeProbe,
   confirmDeviceBridgeProbe,
+  deliverConfirmedDeviceArtifact,
   revokeDeviceArtifactMetadata,
   revokeDeviceInventoryBinding,
   subscribeToSessionStream,
@@ -232,6 +233,26 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readJson<unknown>(req);
     const result = confirmDeviceBridgeProbe(state, auth.user, decodeURIComponent(deviceBridgeConfirmationMatch[1]), body);
     sendJson(res, result.ok ? 200 : 403, result);
+    return;
+  }
+
+  const deviceBridgeArtifactDeliveryMatch = url.pathname.match(/^\/api\/device-bridge\/operations\/([^/]+)\/artifact$/);
+  if (deviceBridgeArtifactDeliveryMatch && isAvailableDeviceBridgeProbeRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const result = deliverConfirmedDeviceArtifact(state, auth.user, decodeURIComponent(deviceBridgeArtifactDeliveryMatch[1]));
+    if (!result.ok) {
+      sendJson(res, 403, { error: { code: 'device_bridge_denied', message: 'Firmware delivery denied.', gate: 'device-bridge' } });
+      return;
+    }
+    res.writeHead(200, {
+      'cache-control': 'no-store',
+      'content-type': 'application/octet-stream',
+      'content-length': result.bytes.byteLength,
+      'x-content-type-options': 'nosniff',
+      'x-roadex-artifact-sha256': result.sha256,
+    });
+    res.end(result.bytes);
     return;
   }
 

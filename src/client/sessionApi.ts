@@ -151,10 +151,34 @@ export async function runDeviceBridgeProbe(
   return completed.operation;
 }
 
-export async function confirmVerifiedDeviceProbe(token: string | undefined, operationId: string): Promise<void> {
+export async function confirmVerifiedDeviceProbe(token: string | undefined, operationId: string): Promise<DeviceBridgeOperationPublic> {
   const result = await request<DeviceBridgeConfirmationResponse>(`/Roadex/api/device-bridge/operations/${encodeURIComponent(operationId)}/confirm`, { method: 'POST', token, body: {}, requestId: crypto.randomUUID() });
   if (!result.ok) throw new Error(result.reason);
   if (result.operation.phase !== 'confirmation') throw new Error('Device confirmation was not recorded.');
+  return result.operation;
+}
+
+export async function loadVerifiedFirmware(
+  token: string | undefined,
+  operation: DeviceBridgeOperationPublic,
+): Promise<ArrayBuffer> {
+  if (operation.phase !== 'confirmation') throw new Error('Fresh target confirmation is required.');
+  const response = await fetch(`/Roadex/api/device-bridge/operations/${encodeURIComponent(operation.id)}/artifact`, {
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    cache: 'no-store',
+  });
+  if (!response.ok) throw new Error(`Firmware delivery failed with status ${response.status}`);
+  if (response.headers.get('content-type')?.split(';', 1)[0] !== 'application/octet-stream') {
+    throw new Error('Firmware delivery returned an unexpected content type.');
+  }
+  const bytes = await response.arrayBuffer();
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const actualSha256 = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
+  const headerSha256 = response.headers.get('x-roadex-artifact-sha256');
+  if (actualSha256 !== operation.artifactSha256 || headerSha256 !== operation.artifactSha256) {
+    throw new Error('Firmware digest verification failed.');
+  }
+  return bytes;
 }
 
 export async function cancelSession(token: string | undefined, sessionId: string): Promise<CancelResponse> {

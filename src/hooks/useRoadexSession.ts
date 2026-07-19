@@ -11,6 +11,7 @@ import {
   reopenSession,
   runDeviceBridgeProbe,
   confirmVerifiedDeviceProbe,
+  loadVerifiedFirmware,
   subscribeSessionStream,
   submitPrompt,
   submitDeviceDescriptorObservation,
@@ -50,6 +51,7 @@ export type RoadexSessionState = {
   descriptorObservation?: DeviceDescriptorObservationPublic;
   pendingProbeApproval?: DeviceBridgeApprovalPublic;
   pendingProbeConfirmation?: DeviceBridgeOperationPublic;
+  verifiedFirmwareReady: boolean;
   session?: RoadexSession;
   archivedSessions: RoadexSession[];
   transcript: StreamEvent[];
@@ -69,6 +71,7 @@ export type RoadexSessionState = {
   createProbeApproval: () => Promise<void>;
   runControlledProbe: () => Promise<void>;
   confirmControlledProbe: () => Promise<void>;
+  loadConfirmedFirmware: () => Promise<void>;
   retry: () => Promise<void>;
 };
 
@@ -84,6 +87,8 @@ export function useRoadexSession(): RoadexSessionState {
   const [descriptorObservation, setDescriptorObservation] = useState<DeviceDescriptorObservationPublic>();
   const [pendingProbeApproval, setPendingProbeApproval] = useState<DeviceBridgeApprovalPublic>();
   const [pendingProbeConfirmation, setPendingProbeConfirmation] = useState<DeviceBridgeOperationPublic>();
+  const verifiedFirmwareBytes = useRef<ArrayBuffer | undefined>(undefined);
+  const [verifiedFirmwareReady, setVerifiedFirmwareReady] = useState(false);
   const browserDeviceCapability = useMemo(() => detectDeviceCapability(window.navigator), []);
   const [session, setSession] = useState<RoadexSession>();
   const [archivedSessions, setArchivedSessions] = useState<RoadexSession[]>([]);
@@ -480,6 +485,8 @@ export function useRoadexSession(): RoadexSessionState {
     }
     setError(undefined);
     setNotice(undefined);
+    verifiedFirmwareBytes.current = undefined;
+    setVerifiedFirmwareReady(false);
     try {
       const artifacts = await listActiveDeviceArtifacts(token, session.id);
       const artifact = artifacts[0];
@@ -509,6 +516,8 @@ export function useRoadexSession(): RoadexSessionState {
     }
     setError(undefined);
     setNotice(undefined);
+    verifiedFirmwareBytes.current = undefined;
+    setVerifiedFirmwareReady(false);
     try {
       const operation = await runDeviceBridgeProbe(token, pendingProbeApproval, verifiedDeviceMac.current);
       verifiedDeviceMac.current = undefined;
@@ -524,11 +533,25 @@ export function useRoadexSession(): RoadexSessionState {
     if (!pendingProbeConfirmation) return;
     setError(undefined);
     try {
-      await confirmVerifiedDeviceProbe(token, pendingProbeConfirmation.id);
-      setPendingProbeConfirmation(undefined);
-      setNotice('Verified target confirmed. No firmware or device write authority was created.');
+      const operation = await confirmVerifiedDeviceProbe(token, pendingProbeConfirmation.id);
+      setPendingProbeConfirmation(operation);
+      setNotice('Verified target confirmed. Firmware delivery is available without device write authority.');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Target confirmation failed.');
+    }
+  }, [pendingProbeConfirmation, token]);
+
+  const loadConfirmedFirmware = useCallback(async () => {
+    if (!pendingProbeConfirmation || pendingProbeConfirmation.phase !== 'confirmation') return;
+    setError(undefined);
+    setVerifiedFirmwareReady(false);
+    verifiedFirmwareBytes.current = undefined;
+    try {
+      verifiedFirmwareBytes.current = await loadVerifiedFirmware(token, pendingProbeConfirmation);
+      setVerifiedFirmwareReady(true);
+      setNotice('Firmware verified in browser memory. No device write was performed.');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Firmware verification failed.');
     }
   }, [pendingProbeConfirmation, token]);
 
@@ -546,6 +569,7 @@ export function useRoadexSession(): RoadexSessionState {
       descriptorObservation,
       pendingProbeApproval,
       pendingProbeConfirmation,
+      verifiedFirmwareReady,
       session,
       archivedSessions,
       transcript,
@@ -565,6 +589,7 @@ export function useRoadexSession(): RoadexSessionState {
       createProbeApproval,
       runControlledProbe,
       confirmControlledProbe,
+      loadConfirmedFirmware,
       retry,
     }),
     [
@@ -583,6 +608,7 @@ export function useRoadexSession(): RoadexSessionState {
       descriptorObservation,
       pendingProbeApproval,
       pendingProbeConfirmation,
+      verifiedFirmwareReady,
       deviceInventoryBindingRefs,
       openWorkspace,
       observeUsbDescriptor,
@@ -590,6 +616,7 @@ export function useRoadexSession(): RoadexSessionState {
       createProbeApproval,
       runControlledProbe,
       confirmControlledProbe,
+      loadConfirmedFirmware,
       reopenArchivedSession,
       retry,
       sendPrompt,

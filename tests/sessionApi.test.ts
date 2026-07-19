@@ -110,6 +110,42 @@ describe('Roadex client CSRF contract', () => {
     expect(calls.some((call) => call.path.includes('start-probe'))).toBe(false);
   });
 
+  it('keeps delivered firmware in memory only after SHA-256 verification', async () => {
+    const bytes = new TextEncoder().encode('verified firmware bytes');
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    const sha256 = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(bytes, {
+      status: 200,
+      headers: {
+        'cache-control': 'no-store',
+        'content-type': 'application/octet-stream',
+        'x-roadex-artifact-sha256': sha256,
+      },
+    })));
+
+    const { loadVerifiedFirmware } = await import('../src/client/sessionApi');
+    const received = await loadVerifiedFirmware(undefined, {
+      id: 'operation',
+      approvalId: 'approval',
+      sessionId: 'session',
+      projectId: 'project',
+      artifactId: 'artifact',
+      artifactSha256: sha256,
+      inventoryBindingId: 'binding',
+      operation: 'esp32.flash',
+      phase: 'confirmation',
+      verifiedArtifactSha256: sha256,
+      nextEventSequence: 1,
+      phaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      reportingExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    expect(new Uint8Array(received)).toEqual(bytes);
+    expect(fetch).toHaveBeenCalledWith('/Roadex/api/device-bridge/operations/operation/artifact', expect.objectContaining({ cache: 'no-store' }));
+  });
+
   it('runs only the approved probe endpoints with JSON and CSRF', async () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

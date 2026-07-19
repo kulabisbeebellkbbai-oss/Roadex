@@ -453,17 +453,25 @@ function App() {
                 Run controlled probe
               </button>
               <button
-                disabled={!roadex.pendingProbeConfirmation}
+                disabled={!roadex.pendingProbeConfirmation || roadex.pendingProbeConfirmation.phase !== 'verified'}
                 onClick={() => void roadex.confirmControlledProbe()}
                 type="button"
               >
                 <ShieldCheck size={17} />
                 Confirm verified target
               </button>
+              <button
+                disabled={!roadex.pendingProbeConfirmation || roadex.pendingProbeConfirmation.phase !== 'confirmation'}
+                onClick={() => void roadex.loadConfirmedFirmware()}
+                type="button"
+              >
+                <ShieldCheck size={17} />
+                Verify firmware bytes
+              </button>
             </div>
             <div className="timeline-note">
               <Clock3 size={18} />
-              <span>Probe approval cannot transfer firmware or write to the device.</span>
+              <span>{roadex.verifiedFirmwareReady ? 'Firmware is digest-verified in browser memory; device writes remain disabled.' : 'Firmware delivery cannot write to the device.'}</span>
             </div>
           </article>
         </section>

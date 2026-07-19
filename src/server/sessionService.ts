@@ -6,6 +6,7 @@ import {
   lstatSync,
   openSync,
   readSync,
+  readFileSync,
   realpathSync,
 } from 'node:fs';
 import { basename, extname, isAbsolute, resolve, sep } from 'node:path';
@@ -32,6 +33,7 @@ import {
 } from './statePersistence.js';
 import { canAccessManagedCodexProjects, getApprovedWorkspaces, resolveWorkspaceForUser } from './workspacePolicy.js';
 import { loadManagedCodexThreads } from './codexProjectsRegistry.js';
+import { maxDeviceArtifactBytes, readDeviceArtifact, storeDeviceArtifact } from './deviceArtifactVault.js';
 import {
   firstMilestoneGates,
   type CreateSessionRequest,
@@ -990,6 +992,35 @@ export function confirmDeviceBridgeProbe(
   return { ok: true, operation: publicDeviceBridgeOperation(updated) };
 }
 
+export function deliverConfirmedDeviceArtifact(
+  state: RoadexState,
+  user: UserProfile,
+  operationId: string,
+): { ok: true; bytes: Buffer; sha256: string } | { ok: false } {
+  const auditHmacKey = deviceBridgeAuditHmacKey();
+  const operation = state.deviceBridgeOperations.get(operationId);
+  const session = operation && getOwnedSession(state.sessions, user.id, operation.sessionId);
+  const artifact = operation && state.deviceArtifacts.get(operation.artifactId);
+  const binding = operation && state.deviceInventoryBindings.get(operation.inventoryBindingId);
+  if (
+    !deviceBridgeProbeEnabled() || !auditHmacKey || user.authMode !== 'protected-gateway' ||
+    !operation || operation.userId !== user.id || operation.phase !== 'confirmation' || expiredIso(operation.phaseExpiresAt) ||
+    !session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle !== 'ready' ||
+    !artifact || artifact.status !== 'active' || expiredIso(artifact.expiresAt) ||
+    artifact.projectId !== operation.projectId || artifact.sessionId !== operation.sessionId ||
+    artifact.sha256 !== operation.artifactSha256 || artifact.sha256 !== operation.verifiedArtifactSha256 ||
+    !validActiveInventoryBindingForRequest(binding, operation.projectId) ||
+    binding.deviceIdentityTag !== operation.deviceIdentityTag || binding.deviceMacTag !== operation.actualDeviceIdentityTag
+  ) return { ok: false };
+
+  const bytes = readDeviceArtifact(artifact.storageReference, artifact.byteLength, artifact.sha256);
+  if (!bytes) return { ok: false };
+  const auditEvent = createBridgeAuditEvent(state, auditHmacKey, user, 'device_bridge.artifact_delivery', operation.id, 'allowed', bridgeAuditSummary(auditHmacKey, { classification: 'artifact_delivered', userId: user.id, sessionId: operation.sessionId, requestId: operation.id }));
+  persistStateSnapshot(state, { auditEvents: [...state.audit.events, auditEvent] });
+  state.audit.events.push(auditEvent);
+  return { ok: true, bytes, sha256: artifact.sha256 };
+}
+
 export function observeDeviceDescriptor(
   state: RoadexState,
   user: UserProfile,
@@ -1109,6 +1140,12 @@ export function registerDeviceArtifactMetadata(
   if (activeDeviceArtifactCountForProject(state, session.workspace.id) >= 50) {
     return denyDeviceBridgeMetadata(state, user, session.id, 'quota', auditHmacKey);
   }
+  let storageReference: string;
+  try {
+    storageReference = storeDeviceArtifact(artifactFile.bytes, artifactFile.metadata.sha256);
+  } catch {
+    return denyDeviceBridgeMetadata(state, user, session.id, 'audit', auditHmacKey);
+  }
 
   const createdAt = new Date().toISOString();
   const artifact: DeviceArtifactMetadata = {
@@ -1122,7 +1159,7 @@ export function registerDeviceArtifactMetadata(
     mediaType: 'application/octet-stream',
     format: 'esp32-firmware-bin',
     sha256: artifactFile.metadata.sha256,
-    storageReference: `artifact-ref-${randomUUID()}`,
+    storageReference,
     status: 'active',
     createdAt,
     expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60_000).toISOString(),
@@ -2027,6 +2064,7 @@ function readProjectArtifactMetadata(
 ): {
   ok: true;
   metadata: Pick<DeviceArtifactMetadata, 'label' | 'byteLength' | 'sha256'>;
+  bytes: Buffer;
 } | {
   ok: false;
 } {
@@ -2042,12 +2080,14 @@ function readProjectArtifactMetadata(
     if (hasSymlinkPathComponent(root, payload.artifactPath)) return { ok: false };
     fd = openSync(artifactPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     const before = fstatSync(fd);
-    if (!before.isFile() || before.size <= 0 || before.size > 16 * 1024 * 1024) return { ok: false };
+    if (!before.isFile() || before.size <= 0 || before.size > maxDeviceArtifactBytes) return { ok: false };
     const descriptorPath = realpathSync(`/proc/self/fd/${fd}`);
     if (!isPathWithin(root, descriptorPath)) return { ok: false };
     if (extname(descriptorPath).toLowerCase() !== '.bin') return { ok: false };
     const hashed = hashOpenFileDescriptor(fd, before.size);
     if (!hashed.ok) return { ok: false };
+    const bytes = readFileSync(fd);
+    if (bytes.byteLength !== before.size || createHash('sha256').update(bytes).digest('hex') !== hashed.sha256) return { ok: false };
     const after = fstatSync(fd);
     if (
       before.dev !== after.dev ||
@@ -2062,6 +2102,7 @@ function readProjectArtifactMetadata(
         byteLength: hashed.byteLength,
         sha256: hashed.sha256,
       },
+      bytes,
     };
   } catch {
     return { ok: false };
@@ -2085,9 +2126,9 @@ function hashOpenFileDescriptor(fd: number, expectedSize: number): {
     if (bytesRead <= 0) return { ok: false };
     hash.update(buffer.subarray(0, bytesRead));
     offset += bytesRead;
-    if (offset > 16 * 1024 * 1024) return { ok: false };
+    if (offset > maxDeviceArtifactBytes) return { ok: false };
   }
-  if (offset <= 0 || offset !== expectedSize || offset > 16 * 1024 * 1024) return { ok: false };
+  if (offset <= 0 || offset !== expectedSize || offset > maxDeviceArtifactBytes) return { ok: false };
   return {
     ok: true,
     byteLength: offset,
