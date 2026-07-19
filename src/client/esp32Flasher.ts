@@ -21,7 +21,7 @@ export async function flashVerifiedEsp32(
   navigatorLike: object,
   firmware: ArrayBuffer,
   expectedDeviceMac: string,
-  authorizeWrite: (observedDeviceMac: string) => Promise<void>,
+  authorizeWrite: (observedDeviceMac: string) => Promise<{ phaseExpiresAt: string }>,
   createSession: FlashSessionFactory = createEsp32FlashSession,
 ): Promise<void> {
   if (!hasSerialChooser(navigatorLike)) throw new Error('Web Serial is not available in this browser.');
@@ -43,7 +43,11 @@ export async function flashVerifiedEsp32(
   try {
     const observedMac = canonicalMac(await session.readMac());
     if (observedMac !== expectedMac) throw new Error('The selected ESP32 does not match the verified inventory device.');
-    await authorizeWrite(observedMac);
+    const authorization = await authorizeWrite(observedMac);
+    const expiresAt = Date.parse(authorization.phaseExpiresAt);
+    if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt) {
+      throw new Error('Firmware write authorization expired before the write started.');
+    }
     await session.writeFirmware(bytes);
     await session.reset();
   } finally {

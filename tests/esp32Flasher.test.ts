@@ -10,7 +10,7 @@ describe('verified ESP32 flasher', () => {
       navigatorLike,
       Uint8Array.from([0xe9, 1, 2, 3]).buffer,
       'aa:bb:cc:dd:ee:ff',
-      async (observedMac) => { events.push(`authorized:${observedMac}`); },
+      async (observedMac) => { events.push(`authorized:${observedMac}`); return futureAuthorization(); },
       () => ({
         async readMac() { events.push('identity'); return 'AA-BB-CC-DD-EE-FF'; },
         async writeFirmware(bytes) { events.push(`write:${bytes.byteLength}`); },
@@ -22,7 +22,7 @@ describe('verified ESP32 flasher', () => {
   });
 
   it('blocks authorization and writes when the selected identity mismatches', async () => {
-    const authorize = vi.fn(async () => undefined);
+    const authorize = vi.fn(async () => futureAuthorization());
     const write = vi.fn(async () => undefined);
     const disconnect = vi.fn(async () => undefined);
     const port = { getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) } as SerialPort;
@@ -87,7 +87,7 @@ describe('verified ESP32 flasher', () => {
       { serial: { requestPort: vi.fn(async () => port) } },
       Uint8Array.from([0xe9, 1]).buffer,
       'aa:bb:cc:dd:ee:ff',
-      async () => undefined,
+      async () => futureAuthorization(),
       () => ({
         readMac: async () => 'aa:bb:cc:dd:ee:ff',
         writeFirmware: async () => { throw new Error('write failed'); },
@@ -98,4 +98,23 @@ describe('verified ESP32 flasher', () => {
     expect(reset).not.toHaveBeenCalled();
     expect(disconnect).toHaveBeenCalledOnce();
   });
+
+  it('does not write when authorization expires before the write begins', async () => {
+    const write = vi.fn();
+    const disconnect = vi.fn(async () => undefined);
+    const port = { getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) } as SerialPort;
+    await expect(flashVerifiedEsp32(
+      { serial: { requestPort: vi.fn(async () => port) } },
+      Uint8Array.from([0xe9, 1]).buffer,
+      'aa:bb:cc:dd:ee:ff',
+      async () => ({ phaseExpiresAt: new Date(Date.now() - 1).toISOString() }),
+      () => ({ readMac: async () => 'aa:bb:cc:dd:ee:ff', writeFirmware: write, reset: vi.fn(), disconnect }),
+    )).rejects.toThrow('expired before the write started');
+    expect(write).not.toHaveBeenCalled();
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
 });
+
+function futureAuthorization() {
+  return { phaseExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+}

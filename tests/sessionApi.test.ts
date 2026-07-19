@@ -161,7 +161,6 @@ describe('Roadex client CSRF contract', () => {
       return new Response(JSON.stringify({
         ok: true,
         operation: { id: 'operation', artifactSha256: 'a'.repeat(64), phase },
-        ...(phase === 'destructive' ? { writeToken: 'w'.repeat(43) } : {}),
       }), {
         status: 200,
         headers: { 'content-type': 'application/json', 'x-roadex-csrf': 'private-test-value' },
@@ -185,8 +184,10 @@ describe('Roadex client CSRF contract', () => {
       expect(headers.has('x-roadex-csrf')).toBe(true);
       expect(headers.get('x-roadex-request-id')).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
     }
-    expect(JSON.parse(String(calls[1].init?.body))).toEqual({ artifactSha256: 'a'.repeat(64), deviceMac: 'aa:bb:cc:dd:ee:ff' });
-    expect(JSON.parse(String(calls[2].init?.body))).toEqual({ artifactSha256: 'a'.repeat(64), outcome: 'completed', writeToken: 'w'.repeat(43) });
+    const authorizationBody = JSON.parse(String(calls[1].init?.body));
+    expect(authorizationBody).toMatchObject({ artifactSha256: 'a'.repeat(64), deviceMac: 'aa:bb:cc:dd:ee:ff' });
+    expect(authorizationBody.writeToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(JSON.parse(String(calls[2].init?.body))).toEqual({ artifactSha256: 'a'.repeat(64), outcome: 'completed', writeToken: authorizationBody.writeToken });
   });
 
   it('retries a terminal write report with the same idempotency key', async () => {

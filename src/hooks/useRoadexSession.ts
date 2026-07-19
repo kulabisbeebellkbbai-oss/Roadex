@@ -588,6 +588,7 @@ export function useRoadexSession(): RoadexSessionState {
           authorizedOperation = authorization.operation;
           writeToken = authorization.writeToken;
           setPendingProbeConfirmation(authorization.operation);
+          return { phaseExpiresAt: authorization.operation.phaseExpiresAt };
         },
       );
       physicalWriteCompleted = true;

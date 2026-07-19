@@ -247,9 +247,7 @@ export type DeviceBridgeProbeResponse =
 
 export type DeviceBridgeConfirmationResponse = DeviceBridgeProbeResponse;
 
-export type DeviceBridgeWriteAuthorizationResponse =
-  | { ok: true; operation: DeviceBridgeOperationPublic; writeToken: string }
-  | { ok: false; gate: 'device-bridge'; reason: string; classification?: string };
+export type DeviceBridgeWriteAuthorizationResponse = DeviceBridgeProbeResponse;
 
 export type DeviceBridgeWriteReportPayload = {
   artifactSha256: string;

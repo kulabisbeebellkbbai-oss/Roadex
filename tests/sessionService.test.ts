@@ -767,19 +767,20 @@ describe('Roadex session service', () => {
       };
       state.deviceBridgeOperations.set(operation.id, operation);
       seedDeviceInventoryBinding(state, 'binding', 'roadex', { deviceMacTag: operation.actualDeviceIdentityTag });
+      const writeToken = 'w'.repeat(43);
 
-      expect(authorizeDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, deviceMac: '00:11:22:33:44:55' })).toMatchObject({ ok: false });
-      const authorized = authorizeDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, deviceMac });
-      expect(authorized).toMatchObject({ ok: true, operation: { phase: 'destructive' }, writeToken: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) });
+      expect(authorizeDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, deviceMac: '00:11:22:33:44:55', writeToken })).toMatchObject({ ok: false });
+      const authorized = authorizeDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, deviceMac, writeToken });
+      expect(authorized).toMatchObject({ ok: true, operation: { phase: 'destructive' } });
       if (!authorized.ok) return;
-      expect(authorizeDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, deviceMac })).toMatchObject({ ok: false });
+      expect(authorizeDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, deviceMac, writeToken })).toMatchObject({ ok: true, operation: { phase: 'destructive' } });
       expect(state.deviceBridgeOperations.get(operation.id)?.confirmationChallengeDigest).toBeUndefined();
       expect(state.deviceBridgeOperations.get(operation.id)?.destructiveNonceDigest).toMatch(/^[a-f0-9]{64}$/);
       expect(reportDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, outcome: 'completed', writeToken: 'x'.repeat(43) })).toMatchObject({ ok: false });
-      const reported = reportDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, outcome: 'completed', writeToken: authorized.writeToken });
+      const reported = reportDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, outcome: 'completed', writeToken });
       expect(reported).toMatchObject({ ok: true, operation: { phase: 'completed' } });
-      expect(reportDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, outcome: 'completed', writeToken: authorized.writeToken })).toMatchObject({ ok: false });
-      expect(state.deviceBridgeOperations.get(operation.id)?.destructiveNonceDigest).toBeUndefined();
+      expect(reportDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, outcome: 'completed', writeToken })).toMatchObject({ ok: true, operation: { phase: 'completed' } });
+      expect(state.deviceBridgeOperations.get(operation.id)?.destructiveNonceDigest).toMatch(/^[a-f0-9]{64}$/);
     } finally {
       restoreEnv('ROADEX_DEVICE_BRIDGE_WRITE_ENABLED', originalWrite);
       restoreEnv('ROADEX_DEVICE_BRIDGE_PROBE_ENABLED', originalProbe);

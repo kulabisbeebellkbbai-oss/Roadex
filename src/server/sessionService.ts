@@ -1045,6 +1045,12 @@ export function authorizeDeviceBridgeWrite(
   const artifact = operation && state.deviceArtifacts.get(operation.artifactId);
   const binding = operation && state.deviceInventoryBindings.get(operation.inventoryBindingId);
   const parsed = parseWriteAuthorizationPayload(payload);
+  const writeTokenDigest = parsed && createHash('sha256').update(parsed.writeToken).digest('hex');
+  if (
+    deviceBridgeWriteEnabled() && auditHmacKey && identityHmacKey && user.authMode === 'protected-gateway' && parsed && writeTokenDigest &&
+    operation?.userId === user.id && operation.phase === 'destructive' && operation.destructiveNonceDigest &&
+    timingSafeEqual(Buffer.from(writeTokenDigest), Buffer.from(operation.destructiveNonceDigest))
+  ) return { ok: true, operation: publicDeviceBridgeOperation(operation) };
   if (
     !deviceBridgeWriteEnabled() || !auditHmacKey || !identityHmacKey || user.authMode !== 'protected-gateway' || !parsed ||
     !operation || operation.userId !== user.id || operation.phase !== 'confirmation' || expiredIso(operation.phaseExpiresAt) ||
@@ -1056,18 +1062,16 @@ export function authorizeDeviceBridgeWrite(
     binding.deviceIdentityTag !== operation.deviceIdentityTag || binding.deviceMacTag !== operation.actualDeviceIdentityTag ||
     deviceMacTag(identityHmacKey, operation.projectId, parsed.deviceMac) !== operation.actualDeviceIdentityTag
   ) return denyDeviceBridgeProbe(state, user, operationId, 'write_authorization', auditHmacKey || '');
-  const writeToken = randomBytes(32).toString('base64url');
   const updated: DeviceBridgeOperationRecord = {
     ...operation,
     phase: 'destructive',
     confirmationChallengeDigest: undefined,
-    destructiveNonceDigest: createHash('sha256').update(writeToken).digest('hex'),
+    destructiveNonceDigest: writeTokenDigest,
     nextEventSequence: operation.nextEventSequence + 1,
     phaseExpiresAt: new Date(Date.now() + 2 * 60_000).toISOString(),
     updatedAt: new Date().toISOString(),
   };
-  persistDeviceBridgeWriteTransition(state, user, operation, updated, auditHmacKey, 'write_authorized', 'allowed');
-  return { ok: true, operation: publicDeviceBridgeOperation(updated), writeToken };
+  return persistDeviceBridgeWriteTransition(state, user, operation, updated, auditHmacKey, 'write_authorized', 'allowed');
 }
 
 export function reportDeviceBridgeWrite(
@@ -1079,20 +1083,25 @@ export function reportDeviceBridgeWrite(
   const auditHmacKey = deviceBridgeAuditHmacKey();
   const operation = state.deviceBridgeOperations.get(operationId);
   const parsed = parseWriteReportPayload(payload);
+  const writeTokenDigest = parsed && createHash('sha256').update(parsed.writeToken).digest('hex');
   if (
-    !deviceBridgeWriteEnabled() || !auditHmacKey || user.authMode !== 'protected-gateway' || !parsed ||
+    deviceBridgeWriteEnabled() && auditHmacKey && user.authMode === 'protected-gateway' && parsed && writeTokenDigest &&
+    operation?.userId === user.id && operation.phase === parsed.outcome && operation.destructiveNonceDigest &&
+    timingSafeEqual(Buffer.from(writeTokenDigest), Buffer.from(operation.destructiveNonceDigest))
+  ) return { ok: true, operation: publicDeviceBridgeOperation(operation) };
+  if (
+    !deviceBridgeWriteEnabled() || !auditHmacKey || user.authMode !== 'protected-gateway' || !parsed || !writeTokenDigest ||
     !operation || operation.userId !== user.id || operation.phase !== 'destructive' ||
     !operation.destructiveNonceDigest || expiredIso(operation.reportingExpiresAt) ||
     parsed.artifactSha256 !== operation.verifiedArtifactSha256 ||
     !timingSafeEqual(
-      Buffer.from(createHash('sha256').update(parsed.writeToken).digest('hex')),
+      Buffer.from(writeTokenDigest),
       Buffer.from(operation.destructiveNonceDigest),
     )
   ) return denyDeviceBridgeProbe(state, user, operationId, 'write_report', auditHmacKey || '');
   const updated: DeviceBridgeOperationRecord = {
     ...operation,
     phase: parsed.outcome,
-    destructiveNonceDigest: undefined,
     nextEventSequence: operation.nextEventSequence + 1,
     updatedAt: new Date().toISOString(),
   };
@@ -2143,13 +2152,13 @@ function parseArtifactDigestPayload(payload: unknown): { artifactSha256: string 
   return { artifactSha256: record.artifactSha256.toLowerCase() };
 }
 
-function parseWriteAuthorizationPayload(payload: unknown): { artifactSha256: string; deviceMac: string } | undefined {
+function parseWriteAuthorizationPayload(payload: unknown): { artifactSha256: string; deviceMac: string; writeToken: string } | undefined {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
   const record = payload as Record<string, unknown>;
-  if (Object.keys(record).sort().join(',') !== 'artifactSha256,deviceMac') return undefined;
+  if (Object.keys(record).sort().join(',') !== 'artifactSha256,deviceMac,writeToken') return undefined;
   const digest = parseArtifactDigestPayload({ artifactSha256: record.artifactSha256 });
-  if (!digest || !validDeviceMac(record.deviceMac)) return undefined;
-  return { ...digest, deviceMac: canonicalDeviceMac(record.deviceMac) };
+  if (!digest || !validDeviceMac(record.deviceMac) || typeof record.writeToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(record.writeToken)) return undefined;
+  return { ...digest, deviceMac: canonicalDeviceMac(record.deviceMac), writeToken: record.writeToken };
 }
 
 function parseWriteReportPayload(payload: unknown): { artifactSha256: string; outcome: 'completed' | 'failed'; writeToken: string } | undefined {

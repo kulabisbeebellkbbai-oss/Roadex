@@ -187,14 +187,30 @@ export async function authorizeVerifiedFirmwareWrite(
   operation: DeviceBridgeOperationPublic,
   deviceMac: string,
 ): Promise<{ operation: DeviceBridgeOperationPublic; writeToken: string }> {
-  const result = await request<DeviceBridgeWriteAuthorizationResponse>(
-    `/Roadex/api/device-bridge/operations/${encodeURIComponent(operation.id)}/authorize-write`,
-    { method: 'POST', token, body: { artifactSha256: operation.artifactSha256, deviceMac }, requestId: crypto.randomUUID() },
-  );
-  if (!result.ok) throw new Error(result.reason);
-  if (result.operation.phase !== 'destructive') throw new Error('Firmware write authorization was not created.');
-  if (!/^[A-Za-z0-9_-]{43}$/.test(result.writeToken)) throw new Error('Firmware write authorization credential was invalid.');
-  return { operation: result.operation, writeToken: result.writeToken };
+  const writeToken = randomWriteToken();
+  const requestId = crypto.randomUUID();
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const result = await request<DeviceBridgeWriteAuthorizationResponse>(
+        `/Roadex/api/device-bridge/operations/${encodeURIComponent(operation.id)}/authorize-write`,
+        { method: 'POST', token, body: { artifactSha256: operation.artifactSha256, deviceMac, writeToken }, requestId },
+      );
+      if (!result.ok) throw new Error(result.reason);
+      if (result.operation.phase !== 'destructive') throw new Error('Firmware write authorization was not created.');
+      return { operation: result.operation, writeToken };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Firmware write authorization failed.');
+}
+
+function randomWriteToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
 export async function reportVerifiedFirmwareWrite(
