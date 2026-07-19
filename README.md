@@ -65,6 +65,8 @@ When Roadex is behind the Protected Service Gateway, both services should load t
 `ROADEX_GATEWAY_SHARED_SECRET` from `local-secrets/roadex-gateway.env`. With that secret configured,
 Roadex rejects mock login and accepts only gateway-stamped identity headers.
 
+MSI client testing uses versioned declarative suites in `client-tests/`, interpreted by the separately installed trusted MSI browser agent. See `docs/msi-client-test-agent.md` for the queue contract, local-only authentication state, redacted result format, manual peripheral checkpoints, and destructive-action approval boundary.
+
 ## Current Status
 
 The repository contains the browser portal shell, protected-gateway deployment notes, and a real server-side Codex prompt runner. Client device and peripheral access are intentionally deferred until the core portal, session model, and security controls are working and verified.

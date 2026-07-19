@@ -36,3 +36,6 @@ __pycache__/
 # Local browser verification output
 .playwright-mcp/
 roadex-*.png
+playwright-report/
+test-results/
+.roadex-client-test/

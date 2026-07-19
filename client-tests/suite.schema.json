@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://roadex.home.arpa/schemas/client-test-suite.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "id", "viewports", "cases"],
+  "properties": {
+    "version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+    "viewports": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": { "enum": ["desktop", "tablet", "mobile"] }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/case" }
+    }
+  },
+  "$defs": {
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "steps"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$" },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/step" }
+        }
+      }
+    },
+    "step": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "path", "status", "cacheControl"],
+          "properties": {
+            "action": { "const": "navigate" },
+            "path": { "type": "string", "pattern": "^/Roadex(?:/[A-Za-z0-9._~!$&'()*+,;=:@-]+)*$", "maxLength": 256 },
+            "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+            "cacheControl": { "enum": ["no-store"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "testId"],
+          "properties": {
+            "action": { "enum": ["assertVisible", "click"] },
+            "testId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "testId", "attribute", "value"],
+          "properties": {
+            "action": { "const": "assertAttributeValue" },
+            "testId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+            "attribute": {
+              "enum": [
+                "data-profile-configured", "data-runtime-available", "data-policy-ready", "data-binding-ready",
+                "data-firmware-ready", "data-confirmation-ready"
+              ]
+            },
+            "value": { "enum": ["true", "false"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "checkpoint", "promptCode"],
+          "properties": {
+            "action": { "const": "manualCheckpoint" },
+            "checkpoint": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$" },
+            "promptCode": {
+              "enum": ["selectUsbDevice", "selectSerialDevice", "selectBleDevice", "resetDevice", "connectDevice"]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "testId", "valueSource"],
+          "properties": {
+            "action": { "const": "selectOption" },
+            "testId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+            "valueSource": { "enum": ["configuredProject", "unconfiguredProject"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "testId", "labelPrefix"],
+          "properties": {
+            "action": { "const": "selectFirstOption" },
+            "testId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+            "labelPrefix": { "enum": ["Active"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "testId", "state"],
+          "properties": {
+            "action": { "const": "assertEnabled" },
+            "testId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+            "state": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "testId", "attribute", "slot"],
+          "properties": {
+            "action": { "enum": ["captureAttribute", "assertAttributeChanged", "assertAttributeRestored"] },
+            "testId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+            "attribute": { "enum": ["aria-label", "aria-pressed", "title"] },
+            "slot": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,32}$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action"],
+          "properties": { "action": { "const": "assertNoBrowserErrors" } }
+        }
+      ]
+    }
+  }
+}

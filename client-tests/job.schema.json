@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://roadex.home.arpa/schemas/client-test-job.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "type", "commit", "suite", "headed", "destructiveApproval"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$" },
+    "type": { "const": "roadex.client_suite" },
+    "commit": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "suite": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+    "headed": { "type": "boolean" },
+    "configuredProject": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "unconfiguredProject": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "destructiveApproval": { "type": "boolean" }
+  }
+}

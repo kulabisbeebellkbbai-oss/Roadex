@@ -198,6 +198,7 @@ function App() {
             <label>
               <span>Project</span>
               <select
+                data-testid="project-selector"
                 disabled={roadex.connectionState === 'loading'}
                 onChange={(event) => setSelectedProjectId(event.target.value)}
                 value={selectedProject?.id ?? ''}
@@ -210,6 +211,7 @@ function App() {
             <label>
               <span>Thread</span>
               <select
+                data-testid="thread-selector"
                 disabled={!selectedProject || roadex.connectionState === 'loading'}
                 onChange={(event) => {
                   const [source, id] = event.target.value.split(':', 2);
@@ -263,6 +265,7 @@ function App() {
             <span>{roadex.connectionState}</span>
           </div>
           <button
+            data-testid="layout-toggle"
             aria-label={`Switch to ${layoutMode === 'desktop' ? 'mobile' : 'desktop'} layout`}
             aria-pressed={layoutMode === 'mobile'}
             className="icon-button layout-toggle"
@@ -467,6 +470,9 @@ function App() {
                 </span>
               </div>
               <button
+                data-testid="verify-ble"
+                data-profile-configured={Boolean(bleVerificationProfile)}
+                data-runtime-available={hasBleRuntimeVerification(window.navigator)}
                 disabled={!hasBleRuntimeVerification(window.navigator) || !bleVerificationProfile || bleVerification === 'checking'}
                 onClick={() => void handleBleVerification()}
                 type="button"
@@ -476,6 +482,9 @@ function App() {
                 {bleVerification === 'checking' ? 'Checking BLE' : 'Verify BLE runtime'}
               </button>
               <button
+                data-testid="verify-serial"
+                data-profile-configured={Boolean(serialVerificationProfile && allowsUsbOperation(usbDeviceProfile, 'serial.verify'))}
+                data-runtime-available={hasSerialRuntimeVerification(window.navigator)}
                 disabled={!hasSerialRuntimeVerification(window.navigator) || !serialVerificationProfile || !allowsUsbOperation(usbDeviceProfile, 'serial.verify') || serialVerification === 'checking'}
                 onClick={() => void handleSerialVerification()}
                 type="button"
@@ -485,6 +494,11 @@ function App() {
                 {serialVerification === 'checking' ? 'Listening for runtime' : 'Verify serial runtime'}
               </button>
               <button
+                data-testid="observe-usb"
+                data-binding-ready={Boolean(session && roadex.deviceInventoryBindingRefs.some((binding) => binding.projectId === session.workspace.id))}
+                data-policy-ready={Boolean(roadex.deviceBridgePolicy?.descriptorObservationEnabled)}
+                data-profile-configured={allowsUsbOperation(usbDeviceProfile, 'observe')}
+                data-runtime-available={roadex.browserDeviceCapability.transport === 'webusb'}
                 disabled={
                   !roadex.deviceBridgePolicy?.descriptorObservationEnabled ||
                   roadex.browserDeviceCapability.transport !== 'webusb' ||
@@ -499,6 +513,13 @@ function App() {
                 Observe USB
               </button>
               <button
+                data-testid="verify-esp32"
+                data-binding-ready={Boolean(session && roadex.deviceInventoryBindingRefs.some(
+                  (binding) => binding.projectId === session.workspace.id && binding.identityVerificationAvailable,
+                ))}
+                data-policy-ready={Boolean(roadex.deviceBridgePolicy?.descriptorObservationEnabled)}
+                data-profile-configured={allowsUsbOperation(usbDeviceProfile, 'esp32.identity')}
+                data-runtime-available={roadex.browserDeviceCapability.identityProbeAvailable}
                 disabled={
                   !roadex.deviceBridgePolicy?.descriptorObservationEnabled ||
                   !roadex.browserDeviceCapability.identityProbeAvailable ||
@@ -515,6 +536,7 @@ function App() {
                 Verify ESP32
               </button>
               <button
+                data-testid="create-probe-approval"
                 disabled={
                   !roadex.deviceBridgePolicy?.requestIntakeEnabled ||
                   roadex.descriptorObservation?.verification !== 'verified' ||
@@ -527,6 +549,7 @@ function App() {
                 Create probe approval
               </button>
               <button
+                data-testid="run-controlled-probe"
                 disabled={!roadex.pendingProbeApproval}
                 onClick={() => void roadex.runControlledProbe()}
                 type="button"
@@ -535,6 +558,7 @@ function App() {
                 Run controlled probe
               </button>
               <button
+                data-testid="confirm-verified-target"
                 disabled={!roadex.pendingProbeConfirmation || roadex.pendingProbeConfirmation.phase !== 'verified'}
                 onClick={() => void roadex.confirmControlledProbe()}
                 type="button"
@@ -543,6 +567,7 @@ function App() {
                 Confirm verified target
               </button>
               <button
+                data-testid="verify-firmware-bytes"
                 disabled={!roadex.pendingProbeConfirmation || roadex.pendingProbeConfirmation.phase !== 'confirmation'}
                 onClick={() => void roadex.loadConfirmedFirmware()}
                 type="button"
@@ -551,6 +576,11 @@ function App() {
                 Verify firmware bytes
               </button>
               <button
+                data-testid="flash-firmware"
+                data-confirmation-ready={roadex.pendingProbeConfirmation?.phase === 'confirmation'}
+                data-firmware-ready={roadex.verifiedFirmwareReady}
+                data-policy-ready={Boolean(roadex.deviceBridgePolicy?.writeEnabled)}
+                data-profile-configured={allowsUsbOperation(usbDeviceProfile, 'esp32.flash')}
                 disabled={
                   !roadex.deviceBridgePolicy?.writeEnabled ||
                   !roadex.verifiedFirmwareReady ||

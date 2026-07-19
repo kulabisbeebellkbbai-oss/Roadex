@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://roadex.home.arpa/schemas/client-test-result.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "jobId", "commit", "suite", "status", "aggregate", "tests"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "jobId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$" },
+    "commit": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "suite": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+    "status": { "enum": ["passed", "failed", "timedout", "interrupted", "needsUser"] },
+    "aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "failed", "timedOut", "skipped", "interrupted", "needsUser", "total"],
+      "properties": {
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "timedOut": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "interrupted": { "type": "integer", "minimum": 0 },
+        "needsUser": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0, "maximum": 256 }
+      }
+    },
+    "tests": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["project", "case", "status"],
+        "properties": {
+          "project": { "enum": ["desktop", "tablet", "mobile", "unknown"] },
+          "case": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$" },
+          "status": { "enum": ["passed", "failed", "timedOut", "skipped", "interrupted", "needsUser"] },
+          "failureClass": { "enum": ["assertion", "navigation", "timeout", "browser", "unknown"] }
+        }
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "case", "checkpoint", "promptCode"],
+      "properties": {
+        "project": { "enum": ["desktop", "tablet", "mobile"] },
+        "case": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$" },
+        "checkpoint": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$" },
+        "promptCode": {
+          "enum": ["selectUsbDevice", "selectSerialDevice", "selectBleDevice", "resetDevice", "connectDevice"]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "needsUser" } }, "required": ["status"] },
+      "then": { "properties": { "checkpoint": true }, "required": ["checkpoint"] },
+      "else": { "not": { "required": ["checkpoint"] } }
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "portal-smoke",
+  "viewports": ["desktop", "tablet", "mobile"],
+  "cases": [
+    {
+      "id": "portal.ready-layout",
+      "steps": [
+        { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
+        { "action": "assertVisible", "testId": "project-selector" },
+        { "action": "assertVisible", "testId": "thread-selector" },
+        { "action": "assertVisible", "testId": "layout-toggle" },
+        { "action": "captureAttribute", "testId": "layout-toggle", "attribute": "aria-pressed", "slot": "initialLayout" },
+        { "action": "click", "testId": "layout-toggle" },
+        { "action": "assertAttributeChanged", "testId": "layout-toggle", "attribute": "aria-pressed", "slot": "initialLayout" },
+        { "action": "click", "testId": "layout-toggle" },
+        { "action": "assertAttributeRestored", "testId": "layout-toggle", "attribute": "aria-pressed", "slot": "initialLayout" },
+        { "action": "assertNoBrowserErrors" }
+      ]
+    }
+  ]
+}

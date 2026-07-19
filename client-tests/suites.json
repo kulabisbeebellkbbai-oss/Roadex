@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "suites": [
+    {
+      "id": "portal-smoke",
+      "definition": "suites/portal-smoke.json",
+      "description": "Authenticated portal, gateway, console, and responsive-layout checks",
+      "cases": ["portal.ready-layout"],
+      "destructive": false
+    },
+    {
+      "id": "project-device-controls",
+      "definition": "suites/project-device-controls.json",
+      "description": "Project-scoped USB, serial, BLE, and identity control checks without opening a chooser",
+      "cases": ["device.configured-controls", "device.unconfigured-controls"],
+      "destructive": false
+    }
+  ]
+}
