@@ -192,6 +192,8 @@ Current checkpoint:
 - No chooser, firmware transfer, write, approval, or operation action was invoked.
 - The canonical suite uses one end-to-end case per viewport to model a real project/thread switch and avoid exhausting the intentional live-stream subscriber limit with diagnostic page fan-out.
 - MSI agent v6 still needs independent viewport contexts and timeout budgets for reliable combined execution; this is an agent limitation, not a Roadex control-state failure.
+- MSI agent v7 passes the portal suite across all viewports, but the combined device-control flow passes only desktop. The unchanged tablet-only and mobile-only flows both pass, classifying the remaining defect as browser-process transport carryover rather than Roadex responsive behavior.
+- The next trusted-runner change must launch and close a separate Chromium process per viewport, await stream termination and process exit, then rerun the restored canonical three-viewport suite.
 
 ## Approval Gate
 

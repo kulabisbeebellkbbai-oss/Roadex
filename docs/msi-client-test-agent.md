@@ -78,3 +78,11 @@ Acceptance requires:
 3. Run `project-device-controls` across desktop, tablet, and mobile in one job and require `device.project-control-boundaries` to pass in every viewport.
 4. Confirm gateway evidence contains allowed Roadex requests and normal client-closed stream cleanup without heartbeat diversion or subscriber-limit denial.
 5. Confirm no device chooser, firmware transfer, write, approval, or operation action occurred.
+
+## Version 8 Transport Isolation
+
+Version 7 context isolation is necessary but not sufficient for Roadex pages with long-lived SSE connections. The canonical device-control flow passed on desktop but failed on tablet and mobile when all viewports shared one Chromium process; the unchanged tablet-only and mobile-only flows each passed. The trusted runner must therefore launch a fresh Chromium process for every viewport execution unit, create one storage-state-backed context in that process, and close the entire process in the viewport `finally` block. Reusing one browser process with fresh contexts is not permitted.
+
+After closing the page and context, the runner must await tracked stream request termination and browser-process exit before advancing. Cleanup remains bounded and must classify an unclosed transport as an interrupted runner result rather than silently starting the next viewport. The protected-gateway heartbeat and MSI-local authentication state boundaries remain unchanged.
+
+Acceptance requires the restored canonical `project-device-controls` suite to pass desktop, tablet, and mobile in one job. The existing isolated tablet and mobile successes are diagnostic evidence only; they do not replace the combined acceptance run.
