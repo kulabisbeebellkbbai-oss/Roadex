@@ -34,6 +34,13 @@
         "selection.unconfigured-thread"
       ],
       "destructive": false
+    },
+    {
+      "id": "project-selection-tablet-diagnostic",
+      "definition": "suites/project-selection-tablet-diagnostic.json",
+      "description": "Isolated tablet project and active-thread selection checks",
+      "cases": ["selection.tablet-configured", "selection.tablet-unconfigured"],
+      "destructive": false
     }
   ]
 }
