@@ -1,34 +1,10 @@
-import { readFileSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
 import type { BleExpectedValue, BleVerificationProfile } from '../shared/bleVerificationContracts.js';
 
 const idPattern = /^[A-Za-z0-9._-]{1,128}$/;
 const fieldPattern = /^[A-Za-z0-9._-]{1,64}$/;
 const uuidPattern = /^(?:[0-9a-fA-F]{4}|[0-9a-fA-F]{8}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
 const printablePattern = /^[\x20-\x7e]+$/;
-const maxProfileFileBytes = 65_536;
-
-export function loadBleVerificationProfiles(
-  filePath = process.env.ROADEX_BLE_VERIFICATION_PROFILES_FILE,
-): BleVerificationProfile[] {
-  if (!filePath) return [];
-  const resolvedPath = resolve(filePath);
-  const metadata = statSync(resolvedPath);
-  if (!metadata.isFile() || metadata.size > maxProfileFileBytes) throw new Error('BLE verification profile file is invalid or oversized.');
-  const parsed: unknown = JSON.parse(readFileSync(resolvedPath, 'utf8'));
-  if (!Array.isArray(parsed) || parsed.length > 32) throw new Error('BLE verification profiles must be a bounded array.');
-  const profiles = parsed.map(validateProfile);
-  const ids = new Set<string>();
-  const workspaces = new Set<string>();
-  for (const profile of profiles) {
-    if (ids.has(profile.id) || workspaces.has(profile.workspaceId)) throw new Error('BLE verification profile IDs and workspace IDs must be unique.');
-    ids.add(profile.id);
-    workspaces.add(profile.workspaceId);
-  }
-  return profiles;
-}
-
-function validateProfile(value: unknown, index: number): BleVerificationProfile {
+export function validateBleVerificationProfile(value: unknown, index: number): BleVerificationProfile {
   if (!isRecord(value)) throw new Error(`BLE verification profile ${index} must be an object.`);
   const allowed = new Set(['id', 'workspaceId', 'label', 'serviceUuid', 'characteristicUuid', 'timeoutMs', 'expectedFields', 'successMessage']);
   if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error(`BLE verification profile ${index} has unknown fields.`);

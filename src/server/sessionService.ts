@@ -34,9 +34,7 @@ import {
 } from './statePersistence.js';
 import { canAccessManagedCodexProjects, getApprovedWorkspaces, resolveWorkspaceForUser } from './workspacePolicy.js';
 import { loadManagedCodexThreads } from './codexProjectsRegistry.js';
-import { loadSerialVerificationProfiles } from './serialVerificationProfiles.js';
-import { loadBleVerificationProfiles } from './bleVerificationProfiles.js';
-import { loadUsbDeviceProfiles } from './usbDeviceProfiles.js';
+import { loadProjectDeviceManifest } from './projectDeviceManifest.js';
 import { maxDeviceArtifactBytes, readDeviceArtifact, storeDeviceArtifact } from './deviceArtifactVault.js';
 import {
   firstMilestoneGates,
@@ -164,6 +162,7 @@ export function createInitialState(
   persistence: StatePersistence = createJsonFilePersistence(),
 ): RoadexState {
   const persisted = persistence.load();
+  const deviceProfiles = loadProjectDeviceManifest();
   const managedThreadClaims = new Map(persisted.managedThreadClaims.map((claim) => [claim.threadId, claim]));
   for (const session of persisted.sessions) {
     if (session.managedThreadId && !managedThreadClaims.has(session.managedThreadId)) {
@@ -195,9 +194,7 @@ export function createInitialState(
     deviceBridgeOperations: new Map(persisted.deviceBridgeOperations.map((record) => [record.id, record])),
     deviceInventoryBindings: new Map(persisted.deviceInventoryBindings.map((record) => [record.id, record])),
     deviceDescriptorObservations: new Map(persisted.deviceDescriptorObservations.map((record) => [record.id, record])),
-    serialVerificationProfiles: loadSerialVerificationProfiles(),
-    bleVerificationProfiles: loadBleVerificationProfiles(),
-    usbDeviceProfiles: loadUsbDeviceProfiles(),
+    ...deviceProfiles,
   };
 }
 
