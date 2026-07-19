@@ -5,6 +5,7 @@ import { authenticate, gatewayAuthRequired, mockAuthToken, mockUser } from '../s
 import {
   bootstrap,
   approveDeviceBridgeRequest,
+  authorizeDeviceBridgeWrite,
   cancelSessionRun,
   closeSession,
   createDeviceInventoryBinding,
@@ -15,6 +16,7 @@ import {
   listDeviceInventoryBindings,
   observeDeviceDescriptor,
   reopenSession,
+  reportDeviceBridgeWrite,
   registerDeviceArtifactMetadata,
   requestDeviceBridgeIntake,
   startDeviceBridgeProbe,
@@ -253,6 +255,26 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       'x-roadex-artifact-sha256': result.sha256,
     });
     res.end(result.bytes);
+    return;
+  }
+
+  const deviceBridgeWriteAuthorizationMatch = url.pathname.match(/^\/api\/device-bridge\/operations\/([^/]+)\/authorize-write$/);
+  if (deviceBridgeWriteAuthorizationMatch && isAvailableDeviceBridgeProbeRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const body = await readJson<unknown>(req);
+    const result = authorizeDeviceBridgeWrite(state, auth.user, decodeURIComponent(deviceBridgeWriteAuthorizationMatch[1]), body);
+    sendJson(res, result.ok ? 200 : 403, result);
+    return;
+  }
+
+  const deviceBridgeWriteReportMatch = url.pathname.match(/^\/api\/device-bridge\/operations\/([^/]+)\/report$/);
+  if (deviceBridgeWriteReportMatch && isAvailableDeviceBridgeProbeRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const body = await readJson<unknown>(req);
+    const result = reportDeviceBridgeWrite(state, auth.user, decodeURIComponent(deviceBridgeWriteReportMatch[1]), body);
+    sendJson(res, result.ok ? 200 : 403, result);
     return;
   }
 

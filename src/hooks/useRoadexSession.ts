@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   cancelSession,
+  authorizeVerifiedFirmwareWrite,
   closeSession,
   createDeviceBridgeProbeApproval,
   createSession,
@@ -12,10 +13,12 @@ import {
   runDeviceBridgeProbe,
   confirmVerifiedDeviceProbe,
   loadVerifiedFirmware,
+  reportVerifiedFirmwareWrite,
   subscribeSessionStream,
   submitPrompt,
   submitDeviceDescriptorObservation,
 } from '../client/sessionApi';
+import { flashVerifiedEsp32 } from '../client/esp32Flasher';
 import type {
   AuditEvent,
   ManagedCodexThread,
@@ -72,6 +75,7 @@ export type RoadexSessionState = {
   runControlledProbe: () => Promise<void>;
   confirmControlledProbe: () => Promise<void>;
   loadConfirmedFirmware: () => Promise<void>;
+  flashConfirmedFirmware: () => Promise<void>;
   retry: () => Promise<void>;
 };
 
@@ -145,6 +149,15 @@ export function useRoadexSession(): RoadexSessionState {
   }, [attach]);
 
   const sessionId = session?.id;
+  useEffect(() => {
+    setDescriptorObservation(undefined);
+    setPendingProbeApproval(undefined);
+    setPendingProbeConfirmation(undefined);
+    verifiedDeviceMac.current = undefined;
+    verifiedFirmwareBytes.current = undefined;
+    setVerifiedFirmwareReady(false);
+  }, [sessionId]);
+
   useEffect(() => {
     if (!sessionId) return undefined;
     activeStreamSessionId.current = sessionId;
@@ -520,7 +533,6 @@ export function useRoadexSession(): RoadexSessionState {
     setVerifiedFirmwareReady(false);
     try {
       const operation = await runDeviceBridgeProbe(token, pendingProbeApproval, verifiedDeviceMac.current);
-      verifiedDeviceMac.current = undefined;
       setPendingProbeApproval(undefined);
       setPendingProbeConfirmation(operation);
       setNotice('Controlled ESP32 probe verified. Fresh owner confirmation is required.');
@@ -554,6 +566,54 @@ export function useRoadexSession(): RoadexSessionState {
       setError(caught instanceof Error ? caught.message : 'Firmware verification failed.');
     }
   }, [pendingProbeConfirmation, token]);
+
+  const flashConfirmedFirmware = useCallback(async () => {
+    if (
+      !pendingProbeConfirmation || pendingProbeConfirmation.phase !== 'confirmation' ||
+      !verifiedFirmwareBytes.current || !verifiedDeviceMac.current || !deviceBridgePolicy?.writeEnabled
+    ) return;
+    if (!window.confirm('Flash the verified firmware to the selected ESP32? This writes flash memory and restarts the device.')) return;
+    setError(undefined);
+    setNotice('Waiting for the verified ESP32 bootloader.');
+    let authorizedOperation: DeviceBridgeOperationPublic | undefined;
+    let writeToken: string | undefined;
+    let physicalWriteCompleted = false;
+    try {
+      await flashVerifiedEsp32(
+        window.navigator,
+        verifiedFirmwareBytes.current,
+        verifiedDeviceMac.current,
+        async (observedDeviceMac) => {
+          const authorization = await authorizeVerifiedFirmwareWrite(token, pendingProbeConfirmation, observedDeviceMac);
+          authorizedOperation = authorization.operation;
+          writeToken = authorization.writeToken;
+          setPendingProbeConfirmation(authorization.operation);
+        },
+      );
+      physicalWriteCompleted = true;
+      if (!authorizedOperation || !writeToken) throw new Error('Firmware write authorization was not created.');
+      const completed = await reportVerifiedFirmwareWrite(token, authorizedOperation, writeToken, 'completed');
+      setPendingProbeConfirmation(completed);
+      setNotice('Verified firmware flashed successfully. The ESP32 was restarted.');
+    } catch (caught) {
+      if (authorizedOperation && writeToken && !physicalWriteCompleted) {
+        try {
+          const failed = await reportVerifiedFirmwareWrite(token, authorizedOperation, writeToken, 'failed');
+          setPendingProbeConfirmation(failed);
+        } catch (reportError) {
+          setError(`Firmware flash failed and its terminal report was not acknowledged: ${reportError instanceof Error ? reportError.message : 'unknown reporting error'}`);
+          return;
+        }
+      }
+      setError(physicalWriteCompleted
+        ? 'Firmware was written and reset, but completion reporting was not acknowledged. Do not flash again until the operation is reconciled.'
+        : caught instanceof Error ? caught.message : 'Verified firmware flash failed.');
+    } finally {
+      verifiedFirmwareBytes.current = undefined;
+      verifiedDeviceMac.current = undefined;
+      setVerifiedFirmwareReady(false);
+    }
+  }, [deviceBridgePolicy, pendingProbeConfirmation, token]);
 
   return useMemo(
     () => ({
@@ -590,6 +650,7 @@ export function useRoadexSession(): RoadexSessionState {
       runControlledProbe,
       confirmControlledProbe,
       loadConfirmedFirmware,
+      flashConfirmedFirmware,
       retry,
     }),
     [
@@ -617,6 +678,7 @@ export function useRoadexSession(): RoadexSessionState {
       runControlledProbe,
       confirmControlledProbe,
       loadConfirmedFirmware,
+      flashConfirmedFirmware,
       reopenArchivedSession,
       retry,
       sendPrompt,

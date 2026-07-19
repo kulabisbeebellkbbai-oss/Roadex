@@ -12,6 +12,7 @@ const metadataRegistryEnabledEnv = 'ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABL
 const auditHmacKeyEnv = 'ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY';
 const identityHmacKeyEnv = 'ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY';
 const probeEnabledEnv = 'ROADEX_DEVICE_BRIDGE_PROBE_ENABLED';
+const writeEnabledEnv = 'ROADEX_DEVICE_BRIDGE_WRITE_ENABLED';
 
 export type DeviceBridgeInventoryDevice = {
   projectId: string;
@@ -19,6 +20,7 @@ export type DeviceBridgeInventoryDevice = {
 };
 
 export function getDeviceBridgePolicy(): DeviceBridgePolicy {
+  const writeEnabled = deviceBridgeWriteEnabled();
   return {
     state: 'disabled',
     approvedFoundation: true,
@@ -26,7 +28,10 @@ export function getDeviceBridgePolicy(): DeviceBridgePolicy {
     requestIntakeEnabled: deviceBridgeRequestIntakeEnabled(),
     descriptorObservationEnabled: deviceBridgeDescriptorObservationEnabled(),
     operationsEnabled: deviceBridgeOperationsEnabled(),
-    reason: disabledReason,
+    writeEnabled,
+    reason: writeEnabled
+      ? 'General device bridging remains disabled; only verified, owner-authorized ESP32 flashing is enabled.'
+      : disabledReason,
   };
 }
 
@@ -57,6 +62,10 @@ export function deviceBridgeOperationsEnabled(): false {
 
 export function deviceBridgeProbeEnabled(): boolean {
   return strictEnabledByEnv(process.env[probeEnabledEnv]);
+}
+
+export function deviceBridgeWriteEnabled(): boolean {
+  return strictEnabledByEnv(process.env[writeEnabledEnv]);
 }
 
 export function deviceBridgeAuditHmacKey(): string | undefined {
@@ -116,6 +125,8 @@ export function isAvailableDeviceBridgeProbeRoute(method: string | undefined, pa
   if (method === 'POST' && /^\/api\/device-bridge\/operations\/[^/]+\/probe$/.test(pathname)) return true;
   if (method === 'POST' && /^\/api\/device-bridge\/operations\/[^/]+\/confirm$/.test(pathname)) return true;
   if (method === 'GET' && /^\/api\/device-bridge\/operations\/[^/]+\/artifact$/.test(pathname)) return true;
+  if (method === 'POST' && /^\/api\/device-bridge\/operations\/[^/]+\/authorize-write$/.test(pathname)) return true;
+  if (method === 'POST' && /^\/api\/device-bridge\/operations\/[^/]+\/report$/.test(pathname)) return true;
   return false;
 }
 

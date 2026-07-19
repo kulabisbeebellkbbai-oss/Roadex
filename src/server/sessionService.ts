@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   closeSync,
   constants as fsConstants,
@@ -21,6 +21,7 @@ import {
   deviceBridgeDescriptorObservationEnabled,
   deviceBridgeMetadataRegistryEnabled,
   deviceBridgeProbeEnabled,
+  deviceBridgeWriteEnabled,
   deviceBridgeRequestIntakeEnabled,
   getDeviceBridgePolicy,
 } from './deviceBridgePolicy.js';
@@ -67,6 +68,7 @@ import type {
   DeviceBridgeRequestPublic,
   DeviceBridgeRequestRecord,
   DeviceBridgeRequestResponse,
+  DeviceBridgeWriteAuthorizationResponse,
   DeviceDescriptorObservationPayload,
   DeviceDescriptorObservationPublic,
   DeviceDescriptorObservationRecord,
@@ -1015,10 +1017,109 @@ export function deliverConfirmedDeviceArtifact(
 
   const bytes = readDeviceArtifact(artifact.storageReference, artifact.byteLength, artifact.sha256);
   if (!bytes) return { ok: false };
+  const updated: DeviceBridgeOperationRecord = {
+    ...operation,
+    confirmationChallengeDigest: createHash('sha256').update(randomBytes(32)).digest('hex'),
+    updatedAt: new Date().toISOString(),
+  };
   const auditEvent = createBridgeAuditEvent(state, auditHmacKey, user, 'device_bridge.artifact_delivery', operation.id, 'allowed', bridgeAuditSummary(auditHmacKey, { classification: 'artifact_delivered', userId: user.id, sessionId: operation.sessionId, requestId: operation.id }));
-  persistStateSnapshot(state, { auditEvents: [...state.audit.events, auditEvent] });
+  persistStateSnapshot(state, {
+    deviceBridgeOperations: [...state.deviceBridgeOperations.values()].map((record) => record.id === operation.id ? updated : record),
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.deviceBridgeOperations.set(operation.id, updated);
   state.audit.events.push(auditEvent);
   return { ok: true, bytes, sha256: artifact.sha256 };
+}
+
+export function authorizeDeviceBridgeWrite(
+  state: RoadexState,
+  user: UserProfile,
+  operationId: string,
+  payload: unknown,
+): DeviceBridgeWriteAuthorizationResponse {
+  const auditHmacKey = deviceBridgeAuditHmacKey();
+  const identityHmacKey = deviceBridgeIdentityHmacKey();
+  const operation = state.deviceBridgeOperations.get(operationId);
+  const session = operation && getOwnedSession(state.sessions, user.id, operation.sessionId);
+  const artifact = operation && state.deviceArtifacts.get(operation.artifactId);
+  const binding = operation && state.deviceInventoryBindings.get(operation.inventoryBindingId);
+  const parsed = parseWriteAuthorizationPayload(payload);
+  if (
+    !deviceBridgeWriteEnabled() || !auditHmacKey || !identityHmacKey || user.authMode !== 'protected-gateway' || !parsed ||
+    !operation || operation.userId !== user.id || operation.phase !== 'confirmation' || expiredIso(operation.phaseExpiresAt) ||
+    !operation.confirmationChallengeDigest || parsed.artifactSha256 !== operation.verifiedArtifactSha256 ||
+    !session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle !== 'ready' ||
+    !artifact || artifact.status !== 'active' || expiredIso(artifact.expiresAt) || artifact.sha256 !== parsed.artifactSha256 ||
+    !readDeviceArtifact(artifact.storageReference, artifact.byteLength, artifact.sha256) ||
+    !validActiveInventoryBindingForRequest(binding, operation.projectId) ||
+    binding.deviceIdentityTag !== operation.deviceIdentityTag || binding.deviceMacTag !== operation.actualDeviceIdentityTag ||
+    deviceMacTag(identityHmacKey, operation.projectId, parsed.deviceMac) !== operation.actualDeviceIdentityTag
+  ) return denyDeviceBridgeProbe(state, user, operationId, 'write_authorization', auditHmacKey || '');
+  const writeToken = randomBytes(32).toString('base64url');
+  const updated: DeviceBridgeOperationRecord = {
+    ...operation,
+    phase: 'destructive',
+    confirmationChallengeDigest: undefined,
+    destructiveNonceDigest: createHash('sha256').update(writeToken).digest('hex'),
+    nextEventSequence: operation.nextEventSequence + 1,
+    phaseExpiresAt: new Date(Date.now() + 2 * 60_000).toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  persistDeviceBridgeWriteTransition(state, user, operation, updated, auditHmacKey, 'write_authorized', 'allowed');
+  return { ok: true, operation: publicDeviceBridgeOperation(updated), writeToken };
+}
+
+export function reportDeviceBridgeWrite(
+  state: RoadexState,
+  user: UserProfile,
+  operationId: string,
+  payload: unknown,
+): DeviceBridgeProbeResponse {
+  const auditHmacKey = deviceBridgeAuditHmacKey();
+  const operation = state.deviceBridgeOperations.get(operationId);
+  const parsed = parseWriteReportPayload(payload);
+  if (
+    !deviceBridgeWriteEnabled() || !auditHmacKey || user.authMode !== 'protected-gateway' || !parsed ||
+    !operation || operation.userId !== user.id || operation.phase !== 'destructive' ||
+    !operation.destructiveNonceDigest || expiredIso(operation.reportingExpiresAt) ||
+    parsed.artifactSha256 !== operation.verifiedArtifactSha256 ||
+    !timingSafeEqual(
+      Buffer.from(createHash('sha256').update(parsed.writeToken).digest('hex')),
+      Buffer.from(operation.destructiveNonceDigest),
+    )
+  ) return denyDeviceBridgeProbe(state, user, operationId, 'write_report', auditHmacKey || '');
+  const updated: DeviceBridgeOperationRecord = {
+    ...operation,
+    phase: parsed.outcome,
+    destructiveNonceDigest: undefined,
+    nextEventSequence: operation.nextEventSequence + 1,
+    updatedAt: new Date().toISOString(),
+  };
+  return persistDeviceBridgeWriteTransition(
+    state, user, operation, updated, auditHmacKey,
+    parsed.outcome === 'completed' ? 'write_completed' : 'write_failed',
+    parsed.outcome === 'completed' ? 'allowed' : 'denied',
+  );
+}
+
+function persistDeviceBridgeWriteTransition(
+  state: RoadexState,
+  user: UserProfile,
+  operation: DeviceBridgeOperationRecord,
+  updated: DeviceBridgeOperationRecord,
+  auditHmacKey: string,
+  classification: string,
+  outcome: 'allowed' | 'denied',
+): DeviceBridgeProbeResponse {
+  const auditEvent = createBridgeAuditEvent(state, auditHmacKey, user, 'device_bridge.operation_write', operation.id, outcome, bridgeAuditSummary(auditHmacKey, { classification, userId: user.id, sessionId: operation.sessionId, requestId: operation.id }));
+  persistStateSnapshot(state, {
+    deviceBridgeOperations: [...state.deviceBridgeOperations.values()].map((record) => record.id === operation.id ? updated : record),
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.deviceBridgeOperations.set(operation.id, updated);
+  state.audit.events.push(auditEvent);
+  return { ok: true, operation: publicDeviceBridgeOperation(updated) };
 }
 
 export function observeDeviceDescriptor(
@@ -2032,6 +2133,32 @@ function parseDeviceBridgeProbePayload(payload: unknown): DeviceBridgeProbePaylo
     deviceMac: canonicalDeviceMac(record.deviceMac),
     artifactSha256: record.artifactSha256.toLowerCase(),
   };
+}
+
+function parseArtifactDigestPayload(payload: unknown): { artifactSha256: string } | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
+  const record = payload as Record<string, unknown>;
+  if (Object.keys(record).join(',') !== 'artifactSha256') return undefined;
+  if (typeof record.artifactSha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(record.artifactSha256)) return undefined;
+  return { artifactSha256: record.artifactSha256.toLowerCase() };
+}
+
+function parseWriteAuthorizationPayload(payload: unknown): { artifactSha256: string; deviceMac: string } | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
+  const record = payload as Record<string, unknown>;
+  if (Object.keys(record).sort().join(',') !== 'artifactSha256,deviceMac') return undefined;
+  const digest = parseArtifactDigestPayload({ artifactSha256: record.artifactSha256 });
+  if (!digest || !validDeviceMac(record.deviceMac)) return undefined;
+  return { ...digest, deviceMac: canonicalDeviceMac(record.deviceMac) };
+}
+
+function parseWriteReportPayload(payload: unknown): { artifactSha256: string; outcome: 'completed' | 'failed'; writeToken: string } | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
+  const record = payload as Record<string, unknown>;
+  if (Object.keys(record).sort().join(',') !== 'artifactSha256,outcome,writeToken') return undefined;
+  const digest = parseArtifactDigestPayload({ artifactSha256: record.artifactSha256 });
+  if (!digest || (record.outcome !== 'completed' && record.outcome !== 'failed') || typeof record.writeToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(record.writeToken)) return undefined;
+  return { ...digest, outcome: record.outcome, writeToken: record.writeToken };
 }
 
 

@@ -347,7 +347,7 @@ function App() {
                 <span>Client devices</span>
                 <strong>
                   {roadex.deviceBridgePolicy
-                    ? `${deviceTransportLabel(roadex.browserDeviceCapability.transport)} · ${roadex.deviceBridgePolicy.descriptorObservationEnabled ? 'observe only' : 'disabled'}`
+                    ? `${deviceTransportLabel(roadex.browserDeviceCapability.transport)} · ${roadex.deviceBridgePolicy.writeEnabled ? 'verified flash' : roadex.deviceBridgePolicy.descriptorObservationEnabled ? 'observe only' : 'disabled'}`
                     : 'Policy unavailable'}
                 </strong>
               </div>
@@ -376,7 +376,11 @@ function App() {
                 </li>
               ))}
             </ul>
-            <div className="safeguard-note">Device bridge remains disabled.</div>
+            <div className="safeguard-note">
+              {roadex.deviceBridgePolicy?.writeEnabled
+                ? 'General device access remains disabled; verified flashing requires fresh approval.'
+                : 'Device bridge remains disabled.'}
+            </div>
           </article>
 
           <article className="section-card device-card" id="device-status">
@@ -467,6 +471,18 @@ function App() {
               >
                 <ShieldCheck size={17} />
                 Verify firmware bytes
+              </button>
+              <button
+                disabled={
+                  !roadex.deviceBridgePolicy?.writeEnabled ||
+                  !roadex.verifiedFirmwareReady ||
+                  roadex.pendingProbeConfirmation?.phase !== 'confirmation'
+                }
+                onClick={() => void roadex.flashConfirmedFirmware()}
+                type="button"
+              >
+                <PlugZap size={17} />
+                Flash verified firmware
               </button>
             </div>
             <div className="timeline-note">

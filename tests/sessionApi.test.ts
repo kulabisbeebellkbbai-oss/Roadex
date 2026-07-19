@@ -146,6 +146,72 @@ describe('Roadex client CSRF contract', () => {
     expect(fetch).toHaveBeenCalledWith('/Roadex/api/device-bridge/operations/operation/artifact', expect.objectContaining({ cache: 'no-store' }));
   });
 
+  it('uses exact CSRF-protected write authorization and terminal report routes', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input);
+      calls.push({ path, init });
+      if (path === '/api/bootstrap') {
+        return new Response(JSON.stringify({ sessions: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'x-roadex-csrf': 'private-test-value' },
+        });
+      }
+      const phase = path.endsWith('/report') ? 'completed' : 'destructive';
+      return new Response(JSON.stringify({
+        ok: true,
+        operation: { id: 'operation', artifactSha256: 'a'.repeat(64), phase },
+        ...(phase === 'destructive' ? { writeToken: 'w'.repeat(43) } : {}),
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'x-roadex-csrf': 'private-test-value' },
+      });
+    }));
+    const { authorizeVerifiedFirmwareWrite, loginAndBootstrap, reportVerifiedFirmwareWrite } = await import('../src/client/sessionApi');
+    await loginAndBootstrap();
+    const operation = {
+      id: 'operation', artifactSha256: 'a'.repeat(64), phase: 'confirmation',
+    } as Parameters<typeof authorizeVerifiedFirmwareWrite>[1];
+    const authorized = await authorizeVerifiedFirmwareWrite(undefined, operation, 'aa:bb:cc:dd:ee:ff');
+    await reportVerifiedFirmwareWrite(undefined, authorized.operation, authorized.writeToken, 'completed');
+
+    expect(calls.map((call) => call.path)).toEqual([
+      '/api/bootstrap',
+      '/Roadex/api/device-bridge/operations/operation/authorize-write',
+      '/Roadex/api/device-bridge/operations/operation/report',
+    ]);
+    for (const call of calls.slice(1)) {
+      const headers = new Headers(call.init?.headers);
+      expect(headers.has('x-roadex-csrf')).toBe(true);
+      expect(headers.get('x-roadex-request-id')).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
+    }
+    expect(JSON.parse(String(calls[1].init?.body))).toEqual({ artifactSha256: 'a'.repeat(64), deviceMac: 'aa:bb:cc:dd:ee:ff' });
+    expect(JSON.parse(String(calls[2].init?.body))).toEqual({ artifactSha256: 'a'.repeat(64), outcome: 'completed', writeToken: 'w'.repeat(43) });
+  });
+
+  it('retries a terminal write report with the same idempotency key', async () => {
+    const requestIds: string[] = [];
+    let attempts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      attempts += 1;
+      requestIds.push(new Headers(init?.headers).get('x-roadex-request-id') ?? '');
+      if (attempts < 3) throw new Error('temporary network failure');
+      return new Response(JSON.stringify({
+        ok: true,
+        operation: { id: 'operation', artifactSha256: 'a'.repeat(64), phase: 'completed' },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }));
+    const { reportVerifiedFirmwareWrite } = await import('../src/client/sessionApi');
+    const operation = await reportVerifiedFirmwareWrite(
+      undefined,
+      { id: 'operation', artifactSha256: 'a'.repeat(64), phase: 'destructive' } as Parameters<typeof reportVerifiedFirmwareWrite>[1],
+      'w'.repeat(43),
+      'completed',
+    );
+    expect(operation.phase).toBe('completed');
+    expect(new Set(requestIds).size).toBe(1);
+  });
+
   it('runs only the approved probe endpoints with JSON and CSRF', async () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

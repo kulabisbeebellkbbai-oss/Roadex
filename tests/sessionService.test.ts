@@ -8,6 +8,7 @@ import { createStreamEvent } from '../src/server/mockRunner';
 import { createMemoryPersistence, type StatePersistence } from '../src/server/statePersistence';
 import {
   approveDeviceBridgeRequest,
+  authorizeDeviceBridgeWrite,
   bootstrap,
   closeSession,
   createDeviceInventoryBinding,
@@ -22,6 +23,7 @@ import {
   listArchivedSessions,
   observeDeviceDescriptor,
   reopenSession,
+  reportDeviceBridgeWrite,
   registerDeviceArtifactMetadata,
   requestDeviceBridgeIntake,
   revokeDeviceArtifactMetadata,
@@ -177,6 +179,7 @@ describe('createMockSession', () => {
       requestIntakeEnabled: false,
       descriptorObservationEnabled: false,
       operationsEnabled: false,
+      writeEnabled: false,
       reason: expect.stringContaining('disabled'),
     });
     expect(state.deviceArtifacts.size).toBe(0);
@@ -368,6 +371,7 @@ describe('Roadex session service', () => {
 
   it('keeps device bridge request intake default-off and records no request records', async () => {
     const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    const originalIdentityHmac = process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY;
     process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
     const state = createInitialState(fakeRunner(), createMemoryPersistence());
     const response = await createSessionFromApi(state, protectedGatewayUser(), { workspaceId: 'roadex' });
@@ -402,6 +406,7 @@ describe('Roadex session service', () => {
       expect(state.audit.events.at(-1)?.summary).not.toContain(response.session.id);
     } finally {
       restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY', originalIdentityHmac);
     }
   });
 
@@ -671,6 +676,7 @@ describe('Roadex session service', () => {
       'ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY',
       'ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY',
       'ROADEX_DEVICE_ARTIFACT_VAULT',
+      'ROADEX_DEVICE_BRIDGE_WRITE_ENABLED',
     ] as const;
     const originals = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     try {
@@ -680,6 +686,7 @@ describe('Roadex session service', () => {
       process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
       process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY = testIdentityHmacKey();
       process.env.ROADEX_DEVICE_ARTIFACT_VAULT = mkdtempSync(join(tmpdir(), 'roadex-artifact-vault-'));
+      process.env.ROADEX_DEVICE_BRIDGE_WRITE_ENABLED = 'true';
       const state = createInitialState(fakeRunner(), createMemoryPersistence());
       const user = protectedGatewayUser();
       const session = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
@@ -716,12 +723,69 @@ describe('Roadex session service', () => {
       });
       expect(deliverConfirmedDeviceArtifact(state, user, started.operation.id)).toEqual({ ok: true, bytes, sha256 });
       expect(state.deviceBridgeOperations.get(started.operation.id)?.phase).toBe('confirmation');
+      expect(state.deviceBridgeOperations.get(started.operation.id)?.confirmationChallengeDigest).toMatch(/^[a-f0-9]{64}$/);
       expect(state.audit.events.at(-1)?.summary).toContain('classification=artifact_delivered');
 
       writeFileSync(join(process.env.ROADEX_DEVICE_ARTIFACT_VAULT, `${storeDeviceArtifact(bytes, sha256)}.bin`), 'tampered');
       expect(deliverConfirmedDeviceArtifact(state, user, started.operation.id)).toEqual({ ok: false });
+      expect(authorizeDeviceBridgeWrite(state, user, started.operation.id, { artifactSha256: sha256, deviceMac })).toMatchObject({ ok: false });
     } finally {
       for (const name of names) restoreEnv(name, originals[name]);
+    }
+  });
+
+  it('consumes confirmed delivery into one write authorization and terminal report', async () => {
+    const originalWrite = process.env.ROADEX_DEVICE_BRIDGE_WRITE_ENABLED;
+    const originalProbe = process.env.ROADEX_DEVICE_BRIDGE_PROBE_ENABLED;
+    const originalHmac = process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY;
+    const originalIdentityHmac = process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY;
+    const originalVault = process.env.ROADEX_DEVICE_ARTIFACT_VAULT;
+    try {
+      process.env.ROADEX_DEVICE_BRIDGE_WRITE_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_PROBE_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+      process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY = testIdentityHmacKey();
+      process.env.ROADEX_DEVICE_ARTIFACT_VAULT = mkdtempSync(join(tmpdir(), 'roadex-write-vault-'));
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const session = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      if (!session.ok) return;
+      const bytes = Buffer.from([0xe9, 1, 2, 3]);
+      const sha256 = createHash('sha256').update(bytes).digest('hex');
+      const artifact = seedDeviceArtifact(state, session.session.id);
+      state.deviceArtifacts.set(artifact.id, { ...artifact, byteLength: bytes.byteLength, sha256, storageReference: storeDeviceArtifact(bytes, sha256) });
+      const deviceMac = 'aa:bb:cc:dd:ee:ff';
+      const actualDeviceIdentityTag = createHmac('sha256', testIdentityHmacKey()).update(`roadex-device-mac:v1:roadex:${deviceMac}`).digest('hex');
+      const operation = {
+        id: 'operation-write', approvalId: 'approval', userId: user.id, sessionId: session.session.id,
+        projectId: 'roadex', artifactId: artifact.id, artifactSha256: sha256, inventoryBindingId: 'binding',
+        deviceIdentityTag: 'c'.repeat(64), operation: 'esp32.flash' as const, phase: 'confirmation' as const,
+        credentialDigest: 'd'.repeat(64), actualDeviceIdentityTag, verifiedArtifactSha256: sha256,
+        confirmationChallengeDigest: 'f'.repeat(64), nextEventSequence: 0,
+        phaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), reportingExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      };
+      state.deviceBridgeOperations.set(operation.id, operation);
+      seedDeviceInventoryBinding(state, 'binding', 'roadex', { deviceMacTag: operation.actualDeviceIdentityTag });
+
+      expect(authorizeDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, deviceMac: '00:11:22:33:44:55' })).toMatchObject({ ok: false });
+      const authorized = authorizeDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, deviceMac });
+      expect(authorized).toMatchObject({ ok: true, operation: { phase: 'destructive' }, writeToken: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) });
+      if (!authorized.ok) return;
+      expect(authorizeDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, deviceMac })).toMatchObject({ ok: false });
+      expect(state.deviceBridgeOperations.get(operation.id)?.confirmationChallengeDigest).toBeUndefined();
+      expect(state.deviceBridgeOperations.get(operation.id)?.destructiveNonceDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(reportDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, outcome: 'completed', writeToken: 'x'.repeat(43) })).toMatchObject({ ok: false });
+      const reported = reportDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, outcome: 'completed', writeToken: authorized.writeToken });
+      expect(reported).toMatchObject({ ok: true, operation: { phase: 'completed' } });
+      expect(reportDeviceBridgeWrite(state, user, operation.id, { artifactSha256: sha256, outcome: 'completed', writeToken: authorized.writeToken })).toMatchObject({ ok: false });
+      expect(state.deviceBridgeOperations.get(operation.id)?.destructiveNonceDigest).toBeUndefined();
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_WRITE_ENABLED', originalWrite);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_PROBE_ENABLED', originalProbe);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+      restoreEnv('ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY', originalIdentityHmac);
+      restoreEnv('ROADEX_DEVICE_ARTIFACT_VAULT', originalVault);
     }
   });
 

@@ -17,6 +17,7 @@ import type {
   DeviceBridgeProbeStartResponse,
   DeviceBridgeConfirmationResponse,
   DeviceBridgeOperationPublic,
+  DeviceBridgeWriteAuthorizationResponse,
   DeviceBridgeRequestPayload,
   DeviceBridgeRequestResponse,
   DeviceDescriptorObservationPayload,
@@ -179,6 +180,44 @@ export async function loadVerifiedFirmware(
     throw new Error('Firmware digest verification failed.');
   }
   return bytes;
+}
+
+export async function authorizeVerifiedFirmwareWrite(
+  token: string | undefined,
+  operation: DeviceBridgeOperationPublic,
+  deviceMac: string,
+): Promise<{ operation: DeviceBridgeOperationPublic; writeToken: string }> {
+  const result = await request<DeviceBridgeWriteAuthorizationResponse>(
+    `/Roadex/api/device-bridge/operations/${encodeURIComponent(operation.id)}/authorize-write`,
+    { method: 'POST', token, body: { artifactSha256: operation.artifactSha256, deviceMac }, requestId: crypto.randomUUID() },
+  );
+  if (!result.ok) throw new Error(result.reason);
+  if (result.operation.phase !== 'destructive') throw new Error('Firmware write authorization was not created.');
+  if (!/^[A-Za-z0-9_-]{43}$/.test(result.writeToken)) throw new Error('Firmware write authorization credential was invalid.');
+  return { operation: result.operation, writeToken: result.writeToken };
+}
+
+export async function reportVerifiedFirmwareWrite(
+  token: string | undefined,
+  operation: DeviceBridgeOperationPublic,
+  writeToken: string,
+  outcome: 'completed' | 'failed',
+): Promise<DeviceBridgeOperationPublic> {
+  const requestId = crypto.randomUUID();
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const result = await request<DeviceBridgeProbeResponse>(
+        `/Roadex/api/device-bridge/operations/${encodeURIComponent(operation.id)}/report`,
+        { method: 'POST', token, body: { artifactSha256: operation.artifactSha256, outcome, writeToken }, requestId },
+      );
+      if (!result.ok) throw new Error(result.reason);
+      return result.operation;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Firmware write report failed.');
 }
 
 export async function cancelSession(token: string | undefined, sessionId: string): Promise<CancelResponse> {

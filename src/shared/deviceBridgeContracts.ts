@@ -5,6 +5,7 @@ export type DeviceBridgePolicy = {
   requestIntakeEnabled: boolean;
   descriptorObservationEnabled: boolean;
   operationsEnabled: false;
+  writeEnabled: boolean;
   reason: string;
 };
 
@@ -245,3 +246,13 @@ export type DeviceBridgeProbeResponse =
   | { ok: false; gate: 'device-bridge'; reason: string; classification?: string };
 
 export type DeviceBridgeConfirmationResponse = DeviceBridgeProbeResponse;
+
+export type DeviceBridgeWriteAuthorizationResponse =
+  | { ok: true; operation: DeviceBridgeOperationPublic; writeToken: string }
+  | { ok: false; gate: 'device-bridge'; reason: string; classification?: string };
+
+export type DeviceBridgeWriteReportPayload = {
+  artifactSha256: string;
+  outcome: 'completed' | 'failed';
+  writeToken: string;
+};

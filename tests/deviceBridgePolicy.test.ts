@@ -6,6 +6,7 @@ import {
   deviceBridgeMetadataRegistryEnabled,
   deviceBridgeOperationsEnabled,
   deviceBridgeProbeEnabled,
+  deviceBridgeWriteEnabled,
   deviceBridgeApprovalEnabled,
   deviceBridgeRequestIntakeEnabled,
   getDeviceBridgePolicy,
@@ -42,9 +43,10 @@ describe('device bridge intake policy', () => {
       expect(isAvailableDeviceBridgeProbeRoute('POST', '/api/device-bridge/operations/operation-1/probe')).toBe(true);
       expect(isAvailableDeviceBridgeProbeRoute('POST', '/api/device-bridge/operations/operation-1/confirm')).toBe(true);
       expect(isAvailableDeviceBridgeProbeRoute('GET', '/api/device-bridge/operations/operation-1/artifact')).toBe(true);
+      expect(isAvailableDeviceBridgeProbeRoute('POST', '/api/device-bridge/operations/operation-1/authorize-write')).toBe(true);
+      expect(isAvailableDeviceBridgeProbeRoute('POST', '/api/device-bridge/operations/operation-1/report')).toBe(true);
       for (const [method, path] of [
         ['GET', '/api/device-bridge/operations/operation-1/probe'],
-        ['POST', '/api/device-bridge/operations/operation-1/authorize-write'],
         ['POST', '/api/device-bridge/operations/operation-1/flash'],
         ['POST', '/api/device-bridge/operations/operation-1/cancel'],
       ] as const) {
@@ -53,6 +55,19 @@ describe('device bridge intake policy', () => {
       expect(deviceBridgeOperationsEnabled()).toBe(false);
     } finally {
       restoreEnv('ROADEX_DEVICE_BRIDGE_PROBE_ENABLED', original);
+    }
+  });
+  it('keeps write authorization separately default-off', () => {
+    const original = process.env.ROADEX_DEVICE_BRIDGE_WRITE_ENABLED;
+    try {
+      delete process.env.ROADEX_DEVICE_BRIDGE_WRITE_ENABLED;
+      expect(deviceBridgeWriteEnabled()).toBe(false);
+      process.env.ROADEX_DEVICE_BRIDGE_WRITE_ENABLED = 'true';
+      expect(deviceBridgeWriteEnabled()).toBe(true);
+      process.env.ROADEX_DEVICE_BRIDGE_WRITE_ENABLED = '1';
+      expect(deviceBridgeWriteEnabled()).toBe(false);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_WRITE_ENABLED', original);
     }
   });
   it('defaults request intake false and fails closed for malformed booleans', () => {
