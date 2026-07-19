@@ -41,6 +41,21 @@
       "description": "Isolated tablet project and active-thread selection checks",
       "cases": ["selection.tablet-configured", "selection.tablet-unconfigured"],
       "destructive": false
+    },
+    {
+      "id": "unconfigured-control-diagnostic",
+      "definition": "suites/unconfigured-control-diagnostic.json",
+      "description": "Separates unconfigured profile, disabled-state, and console assertions",
+      "cases": [
+        "unconfigured.ble-profile",
+        "unconfigured.ble-disabled",
+        "unconfigured.usb-profile",
+        "unconfigured.usb-disabled",
+        "unconfigured.flash-profile",
+        "unconfigured.flash-disabled",
+        "unconfigured.console"
+      ],
+      "destructive": false
     }
   ]
 }
