@@ -105,7 +105,7 @@ export async function createDeviceBridgeProbeApproval(
 
   const approval = await request<DeviceBridgeApprovalResponse>(
     `/Roadex/api/device-bridge/requests/${encodeURIComponent(intake.request.id)}/approve`,
-    { method: 'POST', token, requestId: crypto.randomUUID() },
+    { method: 'POST', token, body: {}, requestId: crypto.randomUUID() },
   );
   if (!approval.ok) throw new Error(approval.reason);
   return approval.approval;

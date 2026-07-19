@@ -103,8 +103,10 @@ describe('Roadex client CSRF contract', () => {
     for (const call of calls.slice(2)) {
       const headers = new Headers(call.init?.headers);
       expect(headers.has('x-roadex-csrf')).toBe(true);
+      expect(headers.get('content-type')).toBe('application/json');
       expect(headers.get('x-roadex-request-id')).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
     }
+    expect(calls[3].init?.body).toBe('{}');
     expect(calls.some((call) => call.path.includes('start-probe'))).toBe(false);
   });
 });
