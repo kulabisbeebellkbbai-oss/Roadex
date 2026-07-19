@@ -133,7 +133,9 @@ Acceptance criteria:
 
 Owner: Face
 
-Brief: Define and implement the first-screen user workflow with states for empty, loading, success, and error outcomes.
+Status: Done for selected-project readiness checkpoint
+
+Brief: Expose non-sensitive selected-project device-profile readiness on the project selector while keeping all actual device controls bound to the attached session.
 
 Acceptance criteria:
 
@@ -185,6 +187,8 @@ Current checkpoint:
 - The authenticated portal suite passes on desktop, tablet, and mobile.
 - Repeated project-device suites change which identical guard cases pass, isolating a trusted-runner state-settlement race.
 - MSI agent assertions must use bounded Playwright web-first polling after project and thread selection before release verification can continue.
+- The v6 polling change and selected-project readiness attribute pass the isolated tablet configured and unconfigured selection paths.
+- Multi-viewport jobs still contaminate or exhaust later viewport execution: desktop passes first, while later tablet/mobile groups fail despite authenticated gateway `200` responses. Each viewport needs an independent context, state reset, and timeout budget.
 
 ## Approval Gate
 
