@@ -37,6 +37,7 @@ import {
   isAvailableDeviceDescriptorObservationRoute,
 } from '../src/server/deviceBridgePolicy.js';
 import type { CreateSessionRequest } from '../src/shared/sessionContracts.js';
+import { bindLiveStreamCleanup } from './liveStreamCleanup.js';
 
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8780);
@@ -353,14 +354,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       }
       const keepalive = setInterval(() => {
         if (!subscription.isAuthorized()) {
-          clearInterval(keepalive);
-          subscription.unsubscribe();
+          cleanup();
           res.end();
           return;
         }
         res.write(`: keepalive\n\n`);
       }, 25_000);
-      req.on('close', () => {
+      const cleanup = bindLiveStreamCleanup(req, res, () => {
         clearInterval(keepalive);
         subscription.unsubscribe();
       });
