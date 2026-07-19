@@ -194,6 +194,8 @@ Current checkpoint:
 - MSI agent v6 still needs independent viewport contexts and timeout budgets for reliable combined execution; this is an agent limitation, not a Roadex control-state failure.
 - MSI agent v7 passes the portal suite across all viewports, but the combined device-control flow passes only desktop. The unchanged tablet-only and mobile-only flows both pass, classifying the remaining defect as browser-process transport carryover rather than Roadex responsive behavior.
 - The next trusted-runner change must launch and close a separate Chromium process per viewport, await stream termination and process exit, then rerun the restored canonical three-viewport suite.
+- Roadex heartbeat deployment now makes the gateway close upstream streams promptly as `client_closed` with no subscriber-limit denial. Agent v8 still marks passed viewport work interrupted because expected EventSource cancellation remains in its request tracker.
+- Agent v9 must preserve passed assertions across expected teardown cancellation and must never claim a suite after authentication returns `needsUser` or `failed`.
 
 ## Approval Gate
 

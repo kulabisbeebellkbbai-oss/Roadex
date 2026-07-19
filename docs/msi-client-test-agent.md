@@ -86,3 +86,13 @@ Version 7 context isolation is necessary but not sufficient for Roadex pages wit
 After closing the page and context, the runner must await tracked stream request termination and browser-process exit before advancing. Cleanup remains bounded and must classify an unclosed transport as an interrupted runner result rather than silently starting the next viewport. The protected-gateway heartbeat and MSI-local authentication state boundaries remain unchanged.
 
 Acceptance requires the restored canonical `project-device-controls` suite to pass desktop, tablet, and mobile in one job. The existing isolated tablet and mobile successes are diagnostic evidence only; they do not replace the combined acceptance run.
+
+## Version 9 Expected Stream Cancellation
+
+Roadex now emits a bounded live-stream heartbeat, and protected-gateway evidence confirms browser-process teardown closes each upstream stream as `client_closed` before the next viewport starts. Playwright may still retain or fail an EventSource request object after the browser has deliberately closed it. The trusted runner must not replace an otherwise passed case with `interrupted` solely because a tracked `?live=1` request ends through expected page, context, or browser shutdown.
+
+For each viewport, the runner must preserve the case's assertion result before cleanup, close the page/context/browser, and allow a cleanup budget covering at least two deployed Roadex heartbeat intervals. A tracked live-stream request is expected cleanup only when its URL matches the existing Roadex live-stream route, teardown has already started, and it finishes or fails because the owning browser is closing. Any non-stream request failure, live-stream HTTP error before teardown, browser error, cleanup timeout beyond the bounded budget, or surviving browser process remains a failure or interruption.
+
+The queue worker must also claim a pending suite only when `roadex.client_auth_setup` returns both `status: ok` and `authenticated: true`. It must leave the suite pending when authentication returns `needsUser` or `failed`.
+
+Acceptance requires an authentication-only success followed by the canonical `project-device-controls` and `portal-smoke` suites. Every viewport must pass, gateway streams must close as `client_closed`, and no subscriber-limit denial or device action may occur.
