@@ -876,6 +876,7 @@ button {
 
 .descriptor-observation {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -885,6 +886,7 @@ button {
 
 .descriptor-observation > div {
   display: grid;
+  flex: 1 1 100%;
   gap: 4px;
   min-width: 0;
 }
@@ -899,6 +901,24 @@ button {
   align-items: center;
   gap: 7px;
   flex: 0 0 auto;
+}
+
+.descriptor-observation .device-verification {
+  flex: 1 1 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+
+.descriptor-observation .device-verification.verified {
+  color: var(--success);
+  background: #f2faf5;
+}
+
+.descriptor-observation .device-verification.error {
+  color: var(--danger);
+  background: #fff4f2;
 }
 
 .safeguard-note {

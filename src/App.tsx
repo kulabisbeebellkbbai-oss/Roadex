@@ -25,12 +25,15 @@ import { useRoadexSession } from './hooks/useRoadexSession';
 import { navItems } from './roadexModel';
 import { isVisibleTranscriptEvent } from './transcript';
 import { resolveLayoutMode, toggleLayoutMode } from './layoutMode';
+import { hasBleRuntimeVerification, verifyBleRuntime } from './client/bleRuntimeVerifier';
 
 function App() {
   const roadex = useRoadexSession();
   const [prompt, setPrompt] = useState('');
   const [sidebarPanel, setSidebarPanel] = useState<'projects' | 'sessions' | 'devices' | 'security'>('projects');
   const [selectedProjectId, setSelectedProjectId] = useState('');
+  const [bleVerification, setBleVerification] = useState<'idle' | 'checking' | 'verified' | 'error'>('idle');
+  const [bleVerificationMessage, setBleVerificationMessage] = useState('');
   const [layoutMode, setLayoutMode] = useState(() => resolveLayoutMode(
     readLayoutPreference(),
     window.matchMedia('(max-width: 720px)').matches,
@@ -77,6 +80,19 @@ function App() {
     const nextPrompt = prompt;
     setPrompt('');
     await roadex.sendPrompt(nextPrompt);
+  }
+
+  async function handleBleVerification() {
+    setBleVerification('checking');
+    setBleVerificationMessage('');
+    try {
+      const result = await verifyBleRuntime(window.navigator);
+      setBleVerification('verified');
+      setBleVerificationMessage(`Firmware ${result.firmware} verified; disconnected sensors reported correctly.`);
+    } catch (error) {
+      setBleVerification('error');
+      setBleVerificationMessage(error instanceof Error ? error.message : 'BLE runtime verification failed.');
+    }
   }
 
   return (
@@ -409,6 +425,14 @@ function App() {
                 </span>
               </div>
               <button
+                disabled={!hasBleRuntimeVerification(window.navigator) || bleVerification === 'checking'}
+                onClick={() => void handleBleVerification()}
+                type="button"
+              >
+                <RadioTower size={17} />
+                {bleVerification === 'checking' ? 'Checking BLE' : 'Verify BLE runtime'}
+              </button>
+              <button
                 disabled={
                   !roadex.deviceBridgePolicy?.descriptorObservationEnabled ||
                   roadex.browserDeviceCapability.transport !== 'webusb' ||
@@ -484,6 +508,11 @@ function App() {
                 <PlugZap size={17} />
                 Flash verified firmware
               </button>
+              {bleVerificationMessage ? (
+                <span className={`device-verification ${bleVerification}`} role={bleVerification === 'error' ? 'alert' : 'status'}>
+                  {bleVerificationMessage}
+                </span>
+              ) : null}
             </div>
             <div className="timeline-note">
               <Clock3 size={18} />
