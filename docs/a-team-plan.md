@@ -147,13 +147,16 @@ Acceptance criteria:
 
 Owner: B.A.
 
-Brief: Create the data, API, and persistence contract required by the product workflow.
+Status: In progress
+
+Active brief: Define the MSI v7 trusted execution contract for independent viewport contexts and timeout budgets, immediate post-auth suite claiming, gateway heartbeat continuity, deterministic stream cleanup, and redacted aggregate results.
 
 Acceptance criteria:
 
 - Inputs are validated.
 - Failures are typed.
 - Run commands are documented.
+- Existing non-destructive suite and security boundaries remain unchanged.
 
 ### Define Security Review Gates
 

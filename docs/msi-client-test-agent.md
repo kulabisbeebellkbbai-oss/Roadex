@@ -55,4 +55,26 @@ The protected MSI run must not set `ROADEX_E2E_REQUIRE_NO_STORE=0`; that overrid
 
 Browser traces, videos, screenshots, DOM snapshots, and raw failure messages are disabled by default. The trusted agent deletes stale artifacts before each run and cleans temporary browser artifacts in an unconditional finalizer after success, failure, cancellation, or timeout. Diagnostic retention may be enabled only when the user explicitly approves it for a specific run; retained files remain local and are not returned through the queue.
 
-Stop the MSI agent to disable remote test execution. Roll back by restoring `roadex-msi-test-agent-v2`; no gateway, firewall, or Roadex service change is required.
+Stop the MSI agent to disable remote test execution. Roll back a v7 installation by restoring the currently verified `roadex-msi-test-agent-v6`; no gateway, firewall, or Roadex service change is required.
+
+## Version 7 Execution Contract
+
+The trusted MSI interpreter must treat each declared viewport as an independent execution unit. For every viewport it must create a fresh browser context from the same ACL-checked MSI-local storage-state file, apply a new bounded timeout budget, execute the declared cases, close all pages and the context in a `finally` block, and wait for live Roadex stream requests to close before starting the next viewport. Page state, local-storage mutations, console buffers, assertion slots, and timeout consumption must not carry between viewport units.
+
+The queue worker must claim an already-pending `roadex.client_suite` job immediately after a successful `roadex.client_auth_setup` action. It must not return to the ordinary polling delay between those jobs. If no suite is pending, the auth browser must keep the protected-gateway heartbeat active until the auth action completes; a later suite must detect expired gateway state as `needsUser` before running assertions.
+
+The runner must preserve these boundaries:
+
+- Authentication storage remains under the dedicated MSI account and never enters queue jobs, results, logs, archives, or the Roadex checkout.
+- Repository suites remain declarative data and cannot supply code, shell commands, selectors outside declared test IDs, timeout values, or cleanup behavior.
+- Viewport cleanup must not call Roadex termination, archive, close, approval, operation, firmware, USB-write, or flash endpoints.
+- Result aggregation occurs only after each viewport has produced a terminal result. Output remains limited to the existing result schema.
+- Expected context cleanup may close SSE connections, but genuine HTTP failures and browser errors remain test failures.
+
+Acceptance requires:
+
+1. Run `roadex.client_auth_setup` with a suite already pending and confirm the suite starts before protected-gateway heartbeat expiry.
+2. Run `portal-smoke` across desktop, tablet, and mobile in one job and require every declared case to pass.
+3. Run `project-device-controls` across desktop, tablet, and mobile in one job and require `device.project-control-boundaries` to pass in every viewport.
+4. Confirm gateway evidence contains allowed Roadex requests and normal client-closed stream cleanup without heartbeat diversion or subscriber-limit denial.
+5. Confirm no device chooser, firmware transfer, write, approval, or operation action occurred.
