@@ -88,6 +88,7 @@ export function useRoadexSession(): RoadexSessionState {
   const [notice, setNotice] = useState<string>();
   const threadSelectionSequence = useRef(0);
   const activeStreamSessionId = useRef<string | undefined>(undefined);
+  const verifiedDeviceMac = useRef<string | undefined>(undefined);
 
   const refreshStream = useCallback(
     async (targetSession: RoadexSession | undefined = session) => {
@@ -449,6 +450,7 @@ export function useRoadexSession(): RoadexSessionState {
         ...identity,
       });
       setDescriptorObservation(result.observation);
+      verifiedDeviceMac.current = result.observation.verification === 'verified' ? identity.deviceMac : undefined;
       setNotice(result.observation.verification === 'verified'
         ? 'ESP32 identity verified against the project inventory binding.'
         : 'ESP32 identity does not match the project inventory binding.');
@@ -496,18 +498,18 @@ export function useRoadexSession(): RoadexSessionState {
       setError('Create a fresh probe approval before running the controlled probe.');
       return;
     }
+    if (!verifiedDeviceMac.current) {
+      setError('Verify the ESP32 identity again before running the controlled probe.');
+      return;
+    }
     setError(undefined);
     setNotice(undefined);
     try {
-      const identity = await probeEsp32Identity(window.navigator);
-      await runDeviceBridgeProbe(token, pendingProbeApproval, identity.deviceMac);
+      await runDeviceBridgeProbe(token, pendingProbeApproval, verifiedDeviceMac.current);
+      verifiedDeviceMac.current = undefined;
       setPendingProbeApproval(undefined);
       setNotice('Controlled ESP32 probe verified. No firmware or device write was performed.');
     } catch (caught) {
-      if (caught instanceof DOMException && caught.name === 'NotFoundError') {
-        setNotice('Serial device selection was cancelled.');
-        return;
-      }
       setError(caught instanceof Error ? caught.message : 'Controlled ESP32 probe failed.');
     }
   }, [pendingProbeApproval, token]);
