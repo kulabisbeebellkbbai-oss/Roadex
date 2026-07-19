@@ -5,7 +5,7 @@
       "id": "portal-smoke",
       "definition": "suites/portal-smoke.json",
       "description": "Authenticated portal, gateway, console, and responsive-layout checks",
-      "cases": ["portal.ready-layout"],
+      "cases": ["portal.authenticated-page", "portal.project-thread-selectors", "portal.layout-toggle"],
       "destructive": false
     },
     {

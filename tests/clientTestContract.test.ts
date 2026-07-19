@@ -105,7 +105,7 @@ describe('MSI client test contract', () => {
     expect(compile(resultSchema)({
       schemaVersion: 1, jobId: 'contract-smoke', commit: 'a'.repeat(40), suite: 'portal-smoke', status: 'passed',
       aggregate: { passed: 1, failed: 0, timedOut: 0, skipped: 0, interrupted: 0, needsUser: 0, total: 1 },
-      tests: [{ project: 'desktop', case: 'portal.ready-layout', status: 'passed' }],
+      tests: [{ project: 'desktop', case: 'portal.authenticated-page', status: 'passed' }],
     })).toBe(true);
   });
 

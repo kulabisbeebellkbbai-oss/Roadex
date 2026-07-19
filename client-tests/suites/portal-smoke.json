@@ -4,11 +4,26 @@
   "viewports": ["desktop", "tablet", "mobile"],
   "cases": [
     {
-      "id": "portal.ready-layout",
+      "id": "portal.authenticated-page",
+      "steps": [
+        { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
+        { "action": "assertVisible", "testId": "layout-toggle" },
+        { "action": "assertNoBrowserErrors" }
+      ]
+    },
+    {
+      "id": "portal.project-thread-selectors",
       "steps": [
         { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "assertVisible", "testId": "project-selector" },
         { "action": "assertVisible", "testId": "thread-selector" },
+        { "action": "assertNoBrowserErrors" }
+      ]
+    },
+    {
+      "id": "portal.layout-toggle",
+      "steps": [
+        { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "assertVisible", "testId": "layout-toggle" },
         { "action": "captureAttribute", "testId": "layout-toggle", "attribute": "aria-pressed", "slot": "initialLayout" },
         { "action": "click", "testId": "layout-toggle" },
