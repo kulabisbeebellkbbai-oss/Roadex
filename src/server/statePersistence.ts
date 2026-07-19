@@ -400,7 +400,7 @@ function sanitizeOperation(record: DeviceBridgeOperationRecord): DeviceBridgeOpe
     validBoundedString(record.inventoryBindingId, 128) &&
     /^[a-f0-9]{64}$/i.test(record.deviceIdentityTag) &&
     record.operation === 'esp32.flash' &&
-    ['probe', 'confirmation', 'destructive', 'reporting', 'completed', 'failed', 'cancelled'].includes(record.phase) &&
+    ['probe', 'verified', 'confirmation', 'destructive', 'reporting', 'completed', 'failed', 'cancelled'].includes(record.phase) &&
     /^[a-f0-9]{64}$/i.test(record.credentialDigest) &&
     (!record.actualDeviceIdentityTag || /^[a-f0-9]{64}$/i.test(record.actualDeviceIdentityTag)) &&
     (!record.verifiedArtifactSha256 || /^[a-f0-9]{64}$/i.test(record.verifiedArtifactSha256)) &&

@@ -49,6 +49,7 @@ export type AuditEvent = {
     | 'device_bridge.approval'
     | 'device_bridge.descriptor_observation'
     | 'device_bridge.request'
+    | 'device_bridge.operation_probe'
     | 'security.denied';
   resource: string;
   outcome: 'allowed' | 'denied';

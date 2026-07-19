@@ -11,6 +11,7 @@ const descriptorHmacKeyEnv = 'ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY';
 const metadataRegistryEnabledEnv = 'ROADEX_DEVICE_BRIDGE_METADATA_REGISTRY_ENABLED';
 const auditHmacKeyEnv = 'ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY';
 const identityHmacKeyEnv = 'ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY';
+const probeEnabledEnv = 'ROADEX_DEVICE_BRIDGE_PROBE_ENABLED';
 
 export type DeviceBridgeInventoryDevice = {
   projectId: string;
@@ -52,6 +53,10 @@ export function deviceBridgeMetadataRegistryEnabled(): boolean {
 
 export function deviceBridgeOperationsEnabled(): false {
   return false;
+}
+
+export function deviceBridgeProbeEnabled(): boolean {
+  return strictEnabledByEnv(process.env[probeEnabledEnv]);
 }
 
 export function deviceBridgeAuditHmacKey(): string | undefined {
@@ -104,6 +109,12 @@ export function isAvailableDeviceBridgeIntakeRoute(method: string | undefined, p
 
 export function isAvailableDeviceBridgeApprovalRoute(method: string | undefined, pathname: string): boolean {
   return method === 'POST' && /^\/api\/device-bridge\/requests\/[^/]+\/approve$/.test(pathname);
+}
+
+export function isAvailableDeviceBridgeProbeRoute(method: string | undefined, pathname: string): boolean {
+  if (method === 'POST' && /^\/api\/device-bridge\/approvals\/[^/]+\/start-probe$/.test(pathname)) return true;
+  if (method === 'POST' && /^\/api\/device-bridge\/operations\/[^/]+\/probe$/.test(pathname)) return true;
+  return false;
 }
 
 export function isAvailableDeviceDescriptorObservationRoute(method: string | undefined, pathname: string): boolean {

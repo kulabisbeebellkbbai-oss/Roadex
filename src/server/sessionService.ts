@@ -19,6 +19,7 @@ import {
   deviceBridgeDescriptorHmacKey,
   deviceBridgeDescriptorObservationEnabled,
   deviceBridgeMetadataRegistryEnabled,
+  deviceBridgeProbeEnabled,
   deviceBridgeRequestIntakeEnabled,
   getDeviceBridgePolicy,
 } from './deviceBridgePolicy.js';
@@ -56,6 +57,10 @@ import type {
   DeviceBridgeApprovalResponse,
   DeviceBridgeMetadataResponse,
   DeviceBridgeOperationRecord,
+  DeviceBridgeOperationPublic,
+  DeviceBridgeProbePayload,
+  DeviceBridgeProbeResponse,
+  DeviceBridgeProbeStartResponse,
   DeviceBridgeRequestPayload,
   DeviceBridgeRequestPublic,
   DeviceBridgeRequestRecord,
@@ -816,6 +821,146 @@ export function approveDeviceBridgeRequest(
   return { ok: true, approval: publicDeviceBridgeApproval(approval) };
 }
 
+export function startDeviceBridgeProbe(
+  state: RoadexState,
+  user: UserProfile,
+  approvalId: string,
+): DeviceBridgeProbeStartResponse {
+  const auditHmacKey = deviceBridgeAuditHmacKey();
+  if (!deviceBridgeProbeEnabled() || !auditHmacKey) {
+    return publicDeviceBridgeProbeDenial('device-bridge');
+  }
+  if (user.authMode !== 'protected-gateway' || !canAuthorizeInventoryBinding(user)) {
+    return denyDeviceBridgeProbe(state, user, approvalId, 'auth', auditHmacKey);
+  }
+  const approval = state.deviceBridgeApprovals.get(approvalId);
+  if (!approval || approval.userId !== user.id || approval.status !== 'pending' || expiredIso(approval.expiresAt)) {
+    return denyDeviceBridgeProbe(state, user, approvalId, 'approval', auditHmacKey);
+  }
+  const session = getOwnedSession(state.sessions, user.id, approval.sessionId);
+  const artifact = state.deviceArtifacts.get(approval.artifactId);
+  const binding = state.deviceInventoryBindings.get(approval.inventoryBindingId);
+  const duplicate = [...state.deviceBridgeOperations.values()].some((operation) => operation.approvalId === approval.id);
+  if (
+    !session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle !== 'ready' ||
+    session.workspace.id !== approval.projectId || duplicate ||
+    !artifact || artifact.status !== 'active' || expiredIso(artifact.expiresAt) ||
+    artifact.sessionId !== approval.sessionId || artifact.projectId !== approval.projectId ||
+    artifact.sha256.toLowerCase() !== approval.artifactSha256 ||
+    !validActiveInventoryBindingForRequest(binding, approval.projectId) ||
+    binding.deviceIdentityTag.toLowerCase() !== approval.deviceIdentityTag || !binding.deviceMacTag
+  ) {
+    return denyDeviceBridgeProbe(state, user, approval.id, 'state', auditHmacKey);
+  }
+
+  const createdAt = new Date().toISOString();
+  const operation: DeviceBridgeOperationRecord = {
+    id: `bridge-operation-${randomUUID()}`,
+    approvalId: approval.id,
+    userId: user.id,
+    sessionId: approval.sessionId,
+    projectId: approval.projectId,
+    artifactId: approval.artifactId,
+    artifactSha256: approval.artifactSha256,
+    inventoryBindingId: approval.inventoryBindingId,
+    deviceIdentityTag: approval.deviceIdentityTag,
+    operation: 'esp32.flash',
+    phase: 'probe',
+    credentialDigest: createHash('sha256').update(randomBytes(32)).digest('hex'),
+    nextEventSequence: 0,
+    phaseExpiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    reportingExpiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+    createdAt,
+    updatedAt: createdAt,
+  };
+  const consumedApproval: DeviceBridgeApprovalRecord = { ...approval, status: 'consumed' };
+  const auditEvent = createBridgeAuditEvent(
+    state, auditHmacKey, user, 'device_bridge.operation_probe', operation.id, 'allowed',
+    bridgeAuditSummary(auditHmacKey, {
+      classification: 'probe_started', userId: user.id, sessionId: operation.sessionId, requestId: operation.id,
+    }),
+  );
+  persistStateSnapshot(state, {
+    deviceBridgeApprovals: [...state.deviceBridgeApprovals.values()].map((record) =>
+      record.id === approval.id ? consumedApproval : record),
+    deviceBridgeOperations: [...state.deviceBridgeOperations.values(), operation],
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.deviceBridgeApprovals.set(approval.id, consumedApproval);
+  state.deviceBridgeOperations.set(operation.id, operation);
+  state.audit.events.push(auditEvent);
+  return { ok: true, operation: publicDeviceBridgeOperation(operation) };
+}
+
+export function submitDeviceBridgeProbe(
+  state: RoadexState,
+  user: UserProfile,
+  operationId: string,
+  payload: unknown,
+): DeviceBridgeProbeResponse {
+  const auditHmacKey = deviceBridgeAuditHmacKey();
+  const identityHmacKey = deviceBridgeIdentityHmacKey();
+  if (!deviceBridgeProbeEnabled() || !auditHmacKey || !identityHmacKey) {
+    return publicDeviceBridgeProbeDenial('device-bridge');
+  }
+  const parsed = parseDeviceBridgeProbePayload(payload);
+  const operation = state.deviceBridgeOperations.get(operationId);
+  if (
+    user.authMode !== 'protected-gateway' || !parsed || !operation || operation.userId !== user.id ||
+    operation.phase !== 'probe' || expiredIso(operation.phaseExpiresAt)
+  ) {
+    return denyDeviceBridgeProbe(state, user, operationId, 'auth', auditHmacKey);
+  }
+  const session = getOwnedSession(state.sessions, user.id, operation.sessionId);
+  const artifact = state.deviceArtifacts.get(operation.artifactId);
+  const binding = state.deviceInventoryBindings.get(operation.inventoryBindingId);
+  const observedMacTag = deviceMacTag(identityHmacKey, operation.projectId, parsed.deviceMac);
+  const identityMatches = Boolean(
+    validActiveInventoryBindingForRequest(binding, operation.projectId) &&
+    binding.deviceIdentityTag.toLowerCase() === operation.deviceIdentityTag &&
+    binding.deviceMacTag === observedMacTag,
+  );
+  const artifactMatches = Boolean(
+    artifact && artifact.status === 'active' && !expiredIso(artifact.expiresAt) &&
+    artifact.sessionId === operation.sessionId && artifact.projectId === operation.projectId &&
+    artifact.sha256.toLowerCase() === operation.artifactSha256 &&
+    parsed.artifactSha256 === operation.artifactSha256,
+  );
+  const sessionMatches = Boolean(
+    session && isManagedSessionAuthorized(state, user, session) && session.lifecycle === 'ready' &&
+    session.workspace.id === operation.projectId,
+  );
+  const verified = identityMatches && artifactMatches && sessionMatches;
+  const updated: DeviceBridgeOperationRecord = {
+    ...operation,
+    phase: verified ? 'verified' : 'failed',
+    ...(verified ? {
+      actualDeviceIdentityTag: observedMacTag,
+      verifiedArtifactSha256: parsed.artifactSha256,
+    } : {}),
+    updatedAt: new Date().toISOString(),
+  };
+  const classification = verified
+    ? 'probe_verified'
+    : !identityMatches ? 'identity_mismatch' : !artifactMatches ? 'artifact_mismatch' : 'session_mismatch';
+  const auditEvent = createBridgeAuditEvent(
+    state, auditHmacKey, user, 'device_bridge.operation_probe', operation.id, verified ? 'allowed' : 'denied',
+    bridgeAuditSummary(auditHmacKey, {
+      classification, userId: user.id, sessionId: operation.sessionId, requestId: operation.id,
+    }),
+  );
+  persistStateSnapshot(state, {
+    deviceBridgeOperations: [...state.deviceBridgeOperations.values()].map((record) =>
+      record.id === operation.id ? updated : record),
+    auditEvents: [...state.audit.events, auditEvent],
+  });
+  state.deviceBridgeOperations.set(operation.id, updated);
+  state.audit.events.push(auditEvent);
+  return verified
+    ? { ok: true, operation: publicDeviceBridgeOperation(updated) }
+    : publicDeviceBridgeProbeDenial(classification);
+}
+
 export function observeDeviceDescriptor(
   state: RoadexState,
   user: UserProfile,
@@ -1522,6 +1667,51 @@ function publicDeviceBridgeApproval(approval: DeviceBridgeApprovalRecord): Devic
   };
 }
 
+function publicDeviceBridgeOperation(operation: DeviceBridgeOperationRecord): DeviceBridgeOperationPublic {
+  return {
+    id: operation.id,
+    approvalId: operation.approvalId,
+    sessionId: operation.sessionId,
+    projectId: operation.projectId,
+    artifactId: operation.artifactId,
+    artifactSha256: operation.artifactSha256,
+    inventoryBindingId: operation.inventoryBindingId,
+    operation: operation.operation,
+    phase: operation.phase,
+    verifiedArtifactSha256: operation.verifiedArtifactSha256,
+    nextEventSequence: operation.nextEventSequence,
+    phaseExpiresAt: operation.phaseExpiresAt,
+    reportingExpiresAt: operation.reportingExpiresAt,
+    createdAt: operation.createdAt,
+    updatedAt: operation.updatedAt,
+  };
+}
+
+function denyDeviceBridgeProbe(
+  state: RoadexState,
+  user: UserProfile,
+  resource: string,
+  classification: string,
+  auditHmacKey: string,
+): Extract<DeviceBridgeProbeResponse, { ok: false }> {
+  const auditEvent = createBridgeAuditEvent(
+    state, auditHmacKey, user, 'security.denied', resource, 'denied',
+    bridgeAuditSummary(auditHmacKey, { classification, userId: user.id, sessionId: resource }),
+  );
+  persistStateSnapshot(state, { auditEvents: [...state.audit.events, auditEvent] });
+  state.audit.events.push(auditEvent);
+  return publicDeviceBridgeProbeDenial(classification);
+}
+
+function publicDeviceBridgeProbeDenial(classification: string): Extract<DeviceBridgeProbeResponse, { ok: false }> {
+  return {
+    ok: false,
+    gate: 'device-bridge',
+    reason: 'Device bridge probe denied.',
+    classification,
+  };
+}
+
 function denyDeviceInventoryBinding(
   state: RoadexState,
   user: UserProfile,
@@ -1763,6 +1953,21 @@ function parseDescriptorObservationPayload(payload: unknown): {
     },
   };
 }
+
+function parseDeviceBridgeProbePayload(payload: unknown): DeviceBridgeProbePayload | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
+  const record = payload as Record<string, unknown>;
+  if (Object.keys(record).sort().join(',') !== 'artifactSha256,deviceMac') return undefined;
+  if (
+    !validDeviceMac(record.deviceMac) ||
+    typeof record.artifactSha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(record.artifactSha256)
+  ) return undefined;
+  return {
+    deviceMac: canonicalDeviceMac(record.deviceMac),
+    artifactSha256: record.artifactSha256.toLowerCase(),
+  };
+}
+
 
 function validUsbIdentifier(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 0xffff;

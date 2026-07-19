@@ -208,7 +208,7 @@ export type DeviceBridgeOperationRecord = {
   inventoryBindingId: string;
   deviceIdentityTag: string;
   operation: 'esp32.flash';
-  phase: 'probe' | 'confirmation' | 'destructive' | 'reporting' | 'completed' | 'failed' | 'cancelled';
+  phase: 'probe' | 'verified' | 'confirmation' | 'destructive' | 'reporting' | 'completed' | 'failed' | 'cancelled';
   credentialDigest: string;
   actualDeviceIdentityTag?: string;
   verifiedArtifactSha256?: string;
@@ -220,3 +220,26 @@ export type DeviceBridgeOperationRecord = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type DeviceBridgeOperationPublic = Omit<
+  DeviceBridgeOperationRecord,
+  | 'userId'
+  | 'deviceIdentityTag'
+  | 'credentialDigest'
+  | 'actualDeviceIdentityTag'
+  | 'confirmationChallengeDigest'
+  | 'destructiveNonceDigest'
+>;
+
+export type DeviceBridgeProbePayload = {
+  deviceMac: string;
+  artifactSha256: string;
+};
+
+export type DeviceBridgeProbeStartResponse =
+  | { ok: true; operation: DeviceBridgeOperationPublic }
+  | { ok: false; gate: 'device-bridge'; reason: string; classification?: string };
+
+export type DeviceBridgeProbeResponse =
+  | { ok: true; operation: DeviceBridgeOperationPublic }
+  | { ok: false; gate: 'device-bridge'; reason: string; classification?: string };

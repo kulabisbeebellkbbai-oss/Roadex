@@ -17,16 +17,19 @@ import {
   reopenSession,
   registerDeviceArtifactMetadata,
   requestDeviceBridgeIntake,
+  startDeviceBridgeProbe,
   revokeDeviceArtifactMetadata,
   revokeDeviceInventoryBinding,
   subscribeToSessionStream,
   streamEventsForSession,
   submitPrompt,
+  submitDeviceBridgeProbe,
 } from '../src/server/sessionService.js';
 import {
   isAvailableDeviceBridgeIntakeRoute,
   isAvailableDeviceBridgeApprovalRoute,
   isAvailableDeviceBridgeMetadataRoute,
+  isAvailableDeviceBridgeProbeRoute,
   isAvailableDeviceDescriptorObservationRoute,
 } from '../src/server/deviceBridgePolicy.js';
 import type { CreateSessionRequest } from '../src/shared/sessionContracts.js';
@@ -199,6 +202,25 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       gate: result.gate,
       reason: result.reason,
     });
+    return;
+  }
+
+  const deviceBridgeProbeStartMatch = url.pathname.match(/^\/api\/device-bridge\/approvals\/([^/]+)\/start-probe$/);
+  if (deviceBridgeProbeStartMatch && isAvailableDeviceBridgeProbeRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const result = startDeviceBridgeProbe(state, auth.user, decodeURIComponent(deviceBridgeProbeStartMatch[1]));
+    sendJson(res, result.ok ? 201 : 403, result);
+    return;
+  }
+
+  const deviceBridgeProbeMatch = url.pathname.match(/^\/api\/device-bridge\/operations\/([^/]+)\/probe$/);
+  if (deviceBridgeProbeMatch && isAvailableDeviceBridgeProbeRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const body = await readJson<unknown>(req);
+    const result = submitDeviceBridgeProbe(state, auth.user, decodeURIComponent(deviceBridgeProbeMatch[1]), body);
+    sendJson(res, result.ok ? 200 : result.classification?.endsWith('mismatch') ? 409 : 403, result);
     return;
   }
 

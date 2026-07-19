@@ -27,6 +27,8 @@ import {
   streamEventsForSession,
   subscribeToSessionStream,
   submitPrompt,
+  startDeviceBridgeProbe,
+  submitDeviceBridgeProbe,
 } from '../src/server/sessionService';
 import type { UserProfile, WorkspaceRef } from '../src/shared/sessionContracts';
 import type {
@@ -603,6 +605,103 @@ describe('Roadex session service', () => {
       restoreEnv('ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED', originalApproval);
       restoreEnv('ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED', originalIntake);
       restoreEnv('ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY', originalHmac);
+    }
+  });
+
+  it('starts and completes a probe-only operation without creating write authority', async () => {
+    const names = [
+      'ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED',
+      'ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED',
+      'ROADEX_DEVICE_BRIDGE_PROBE_ENABLED',
+      'ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY',
+      'ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY',
+    ] as const;
+    const originals = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    try {
+      process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_PROBE_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+      process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY = testIdentityHmacKey();
+      const persistence = createMemoryPersistence();
+      const state = createInitialState(fakeRunner(), persistence);
+      const user = protectedGatewayUser();
+      const session = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      if (!session.ok) return;
+      const artifact = seedDeviceArtifact(state, session.session.id);
+      const deviceMac = 'aa:bb:cc:dd:ee:ff';
+      const macTag = createHmac('sha256', testIdentityHmacKey())
+        .update(`roadex-device-mac:v1:roadex:${deviceMac}`)
+        .digest('hex');
+      seedDeviceInventoryBinding(state, 'binding', 'roadex', { deviceMacTag: macTag });
+      const intake = requestDeviceBridgeIntake(state, user, session.session.id, validDeviceBridgeRequest());
+      if (!intake.ok) return;
+      const approval = approveDeviceBridgeRequest(state, user, intake.request.id);
+      if (!approval.ok) return;
+
+      const started = startDeviceBridgeProbe(state, user, approval.approval.id);
+      expect(started).toMatchObject({ ok: true, operation: { phase: 'probe' } });
+      if (!started.ok) return;
+      expect(state.deviceBridgeApprovals.get(approval.approval.id)?.status).toBe('consumed');
+      const verified = submitDeviceBridgeProbe(state, user, started.operation.id, {
+        deviceMac,
+        artifactSha256: artifact.sha256,
+      });
+      expect(verified).toMatchObject({ ok: true, operation: { phase: 'verified' } });
+      expect(JSON.stringify(verified)).not.toContain(deviceMac);
+      expect(state.deviceBridgeOperations.get(started.operation.id)).toMatchObject({
+        phase: 'verified',
+        verifiedArtifactSha256: artifact.sha256,
+      });
+      expect(state.deviceBridgeOperations.get(started.operation.id)?.confirmationChallengeDigest).toBeUndefined();
+      expect(state.deviceBridgeOperations.get(started.operation.id)?.destructiveNonceDigest).toBeUndefined();
+    } finally {
+      for (const name of names) restoreEnv(name, originals[name]);
+    }
+  });
+
+  it('closes a probe-only operation on identity mismatch', async () => {
+    const names = [
+      'ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED',
+      'ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED',
+      'ROADEX_DEVICE_BRIDGE_PROBE_ENABLED',
+      'ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY',
+      'ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY',
+    ] as const;
+    const originals = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    try {
+      process.env.ROADEX_DEVICE_BRIDGE_REQUEST_INTAKE_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_PROBE_ENABLED = 'true';
+      process.env.ROADEX_DEVICE_BRIDGE_AUDIT_HMAC_KEY = testAuditHmacKey();
+      process.env.ROADEX_DEVICE_BRIDGE_IDENTITY_HMAC_KEY = testIdentityHmacKey();
+      const state = createInitialState(fakeRunner(), createMemoryPersistence());
+      const user = protectedGatewayUser();
+      const session = await createSessionFromApi(state, user, { workspaceId: 'roadex' });
+      if (!session.ok) return;
+      const artifact = seedDeviceArtifact(state, session.session.id);
+      const expectedMacTag = createHmac('sha256', testIdentityHmacKey())
+        .update('roadex-device-mac:v1:roadex:aa:bb:cc:dd:ee:ff')
+        .digest('hex');
+      seedDeviceInventoryBinding(state, 'binding', 'roadex', { deviceMacTag: expectedMacTag });
+      const intake = requestDeviceBridgeIntake(state, user, session.session.id, validDeviceBridgeRequest());
+      if (!intake.ok) return;
+      const approval = approveDeviceBridgeRequest(state, user, intake.request.id);
+      if (!approval.ok) return;
+      const started = startDeviceBridgeProbe(state, user, approval.approval.id);
+      if (!started.ok) return;
+
+      expect(submitDeviceBridgeProbe(state, user, started.operation.id, {
+        deviceMac: '00:11:22:33:44:55',
+        artifactSha256: artifact.sha256,
+      })).toMatchObject({ ok: false, classification: 'identity_mismatch' });
+      expect(state.deviceBridgeOperations.get(started.operation.id)?.phase).toBe('failed');
+      expect(state.audit.events.at(-1)).toMatchObject({
+        action: 'device_bridge.operation_probe',
+        outcome: 'denied',
+      });
+    } finally {
+      for (const name of names) restoreEnv(name, originals[name]);
     }
   });
 

@@ -5,12 +5,14 @@ import {
   deviceBridgeDescriptorObservationEnabled,
   deviceBridgeMetadataRegistryEnabled,
   deviceBridgeOperationsEnabled,
+  deviceBridgeProbeEnabled,
   deviceBridgeApprovalEnabled,
   deviceBridgeRequestIntakeEnabled,
   getDeviceBridgePolicy,
   isAvailableDeviceBridgeApprovalRoute,
   isAvailableDeviceBridgeIntakeRoute,
   isAvailableDeviceBridgeMetadataRoute,
+  isAvailableDeviceBridgeProbeRoute,
   isAvailableDeviceDescriptorObservationRoute,
 } from '../src/server/deviceBridgePolicy';
 
@@ -26,6 +28,30 @@ describe('device bridge intake policy', () => {
       expect(deviceBridgeApprovalEnabled()).toBe(false);
     } finally {
       restoreEnv('ROADEX_DEVICE_BRIDGE_APPROVAL_ENABLED', original);
+    }
+  });
+
+  it('keeps probe support separately default-off and exposes only non-writing probe routes', () => {
+    const original = process.env.ROADEX_DEVICE_BRIDGE_PROBE_ENABLED;
+    try {
+      delete process.env.ROADEX_DEVICE_BRIDGE_PROBE_ENABLED;
+      expect(deviceBridgeProbeEnabled()).toBe(false);
+      process.env.ROADEX_DEVICE_BRIDGE_PROBE_ENABLED = 'true';
+      expect(deviceBridgeProbeEnabled()).toBe(true);
+      expect(isAvailableDeviceBridgeProbeRoute('POST', '/api/device-bridge/approvals/approval-1/start-probe')).toBe(true);
+      expect(isAvailableDeviceBridgeProbeRoute('POST', '/api/device-bridge/operations/operation-1/probe')).toBe(true);
+      for (const [method, path] of [
+        ['GET', '/api/device-bridge/operations/operation-1/probe'],
+        ['GET', '/api/device-bridge/operations/operation-1/artifact'],
+        ['POST', '/api/device-bridge/operations/operation-1/authorize-write'],
+        ['POST', '/api/device-bridge/operations/operation-1/flash'],
+        ['POST', '/api/device-bridge/operations/operation-1/cancel'],
+      ] as const) {
+        expect(isAvailableDeviceBridgeProbeRoute(method, path)).toBe(false);
+      }
+      expect(deviceBridgeOperationsEnabled()).toBe(false);
+    } finally {
+      restoreEnv('ROADEX_DEVICE_BRIDGE_PROBE_ENABLED', original);
     }
   });
   it('defaults request intake false and fails closed for malformed booleans', () => {
