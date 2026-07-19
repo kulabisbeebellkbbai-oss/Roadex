@@ -35,6 +35,7 @@ import {
 import { canAccessManagedCodexProjects, getApprovedWorkspaces, resolveWorkspaceForUser } from './workspacePolicy.js';
 import { loadManagedCodexThreads } from './codexProjectsRegistry.js';
 import { loadSerialVerificationProfiles } from './serialVerificationProfiles.js';
+import { loadBleVerificationProfiles } from './bleVerificationProfiles.js';
 import { maxDeviceArtifactBytes, readDeviceArtifact, storeDeviceArtifact } from './deviceArtifactVault.js';
 import {
   firstMilestoneGates,
@@ -80,6 +81,7 @@ import type {
   DeviceInventoryBindingResponse,
 } from '../shared/deviceBridgeContracts.js';
 import type { SerialVerificationProfile } from '../shared/serialVerificationContracts.js';
+import type { BleVerificationProfile } from '../shared/bleVerificationContracts.js';
 
 export type RoadexState = {
   sessions: SessionStore;
@@ -100,6 +102,7 @@ export type RoadexState = {
   deviceInventoryBindings: Map<string, DeviceInventoryBindingRecord>;
   deviceDescriptorObservations: Map<string, DeviceDescriptorObservationRecord>;
   serialVerificationProfiles: SerialVerificationProfile[];
+  bleVerificationProfiles: BleVerificationProfile[];
 };
 
 type StreamSubscriber = {
@@ -190,6 +193,7 @@ export function createInitialState(
     deviceInventoryBindings: new Map(persisted.deviceInventoryBindings.map((record) => [record.id, record])),
     deviceDescriptorObservations: new Map(persisted.deviceDescriptorObservations.map((record) => [record.id, record])),
     serialVerificationProfiles: loadSerialVerificationProfiles(),
+    bleVerificationProfiles: loadBleVerificationProfiles(),
   };
 }
 
@@ -225,6 +229,8 @@ export async function bootstrap(state: RoadexState, user: UserProfile): Promise<
         }))
       : [],
     serialVerificationProfiles: state.serialVerificationProfiles.filter((profile) =>
+      approvedWorkspaces.some((workspace) => workspace.id === profile.workspaceId)),
+    bleVerificationProfiles: state.bleVerificationProfiles.filter((profile) =>
       approvedWorkspaces.some((workspace) => workspace.id === profile.workspaceId)),
   };
 }

@@ -43,6 +43,7 @@ import type {
 import type { RunnerPromptRequest, SessionRunner } from '../src/server/codexRunner';
 import { storeDeviceArtifact } from '../src/server/deviceArtifactVault';
 import type { SerialVerificationProfile } from '../src/shared/serialVerificationContracts';
+import type { BleVerificationProfile } from '../src/shared/bleVerificationContracts';
 
 const workspace: WorkspaceRef = {
   id: 'roadex',
@@ -61,6 +62,19 @@ function serialProfile(id: string, workspaceId: string): SerialVerificationProfi
     requiredMarkers: ['runtime ready'],
     successMessage: 'Runtime verified.',
     stages: [],
+  };
+}
+
+function bleProfile(id: string, workspaceId: string): BleVerificationProfile {
+  return {
+    id,
+    workspaceId,
+    label: 'BLE verification',
+    serviceUuid: '9e9a0001-6f3d-4f57-9e9f-8c2b9a5f1000',
+    characteristicUuid: '9e9a0008-6f3d-4f57-9e9f-8c2b9a5f1000',
+    timeoutMs: 15000,
+    expectedFields: { ready: true },
+    successMessage: 'BLE verified.',
   };
 }
 
@@ -201,6 +215,7 @@ describe('createMockSession', () => {
     expect(state.deviceBridgeApprovals.size).toBe(0);
     expect(state.deviceBridgeOperations.size).toBe(0);
     expect(result.serialVerificationProfiles).toEqual([]);
+    expect(result.bleVerificationProfiles).toEqual([]);
   });
 
   it('returns serial verification profiles only for approved workspaces', async () => {
@@ -213,6 +228,18 @@ describe('createMockSession', () => {
     const result = await bootstrap(state, mockUser);
 
     expect(result.serialVerificationProfiles.map((profile) => profile.id)).toEqual(['roadex-profile']);
+  });
+
+  it('returns BLE verification profiles only for approved workspaces', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    state.bleVerificationProfiles = [
+      bleProfile('roadex-ble', 'roadex'),
+      bleProfile('hidden-ble', 'unapproved-workspace'),
+    ];
+
+    const result = await bootstrap(state, mockUser);
+
+    expect(result.bleVerificationProfiles.map((profile) => profile.id)).toEqual(['roadex-ble']);
   });
 
   it('creates a ready mock session for an authenticated user and approved workspace', () => {

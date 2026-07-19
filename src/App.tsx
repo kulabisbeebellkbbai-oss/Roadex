@@ -35,6 +35,7 @@ function App() {
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [bleVerification, setBleVerification] = useState<'idle' | 'checking' | 'verified' | 'error'>('idle');
   const [bleVerificationMessage, setBleVerificationMessage] = useState('');
+  const bleVerificationSequence = useRef(0);
   const [serialVerification, setSerialVerification] = useState<'idle' | 'checking' | 'verified' | 'error'>('idle');
   const [serialVerificationMessage, setSerialVerificationMessage] = useState('');
   const serialVerificationSequence = useRef(0);
@@ -44,6 +45,9 @@ function App() {
   ));
   const session = roadex.session;
   const serialVerificationProfile = roadex.serialVerificationProfiles.find(
+    (profile) => profile.workspaceId === session?.workspace.id,
+  );
+  const bleVerificationProfile = roadex.bleVerificationProfiles.find(
     (profile) => profile.workspaceId === session?.workspace.id,
   );
   const selectedProject = roadex.workspaces.find(
@@ -80,6 +84,9 @@ function App() {
   useEffect(() => {
     if (session?.workspace.id) setSelectedProjectId(session.workspace.id);
     serialVerificationSequence.current += 1;
+    bleVerificationSequence.current += 1;
+    setBleVerification('idle');
+    setBleVerificationMessage('');
     setSerialVerification('idle');
     setSerialVerificationMessage('');
   }, [session?.id, session?.workspace.id]);
@@ -93,13 +100,17 @@ function App() {
   }
 
   async function handleBleVerification() {
+    if (!bleVerificationProfile) return;
+    const sequence = ++bleVerificationSequence.current;
     setBleVerification('checking');
     setBleVerificationMessage('');
     try {
-      const result = await verifyBleRuntime(window.navigator);
+      await verifyBleRuntime(window.navigator, bleVerificationProfile);
+      if (sequence !== bleVerificationSequence.current) return;
       setBleVerification('verified');
-      setBleVerificationMessage(`Firmware ${result.firmware} verified; disconnected sensors reported correctly.`);
+      setBleVerificationMessage(bleVerificationProfile.successMessage);
     } catch (error) {
+      if (sequence !== bleVerificationSequence.current) return;
       setBleVerification('error');
       setBleVerificationMessage(error instanceof Error ? error.message : 'BLE runtime verification failed.');
     }
@@ -452,9 +463,10 @@ function App() {
                 </span>
               </div>
               <button
-                disabled={!hasBleRuntimeVerification(window.navigator) || bleVerification === 'checking'}
+                disabled={!hasBleRuntimeVerification(window.navigator) || !bleVerificationProfile || bleVerification === 'checking'}
                 onClick={() => void handleBleVerification()}
                 type="button"
+                title={bleVerificationProfile ? `Run ${bleVerificationProfile.label}` : 'No BLE verification profile is configured for this project'}
               >
                 <RadioTower size={17} />
                 {bleVerification === 'checking' ? 'Checking BLE' : 'Verify BLE runtime'}

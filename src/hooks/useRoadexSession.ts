@@ -39,6 +39,7 @@ import type {
   DeviceInventoryBindingRef,
 } from '../shared/deviceBridgeContracts';
 import type { SerialVerificationProfile } from '../shared/serialVerificationContracts';
+import type { BleVerificationProfile } from '../shared/bleVerificationContracts';
 
 export type ConnectionState = 'loading' | 'connected' | 'streaming' | 'error';
 
@@ -53,6 +54,7 @@ export type RoadexSessionState = {
   browserDeviceCapability: BrowserDeviceCapability;
   deviceInventoryBindingRefs: DeviceInventoryBindingRef[];
   serialVerificationProfiles: SerialVerificationProfile[];
+  bleVerificationProfiles: BleVerificationProfile[];
   descriptorObservation?: DeviceDescriptorObservationPublic;
   pendingProbeApproval?: DeviceBridgeApprovalPublic;
   pendingProbeConfirmation?: DeviceBridgeOperationPublic;
@@ -91,6 +93,7 @@ export function useRoadexSession(): RoadexSessionState {
   const [deviceBridgePolicy, setDeviceBridgePolicy] = useState<DeviceBridgePolicy>();
   const [deviceInventoryBindingRefs, setDeviceInventoryBindingRefs] = useState<DeviceInventoryBindingRef[]>([]);
   const [serialVerificationProfiles, setSerialVerificationProfiles] = useState<SerialVerificationProfile[]>([]);
+  const [bleVerificationProfiles, setBleVerificationProfiles] = useState<BleVerificationProfile[]>([]);
   const [descriptorObservation, setDescriptorObservation] = useState<DeviceDescriptorObservationPublic>();
   const [pendingProbeApproval, setPendingProbeApproval] = useState<DeviceBridgeApprovalPublic>();
   const [pendingProbeConfirmation, setPendingProbeConfirmation] = useState<DeviceBridgeOperationPublic>();
@@ -131,6 +134,7 @@ export function useRoadexSession(): RoadexSessionState {
       setManagedThreads(result.bootstrap.managedThreads);
       setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
       setSerialVerificationProfiles(result.bootstrap.serialVerificationProfiles);
+      setBleVerificationProfiles(result.bootstrap.bleVerificationProfiles);
       setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
       setSession(activeSession);
       const archived = await listArchivedSessions(result.token);
@@ -632,6 +636,7 @@ export function useRoadexSession(): RoadexSessionState {
       browserDeviceCapability,
       deviceInventoryBindingRefs,
       serialVerificationProfiles,
+      bleVerificationProfiles,
       descriptorObservation,
       pendingProbeApproval,
       pendingProbeConfirmation,
@@ -678,6 +683,7 @@ export function useRoadexSession(): RoadexSessionState {
       verifiedFirmwareReady,
       deviceInventoryBindingRefs,
       serialVerificationProfiles,
+      bleVerificationProfiles,
       openWorkspace,
       observeUsbDescriptor,
       verifyEsp32Identity,
