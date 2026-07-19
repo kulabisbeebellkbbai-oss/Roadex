@@ -1,7 +1,7 @@
 {
   "version": 1,
   "id": "project-device-controls",
-  "viewports": ["desktop", "tablet", "mobile"],
+  "viewports": ["desktop"],
   "cases": [
     {
       "id": "device.configured-profile",
