@@ -8,7 +8,7 @@
       "steps": [
         { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "selectOption", "testId": "project-selector", "valueSource": "configuredProject" },
-        { "action": "assertAttributeValue", "testId": "verify-ble", "attribute": "data-profile-configured", "value": "true" },
+        { "action": "assertAttributeValue", "testId": "project-selector", "attribute": "data-profile-configured", "value": "true" },
         { "action": "assertNoBrowserErrors" }
       ]
     },
@@ -17,7 +17,7 @@
       "steps": [
         { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "selectOption", "testId": "project-selector", "valueSource": "configuredProject" },
-        { "action": "assertAttributeValue", "testId": "verify-ble", "attribute": "data-profile-configured", "value": "true" },
+        { "action": "assertAttributeValue", "testId": "project-selector", "attribute": "data-profile-configured", "value": "true" },
         { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
         { "action": "assertAttributeValue", "testId": "verify-ble", "attribute": "data-profile-configured", "value": "true" },
         { "action": "assertNoBrowserErrors" }
@@ -28,7 +28,7 @@
       "steps": [
         { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "selectOption", "testId": "project-selector", "valueSource": "unconfiguredProject" },
-        { "action": "assertAttributeValue", "testId": "verify-ble", "attribute": "data-profile-configured", "value": "false" },
+        { "action": "assertAttributeValue", "testId": "project-selector", "attribute": "data-profile-configured", "value": "false" },
         { "action": "assertNoBrowserErrors" }
       ]
     },
@@ -37,7 +37,7 @@
       "steps": [
         { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "selectOption", "testId": "project-selector", "valueSource": "unconfiguredProject" },
-        { "action": "assertAttributeValue", "testId": "verify-ble", "attribute": "data-profile-configured", "value": "false" },
+        { "action": "assertAttributeValue", "testId": "project-selector", "attribute": "data-profile-configured", "value": "false" },
         { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
         { "action": "assertAttributeValue", "testId": "verify-ble", "attribute": "data-profile-configured", "value": "false" },
         { "action": "assertNoBrowserErrors" }

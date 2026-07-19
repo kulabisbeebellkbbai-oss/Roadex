@@ -57,6 +57,11 @@ function App() {
   const selectedProject = roadex.workspaces.find(
     (workspace) => workspace.id === (selectedProjectId || session?.workspace.id),
   );
+  const selectedProjectHasDeviceProfile = Boolean(selectedProject) && [
+    roadex.serialVerificationProfiles,
+    roadex.bleVerificationProfiles,
+    roadex.usbDeviceProfiles,
+  ].some((profiles) => profiles.some((profile) => profile.workspaceId === selectedProject?.id));
   const visibleTranscript = roadex.transcript.filter(isVisibleTranscriptEvent);
   const roadexProjectThreads = [...roadex.sessions, ...roadex.archivedSessions]
     .filter((candidate) => candidate.workspace.id === selectedProject?.id)
@@ -199,6 +204,7 @@ function App() {
               <span>Project</span>
               <select
                 data-testid="project-selector"
+                data-profile-configured={selectedProjectHasDeviceProfile}
                 disabled={roadex.connectionState === 'loading'}
                 onChange={(event) => setSelectedProjectId(event.target.value)}
                 value={selectedProject?.id ?? ''}
