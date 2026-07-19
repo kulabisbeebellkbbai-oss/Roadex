@@ -243,3 +243,5 @@ export type DeviceBridgeProbeStartResponse =
 export type DeviceBridgeProbeResponse =
   | { ok: true; operation: DeviceBridgeOperationPublic }
   | { ok: false; gate: 'device-bridge'; reason: string; classification?: string };
+
+export type DeviceBridgeConfirmationResponse = DeviceBridgeProbeResponse;

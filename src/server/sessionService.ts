@@ -961,6 +961,35 @@ export function submitDeviceBridgeProbe(
     : publicDeviceBridgeProbeDenial(classification);
 }
 
+export function confirmDeviceBridgeProbe(
+  state: RoadexState,
+  user: UserProfile,
+  operationId: string,
+  payload: unknown,
+): DeviceBridgeProbeResponse {
+  const auditHmacKey = deviceBridgeAuditHmacKey();
+  const operation = state.deviceBridgeOperations.get(operationId);
+  const session = operation && getOwnedSession(state.sessions, user.id, operation.sessionId);
+  const artifact = operation && state.deviceArtifacts.get(operation.artifactId);
+  const binding = operation && state.deviceInventoryBindings.get(operation.inventoryBindingId);
+  if (
+    !deviceBridgeProbeEnabled() || !auditHmacKey || user.authMode !== 'protected-gateway' ||
+    !payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 0 ||
+    !operation || operation.userId !== user.id || operation.phase !== 'verified' || expiredIso(operation.phaseExpiresAt) ||
+    !session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle !== 'ready' ||
+    !artifact || artifact.status !== 'active' || expiredIso(artifact.expiresAt) ||
+    artifact.sha256 !== operation.verifiedArtifactSha256 ||
+    !validActiveInventoryBindingForRequest(binding, operation.projectId) ||
+    binding.deviceIdentityTag !== operation.deviceIdentityTag || binding.deviceMacTag !== operation.actualDeviceIdentityTag
+  ) return denyDeviceBridgeProbe(state, user, operationId, 'confirmation', auditHmacKey || '');
+  const updated = { ...operation, phase: 'confirmation' as const, phaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), updatedAt: new Date().toISOString() };
+  const auditEvent = createBridgeAuditEvent(state, auditHmacKey, user, 'device_bridge.operation_probe', operation.id, 'allowed', bridgeAuditSummary(auditHmacKey, { classification: 'confirmation_recorded', userId: user.id, sessionId: operation.sessionId, requestId: operation.id }));
+  persistStateSnapshot(state, { deviceBridgeOperations: [...state.deviceBridgeOperations.values()].map((record) => record.id === operation.id ? updated : record), auditEvents: [...state.audit.events, auditEvent] });
+  state.deviceBridgeOperations.set(operation.id, updated);
+  state.audit.events.push(auditEvent);
+  return { ok: true, operation: publicDeviceBridgeOperation(updated) };
+}
+
 export function observeDeviceDescriptor(
   state: RoadexState,
   user: UserProfile,

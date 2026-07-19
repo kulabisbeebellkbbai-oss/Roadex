@@ -18,6 +18,7 @@ import {
   registerDeviceArtifactMetadata,
   requestDeviceBridgeIntake,
   startDeviceBridgeProbe,
+  confirmDeviceBridgeProbe,
   revokeDeviceArtifactMetadata,
   revokeDeviceInventoryBinding,
   subscribeToSessionStream,
@@ -221,6 +222,16 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readJson<unknown>(req);
     const result = submitDeviceBridgeProbe(state, auth.user, decodeURIComponent(deviceBridgeProbeMatch[1]), body);
     sendJson(res, result.ok ? 200 : result.classification?.endsWith('mismatch') ? 409 : 403, result);
+    return;
+  }
+
+  const deviceBridgeConfirmationMatch = url.pathname.match(/^\/api\/device-bridge\/operations\/([^/]+)\/confirm$/);
+  if (deviceBridgeConfirmationMatch && isAvailableDeviceBridgeProbeRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const body = await readJson<unknown>(req);
+    const result = confirmDeviceBridgeProbe(state, auth.user, decodeURIComponent(deviceBridgeConfirmationMatch[1]), body);
+    sendJson(res, result.ok ? 200 : 403, result);
     return;
   }
 

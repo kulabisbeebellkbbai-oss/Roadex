@@ -10,6 +10,7 @@ import {
   readSessionStream,
   reopenSession,
   runDeviceBridgeProbe,
+  confirmVerifiedDeviceProbe,
   subscribeSessionStream,
   submitPrompt,
   submitDeviceDescriptorObservation,
@@ -29,6 +30,7 @@ import type {
   BrowserDeviceCapability,
   DeviceBridgePolicy,
   DeviceBridgeApprovalPublic,
+  DeviceBridgeOperationPublic,
   DeviceDescriptorObservationPublic,
   DeviceInventoryBindingRef,
 } from '../shared/deviceBridgeContracts';
@@ -47,6 +49,7 @@ export type RoadexSessionState = {
   deviceInventoryBindingRefs: DeviceInventoryBindingRef[];
   descriptorObservation?: DeviceDescriptorObservationPublic;
   pendingProbeApproval?: DeviceBridgeApprovalPublic;
+  pendingProbeConfirmation?: DeviceBridgeOperationPublic;
   session?: RoadexSession;
   archivedSessions: RoadexSession[];
   transcript: StreamEvent[];
@@ -65,6 +68,7 @@ export type RoadexSessionState = {
   verifyEsp32Identity: () => Promise<void>;
   createProbeApproval: () => Promise<void>;
   runControlledProbe: () => Promise<void>;
+  confirmControlledProbe: () => Promise<void>;
   retry: () => Promise<void>;
 };
 
@@ -79,6 +83,7 @@ export function useRoadexSession(): RoadexSessionState {
   const [deviceInventoryBindingRefs, setDeviceInventoryBindingRefs] = useState<DeviceInventoryBindingRef[]>([]);
   const [descriptorObservation, setDescriptorObservation] = useState<DeviceDescriptorObservationPublic>();
   const [pendingProbeApproval, setPendingProbeApproval] = useState<DeviceBridgeApprovalPublic>();
+  const [pendingProbeConfirmation, setPendingProbeConfirmation] = useState<DeviceBridgeOperationPublic>();
   const browserDeviceCapability = useMemo(() => detectDeviceCapability(window.navigator), []);
   const [session, setSession] = useState<RoadexSession>();
   const [archivedSessions, setArchivedSessions] = useState<RoadexSession[]>([]);
@@ -505,14 +510,27 @@ export function useRoadexSession(): RoadexSessionState {
     setError(undefined);
     setNotice(undefined);
     try {
-      await runDeviceBridgeProbe(token, pendingProbeApproval, verifiedDeviceMac.current);
+      const operation = await runDeviceBridgeProbe(token, pendingProbeApproval, verifiedDeviceMac.current);
       verifiedDeviceMac.current = undefined;
       setPendingProbeApproval(undefined);
-      setNotice('Controlled ESP32 probe verified. No firmware or device write was performed.');
+      setPendingProbeConfirmation(operation);
+      setNotice('Controlled ESP32 probe verified. Fresh owner confirmation is required.');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Controlled ESP32 probe failed.');
     }
   }, [pendingProbeApproval, token]);
+
+  const confirmControlledProbe = useCallback(async () => {
+    if (!pendingProbeConfirmation) return;
+    setError(undefined);
+    try {
+      await confirmVerifiedDeviceProbe(token, pendingProbeConfirmation.id);
+      setPendingProbeConfirmation(undefined);
+      setNotice('Verified target confirmed. No firmware or device write authority was created.');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Target confirmation failed.');
+    }
+  }, [pendingProbeConfirmation, token]);
 
   return useMemo(
     () => ({
@@ -527,6 +545,7 @@ export function useRoadexSession(): RoadexSessionState {
       deviceInventoryBindingRefs,
       descriptorObservation,
       pendingProbeApproval,
+      pendingProbeConfirmation,
       session,
       archivedSessions,
       transcript,
@@ -545,6 +564,7 @@ export function useRoadexSession(): RoadexSessionState {
       verifyEsp32Identity,
       createProbeApproval,
       runControlledProbe,
+      confirmControlledProbe,
       retry,
     }),
     [
@@ -562,12 +582,14 @@ export function useRoadexSession(): RoadexSessionState {
       browserDeviceCapability,
       descriptorObservation,
       pendingProbeApproval,
+      pendingProbeConfirmation,
       deviceInventoryBindingRefs,
       openWorkspace,
       observeUsbDescriptor,
       verifyEsp32Identity,
       createProbeApproval,
       runControlledProbe,
+      confirmControlledProbe,
       reopenArchivedSession,
       retry,
       sendPrompt,

@@ -452,6 +452,14 @@ function App() {
                 <Activity size={17} />
                 Run controlled probe
               </button>
+              <button
+                disabled={!roadex.pendingProbeConfirmation}
+                onClick={() => void roadex.confirmControlledProbe()}
+                type="button"
+              >
+                <ShieldCheck size={17} />
+                Confirm verified target
+              </button>
             </div>
             <div className="timeline-note">
               <Clock3 size={18} />

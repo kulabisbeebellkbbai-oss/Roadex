@@ -124,7 +124,7 @@ describe('Roadex client CSRF contract', () => {
       const operation = {
         id: 'operation',
         artifactSha256: 'a'.repeat(64),
-        phase: path.endsWith('/probe') && !path.endsWith('/start-probe') ? 'verified' : 'probe',
+        phase: path.endsWith('/confirm') ? 'confirmation' : path.endsWith('/probe') && !path.endsWith('/start-probe') ? 'verified' : 'probe',
       };
       return new Response(JSON.stringify({ ok: true, operation }), {
         status: path.endsWith('/start-probe') ? 201 : 200,
@@ -132,9 +132,9 @@ describe('Roadex client CSRF contract', () => {
       });
     }));
 
-    const { loginAndBootstrap, runDeviceBridgeProbe } = await import('../src/client/sessionApi');
+    const { confirmVerifiedDeviceProbe, loginAndBootstrap, runDeviceBridgeProbe } = await import('../src/client/sessionApi');
     await loginAndBootstrap();
-    await runDeviceBridgeProbe(undefined, {
+    const operation = await runDeviceBridgeProbe(undefined, {
       id: 'approval',
       requestId: 'request',
       sessionId: 'session',
@@ -147,11 +147,13 @@ describe('Roadex client CSRF contract', () => {
       createdAt: new Date(0).toISOString(),
       expiresAt: new Date(1).toISOString(),
     }, '00:11:22:33:44:55');
+    await confirmVerifiedDeviceProbe(undefined, operation.id);
 
     expect(calls.map((call) => call.path)).toEqual([
       '/api/bootstrap',
       '/Roadex/api/device-bridge/approvals/approval/start-probe',
       '/Roadex/api/device-bridge/operations/operation/probe',
+      '/Roadex/api/device-bridge/operations/operation/confirm',
     ]);
     for (const call of calls.slice(1)) {
       const headers = new Headers(call.init?.headers);
@@ -159,6 +161,6 @@ describe('Roadex client CSRF contract', () => {
       expect(headers.has('x-roadex-csrf')).toBe(true);
       expect(headers.get('x-roadex-request-id')).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
     }
-    expect(calls.some((call) => /flash|erase|write|firmware/.test(call.path))).toBe(false);
+    expect(calls.some((call) => /authorize-write|flash|erase|firmware/.test(call.path))).toBe(false);
   });
 });

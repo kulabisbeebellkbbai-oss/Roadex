@@ -15,6 +15,8 @@ import type {
   DeviceBridgeApprovalResponse,
   DeviceBridgeProbeResponse,
   DeviceBridgeProbeStartResponse,
+  DeviceBridgeConfirmationResponse,
+  DeviceBridgeOperationPublic,
   DeviceBridgeRequestPayload,
   DeviceBridgeRequestResponse,
   DeviceDescriptorObservationPayload,
@@ -128,7 +130,7 @@ export async function runDeviceBridgeProbe(
   token: string | undefined,
   approval: DeviceBridgeApprovalPublic,
   deviceMac: string,
-): Promise<void> {
+): Promise<DeviceBridgeOperationPublic> {
   const started = await request<DeviceBridgeProbeStartResponse>(
     `/Roadex/api/device-bridge/approvals/${encodeURIComponent(approval.id)}/start-probe`,
     { method: 'POST', token, body: {}, requestId: crypto.randomUUID() },
@@ -146,6 +148,13 @@ export async function runDeviceBridgeProbe(
   );
   if (!completed.ok) throw new Error(completed.reason);
   if (completed.operation.phase !== 'verified') throw new Error('The controlled device probe did not verify.');
+  return completed.operation;
+}
+
+export async function confirmVerifiedDeviceProbe(token: string | undefined, operationId: string): Promise<void> {
+  const result = await request<DeviceBridgeConfirmationResponse>(`/Roadex/api/device-bridge/operations/${encodeURIComponent(operationId)}/confirm`, { method: 'POST', token, body: {}, requestId: crypto.randomUUID() });
+  if (!result.ok) throw new Error(result.reason);
+  if (result.operation.phase !== 'confirmation') throw new Error('Device confirmation was not recorded.');
 }
 
 export async function cancelSession(token: string | undefined, sessionId: string): Promise<CancelResponse> {
