@@ -21,7 +21,7 @@ describe('serial runtime verifier', () => {
       bleProvisioningStarted: true,
       sensorsAbsent: true,
     });
-    expect(open).toHaveBeenCalledWith({ baudRate: 115200 });
+    expect(open).toHaveBeenCalledWith({ baudRate: 115200, bufferSize: 8192 });
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -56,11 +56,85 @@ describe('serial runtime verifier', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  it('attempts port closure even when reader cancellation and lock release fail', async () => {
+  it('recovers from a non-fatal buffer overrun using the replacement readable stream', async () => {
+    const close = vi.fn(async () => undefined);
+    let current: ReadableStream<Uint8Array>;
+    const failedReader = {
+      read: async () => { throw new DOMException('A buffer overrun has been detected.', 'BufferOverrunError'); },
+      releaseLock: vi.fn(() => { current = replacement; }),
+    };
+    const replacement = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('SHT41: missing, BME680: missing\nBLE provisioning started\n'));
+        controller.close();
+      },
+    });
+    const failed = { getReader: () => failedReader } as unknown as ReadableStream<Uint8Array>;
+    current = failed;
+    const port = {
+      open: async () => undefined,
+      close,
+      get readable() {
+        return current;
+      },
+    };
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => port } }, 100))
+      .resolves.toEqual({ bleProvisioningStarted: true, sensorsAbsent: true });
+    expect(failedReader.releaseLock).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('cancels a pending read before closing after the deadline', async () => {
+    const close = vi.fn(async () => undefined);
+    const cancel = vi.fn();
+    const readable = new ReadableStream<Uint8Array>({ cancel });
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 1))
+      .rejects.toThrow('Startup markers were not observed');
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('still attempts closure when cancellation and the pending read do not settle', async () => {
+    vi.useFakeTimers();
+    try {
+      const close = vi.fn(async () => undefined);
+      const reader = {
+        read: () => new Promise<ReadableStreamReadResult<Uint8Array>>(() => undefined),
+        cancel: () => new Promise<void>(() => undefined),
+        releaseLock: vi.fn(),
+      };
+      const readable = { getReader: () => reader } as unknown as ReadableStream<Uint8Array>;
+      const verification = verifySerialRuntime(
+        { serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } },
+        1,
+      );
+      const outcome = expect(verification).rejects.toThrow('Startup markers were not observed');
+      await vi.advanceTimersByTimeAsync(1000);
+      await outcome;
+      expect(reader.releaseLock).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not retry fatal serial read errors', async () => {
+    const close = vi.fn(async () => undefined);
+    const reader = {
+      read: async () => { throw new DOMException('Device disconnected.', 'NetworkError'); },
+      releaseLock: vi.fn(),
+    };
+    const readable = { getReader: () => reader } as unknown as ReadableStream<Uint8Array>;
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
+      .rejects.toThrow('serial connection failed');
+    expect(reader.releaseLock).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('attempts port closure even when reader lock release fails', async () => {
     const close = vi.fn(async () => undefined);
     const reader = {
       read: async () => ({ done: true, value: undefined }),
-      cancel: async () => { throw new Error('cancel failed'); },
       releaseLock: () => { throw new Error('release failed'); },
     };
     const readable = { getReader: () => reader } as unknown as ReadableStream<Uint8Array>;

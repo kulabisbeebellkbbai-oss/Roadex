@@ -1,7 +1,7 @@
 import { approvedUsbFilters } from './deviceCapability';
 
 type RuntimeSerialPort = {
-  open: (options: { baudRate: number }) => Promise<void>;
+  open: (options: { baudRate: number; bufferSize: number }) => Promise<void>;
   close: () => Promise<void>;
   readable: ReadableStream<Uint8Array> | null;
 };
@@ -32,39 +32,73 @@ export async function verifySerialRuntime(
   const port = await navigatorLike.serial.requestPort({
     filters: approvedUsbFilters.map(({ vendorId, productId }) => ({ usbVendorId: vendorId, usbProductId: productId })),
   });
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
-    await port.open({ baudRate: 115200 });
-    if (!port.readable) throw new Error('The selected serial device did not provide a readable stream.');
-    reader = port.readable.getReader();
+    await port.open({ baudRate: 115200, bufferSize: 8192 });
     const deadline = Date.now() + timeoutMs;
     const decoder = new TextDecoder();
     let output = '';
-    while (Date.now() < deadline) {
-      const remaining = Math.max(1, deadline - Date.now());
-      const result = await Promise.race([
-        reader.read(),
-        new Promise<{ done: true; value?: undefined }>((resolve) => globalThis.setTimeout(() => resolve({ done: true }), remaining)),
-      ]);
-      if (result.value) output = (output + decoder.decode(result.value, { stream: true })).slice(-8192);
-      if (hasRuntimeMarkers(output)) return { bleProvisioningStarted: true, sensorsAbsent: true };
-      if (result.done) break;
+    while (port.readable && Date.now() < deadline) {
+      const stream = port.readable;
+      const reader = stream.getReader();
+      let recoverOverrun = false;
+      let streamEnded = false;
+      try {
+        while (Date.now() < deadline) {
+          const remaining = Math.max(1, deadline - Date.now());
+          const timeout = Symbol('serial-read-timeout');
+          let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined;
+          const pendingRead = reader.read();
+          const result = await Promise.race([
+            pendingRead,
+            new Promise<typeof timeout>((resolve) => {
+              timeoutId = globalThis.setTimeout(() => resolve(timeout), remaining);
+            }),
+          ]);
+          if (timeoutId !== undefined) globalThis.clearTimeout(timeoutId);
+          if (result === timeout) {
+            await settleWithin(reader.cancel().catch(() => undefined), 250);
+            await settleWithin(pendingRead.catch(() => undefined), 250);
+            streamEnded = true;
+            break;
+          }
+          if (result.value) output = (output + decoder.decode(result.value, { stream: true })).slice(-8192);
+          if (hasRuntimeMarkers(output)) return { bleProvisioningStarted: true, sensorsAbsent: true };
+          if (result.done) {
+            streamEnded = true;
+            break;
+          }
+        }
+      } catch (error) {
+        if (!(error instanceof DOMException) || error.name !== 'BufferOverrunError') {
+          throw new Error('The serial connection failed while reading startup output. Reconnect the ESP32 and retry.');
+        }
+        recoverOverrun = true;
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+          // Port closure is attempted independently below.
+        }
+      }
+      if (streamEnded) break;
+      if (recoverOverrun) {
+        await Promise.resolve();
+        if (!port.readable || port.readable === stream) {
+          throw new Error('The serial receive buffer overrun could not be recovered. Retry the verification.');
+        }
+      }
     }
     throw new Error('Startup markers were not observed. Press RESET/EN after serial listening begins, then retry.');
   } finally {
-    if (reader) {
-      await Promise.race([
-        reader.cancel().catch(() => undefined),
-        new Promise<void>((resolve) => globalThis.setTimeout(resolve, 250)),
-      ]);
-      try {
-        reader.releaseLock();
-      } catch {
-        // Port closure is attempted independently below.
-      }
-    }
-    await port.close().catch(() => undefined);
+    await settleWithin(port.close().catch(() => undefined), 250);
   }
+}
+
+async function settleWithin(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
+  await Promise.race([
+    promise,
+    new Promise<void>((resolve) => globalThis.setTimeout(resolve, timeoutMs)),
+  ]);
 }
 
 function hasRuntimeMarkers(output: string): boolean {
