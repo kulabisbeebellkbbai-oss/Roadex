@@ -15,6 +15,8 @@ import type {
 } from '../shared/deviceBridgeContracts';
 import { isApiError } from '../shared/apiContracts';
 
+let csrfToken: string | undefined;
+
 export type RoadexApiSession = {
   token?: string;
   bootstrap: BootstrapResponse;
@@ -196,14 +198,19 @@ type RequestOptions = {
 };
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const method = options.method ?? 'GET';
   const response = await fetch(path, {
-    method: options.method ?? 'GET',
+    method,
     headers: {
       ...(options.body ? { 'content-type': 'application/json' } : {}),
       ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+      ...(method !== 'GET' && csrfToken ? { 'x-roadex-csrf': csrfToken } : {}),
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
+
+  const refreshedCsrfToken = response.headers.get('x-roadex-csrf');
+  if (refreshedCsrfToken) csrfToken = refreshedCsrfToken;
 
   const payload = (await response.json()) as T | ApiError;
   if (!response.ok || isApiError(payload)) {
