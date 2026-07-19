@@ -38,7 +38,17 @@ export async function probeEsp32Identity(
 
   const session = createSession(port);
   try {
-    const deviceMac = await session.readMac();
+    let deviceMac: string;
+    try {
+      deviceMac = await session.readMac();
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Failed to connect with the device')) {
+        throw new Error(
+          'ESP32 bootloader connection failed. Hold BOOT, tap RESET/EN, then release BOOT when the connection starts and retry.',
+        );
+      }
+      throw error;
+    }
     return {
       vendorId: info.usbVendorId,
       productId: info.usbProductId,

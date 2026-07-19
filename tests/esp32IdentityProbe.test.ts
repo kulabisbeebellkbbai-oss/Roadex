@@ -41,4 +41,15 @@ describe('ESP32 identity probe', () => {
     }))).rejects.toThrow('invalid device identity');
     expect(disconnected).toBe(true);
   });
+
+  it('reports the manual ESP32 bootloader recovery sequence after connection failure', async () => {
+    let disconnected = false;
+    const port = { getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) } as SerialPort;
+
+    await expect(probeEsp32Identity({ serial: { async requestPort() { return port; } } }, () => ({
+      async readMac() { throw new Error('Failed to connect with the device'); },
+      async disconnect() { disconnected = true; },
+    }))).rejects.toThrow('Hold BOOT, tap RESET/EN');
+    expect(disconnected).toBe(true);
+  });
 });
