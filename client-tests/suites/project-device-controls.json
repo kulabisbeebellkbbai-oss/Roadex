@@ -8,8 +8,8 @@
       "steps": [
         { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "selectOption", "testId": "project-selector", "valueSource": "configuredProject" },
-        { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
         { "action": "assertAttributeValue", "testId": "verify-ble", "attribute": "data-profile-configured", "value": "true" },
+        { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
         { "action": "assertAttributeValue", "testId": "verify-serial", "attribute": "data-profile-configured", "value": "true" },
         { "action": "assertAttributeValue", "testId": "observe-usb", "attribute": "data-profile-configured", "value": "true" },
         { "action": "assertAttributeValue", "testId": "verify-esp32", "attribute": "data-profile-configured", "value": "true" },
@@ -22,6 +22,7 @@
       "steps": [
         { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "selectOption", "testId": "project-selector", "valueSource": "configuredProject" },
+        { "action": "assertAttributeValue", "testId": "verify-ble", "attribute": "data-profile-configured", "value": "true" },
         { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
         { "action": "assertAttributeValue", "testId": "verify-ble", "attribute": "data-runtime-available", "value": "true" },
         { "action": "assertEnabled", "testId": "verify-ble", "state": true },
@@ -35,6 +36,7 @@
       "steps": [
         { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "selectOption", "testId": "project-selector", "valueSource": "configuredProject" },
+        { "action": "assertAttributeValue", "testId": "observe-usb", "attribute": "data-profile-configured", "value": "true" },
         { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
         { "action": "assertAttributeValue", "testId": "observe-usb", "attribute": "data-runtime-available", "value": "true" },
         { "action": "assertAttributeValue", "testId": "observe-usb", "attribute": "data-policy-ready", "value": "true" },
@@ -52,6 +54,7 @@
       "steps": [
         { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "selectOption", "testId": "project-selector", "valueSource": "configuredProject" },
+        { "action": "assertAttributeValue", "testId": "flash-firmware", "attribute": "data-profile-configured", "value": "true" },
         { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
         { "action": "assertAttributeValue", "testId": "flash-firmware", "attribute": "data-policy-ready", "value": "true" },
         { "action": "assertAttributeValue", "testId": "flash-firmware", "attribute": "data-firmware-ready", "value": "false" },
@@ -65,8 +68,8 @@
       "steps": [
         { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "selectOption", "testId": "project-selector", "valueSource": "unconfiguredProject" },
-        { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
         { "action": "assertAttributeValue", "testId": "verify-ble", "attribute": "data-profile-configured", "value": "false" },
+        { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
         { "action": "assertEnabled", "testId": "verify-ble", "state": false },
         { "action": "assertAttributeValue", "testId": "verify-serial", "attribute": "data-profile-configured", "value": "false" },
         { "action": "assertEnabled", "testId": "verify-serial", "state": false },
@@ -78,8 +81,8 @@
       "steps": [
         { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "selectOption", "testId": "project-selector", "valueSource": "unconfiguredProject" },
-        { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
         { "action": "assertAttributeValue", "testId": "observe-usb", "attribute": "data-profile-configured", "value": "false" },
+        { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
         { "action": "assertEnabled", "testId": "observe-usb", "state": false },
         { "action": "assertAttributeValue", "testId": "verify-esp32", "attribute": "data-profile-configured", "value": "false" },
         { "action": "assertEnabled", "testId": "verify-esp32", "state": false },
@@ -91,8 +94,8 @@
       "steps": [
         { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "selectOption", "testId": "project-selector", "valueSource": "unconfiguredProject" },
-        { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
         { "action": "assertAttributeValue", "testId": "flash-firmware", "attribute": "data-profile-configured", "value": "false" },
+        { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
         { "action": "assertEnabled", "testId": "flash-firmware", "state": false },
         { "action": "assertNoBrowserErrors" }
       ]
