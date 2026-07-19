@@ -41,7 +41,17 @@ export async function flashVerifiedEsp32(
 
   const session = createSession(port);
   try {
-    const observedMac = canonicalMac(await session.readMac());
+    let observedMac: string;
+    try {
+      observedMac = canonicalMac(await session.readMac());
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Failed to connect with the device')) {
+        throw new Error(
+          'ESP32 bootloader connection failed. Hold BOOT, tap RESET/EN, then release BOOT when the connection starts and retry.',
+        );
+      }
+      throw error;
+    }
     if (observedMac !== expectedMac) throw new Error('The selected ESP32 does not match the verified inventory device.');
     const authorization = await authorizeWrite(observedMac);
     const expiresAt = Date.parse(authorization.phaseExpiresAt);

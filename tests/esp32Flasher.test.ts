@@ -79,6 +79,28 @@ describe('verified ESP32 flasher', () => {
     expect(disconnect).toHaveBeenCalledOnce();
   });
 
+  it('explains the manual bootloader recovery when esptool cannot connect', async () => {
+    const authorize = vi.fn();
+    const write = vi.fn();
+    const disconnect = vi.fn(async () => undefined);
+    const port = { getInfo: () => ({ usbVendorId: 0x10c4, usbProductId: 0xea60 }) } as SerialPort;
+    await expect(flashVerifiedEsp32(
+      { serial: { requestPort: vi.fn(async () => port) } },
+      Uint8Array.from([0xe9, 1]).buffer,
+      'aa:bb:cc:dd:ee:ff',
+      authorize,
+      () => ({
+        readMac: async () => { throw new Error('Failed to connect with the device'); },
+        writeFirmware: write,
+        reset: vi.fn(),
+        disconnect,
+      }),
+    )).rejects.toThrow('Hold BOOT, tap RESET/EN');
+    expect(authorize).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
+
   it('does not reset after a failed physical write and always disconnects', async () => {
     const reset = vi.fn();
     const disconnect = vi.fn(async () => undefined);
