@@ -411,7 +411,10 @@ export function useRoadexSession(): RoadexSessionState {
       setDescriptorObservation(result.observation);
       setNotice('USB descriptor observed. Device identity remains unverified.');
     } catch (caught) {
-      if (caught instanceof DOMException && caught.name === 'NotFoundError') return;
+      if (caught instanceof DOMException && caught.name === 'NotFoundError') {
+        setNotice('USB selection was cancelled or no allowlisted device was selected.');
+        return;
+      }
       setError(caught instanceof Error ? caught.message : 'USB descriptor observation failed.');
     }
   }, [deviceInventoryBindingRefs, session, token]);
