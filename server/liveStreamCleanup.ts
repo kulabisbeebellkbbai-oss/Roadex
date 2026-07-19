@@ -1,5 +1,9 @@
 type TerminalEvent = 'aborted' | 'close' | 'error';
 
+const DEFAULT_KEEPALIVE_MS = 1_000;
+const MIN_KEEPALIVE_MS = 250;
+const MAX_KEEPALIVE_MS = 30_000;
+
 export interface TerminalEventSource {
   once(event: TerminalEvent, listener: () => void): unknown;
   off(event: TerminalEvent, listener: () => void): unknown;
@@ -27,4 +31,13 @@ export function bindLiveStreamCleanup(
   response.once('close', cleanup);
   response.once('error', cleanup);
   return cleanup;
+}
+
+export function resolveLiveStreamKeepaliveMs(value: string | undefined): number {
+  if (value === undefined || value === '') return DEFAULT_KEEPALIVE_MS;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < MIN_KEEPALIVE_MS || parsed > MAX_KEEPALIVE_MS) {
+    throw new Error(`ROADEX_SSE_KEEPALIVE_MS must be an integer from ${MIN_KEEPALIVE_MS} to ${MAX_KEEPALIVE_MS}.`);
+  }
+  return parsed;
 }

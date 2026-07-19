@@ -37,10 +37,11 @@ import {
   isAvailableDeviceDescriptorObservationRoute,
 } from '../src/server/deviceBridgePolicy.js';
 import type { CreateSessionRequest } from '../src/shared/sessionContracts.js';
-import { bindLiveStreamCleanup } from './liveStreamCleanup.js';
+import { bindLiveStreamCleanup, resolveLiveStreamKeepaliveMs } from './liveStreamCleanup.js';
 
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8780);
+const liveStreamKeepaliveMs = resolveLiveStreamKeepaliveMs(process.env.ROADEX_SSE_KEEPALIVE_MS);
 const state = createInitialState();
 
 if (host !== '127.0.0.1' && host !== 'localhost') {
@@ -359,7 +360,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
           return;
         }
         res.write(`: keepalive\n\n`);
-      }, 25_000);
+      }, liveStreamKeepaliveMs);
       const cleanup = bindLiveStreamCleanup(req, res, () => {
         clearInterval(keepalive);
         subscription.unsubscribe();

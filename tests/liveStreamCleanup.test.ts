@@ -1,8 +1,21 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
-import { bindLiveStreamCleanup, type TerminalEventSource } from '../server/liveStreamCleanup.js';
+import {
+  bindLiveStreamCleanup,
+  resolveLiveStreamKeepaliveMs,
+  type TerminalEventSource,
+} from '../server/liveStreamCleanup.js';
 
 describe('live stream cleanup', () => {
+  it('uses a short default heartbeat and validates configured bounds', () => {
+    expect(resolveLiveStreamKeepaliveMs(undefined)).toBe(1_000);
+    expect(resolveLiveStreamKeepaliveMs('250')).toBe(250);
+    expect(resolveLiveStreamKeepaliveMs('30000')).toBe(30_000);
+    expect(() => resolveLiveStreamKeepaliveMs('249')).toThrow();
+    expect(() => resolveLiveStreamKeepaliveMs('30001')).toThrow();
+    expect(() => resolveLiveStreamKeepaliveMs('not-a-number')).toThrow();
+  });
+
   it.each([
     ['request aborted', 'request', 'aborted'],
     ['request closed', 'request', 'close'],
