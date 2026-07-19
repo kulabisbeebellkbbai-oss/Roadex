@@ -9,6 +9,7 @@ import {
   listArchivedSessions,
   readSessionStream,
   reopenSession,
+  runDeviceBridgeProbe,
   subscribeSessionStream,
   submitPrompt,
   submitDeviceDescriptorObservation,
@@ -27,6 +28,7 @@ import { probeEsp32Identity } from '../client/esp32IdentityProbe';
 import type {
   BrowserDeviceCapability,
   DeviceBridgePolicy,
+  DeviceBridgeApprovalPublic,
   DeviceDescriptorObservationPublic,
   DeviceInventoryBindingRef,
 } from '../shared/deviceBridgeContracts';
@@ -44,6 +46,7 @@ export type RoadexSessionState = {
   browserDeviceCapability: BrowserDeviceCapability;
   deviceInventoryBindingRefs: DeviceInventoryBindingRef[];
   descriptorObservation?: DeviceDescriptorObservationPublic;
+  pendingProbeApproval?: DeviceBridgeApprovalPublic;
   session?: RoadexSession;
   archivedSessions: RoadexSession[];
   transcript: StreamEvent[];
@@ -61,6 +64,7 @@ export type RoadexSessionState = {
   observeUsbDescriptor: () => Promise<void>;
   verifyEsp32Identity: () => Promise<void>;
   createProbeApproval: () => Promise<void>;
+  runControlledProbe: () => Promise<void>;
   retry: () => Promise<void>;
 };
 
@@ -74,6 +78,7 @@ export function useRoadexSession(): RoadexSessionState {
   const [deviceBridgePolicy, setDeviceBridgePolicy] = useState<DeviceBridgePolicy>();
   const [deviceInventoryBindingRefs, setDeviceInventoryBindingRefs] = useState<DeviceInventoryBindingRef[]>([]);
   const [descriptorObservation, setDescriptorObservation] = useState<DeviceDescriptorObservationPublic>();
+  const [pendingProbeApproval, setPendingProbeApproval] = useState<DeviceBridgeApprovalPublic>();
   const browserDeviceCapability = useMemo(() => detectDeviceCapability(window.navigator), []);
   const [session, setSession] = useState<RoadexSession>();
   const [archivedSessions, setArchivedSessions] = useState<RoadexSession[]>([]);
@@ -472,18 +477,40 @@ export function useRoadexSession(): RoadexSessionState {
       const artifacts = await listActiveDeviceArtifacts(token, session.id);
       const artifact = artifacts[0];
       if (!artifact) throw new Error('No active firmware artifact is available for this session.');
-      await createDeviceBridgeProbeApproval(token, session.id, {
+      const approval = await createDeviceBridgeProbeApproval(token, session.id, {
         workspaceId: session.workspace.id,
         artifactId: artifact.id,
         artifactSha256: artifact.sha256,
         inventoryBindingId: binding.id,
         operation: 'esp32.flash',
       });
-      setNotice('Probe approval is ready for the controlled MSI test agent.');
+      setPendingProbeApproval(approval);
+      setNotice('Probe approval is ready for the controlled browser probe.');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Probe approval failed.');
     }
   }, [descriptorObservation, deviceInventoryBindingRefs, session, token]);
+
+  const runControlledProbe = useCallback(async () => {
+    if (!pendingProbeApproval) {
+      setError('Create a fresh probe approval before running the controlled probe.');
+      return;
+    }
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      const identity = await probeEsp32Identity(window.navigator);
+      await runDeviceBridgeProbe(token, pendingProbeApproval, identity.deviceMac);
+      setPendingProbeApproval(undefined);
+      setNotice('Controlled ESP32 probe verified. No firmware or device write was performed.');
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === 'NotFoundError') {
+        setNotice('Serial device selection was cancelled.');
+        return;
+      }
+      setError(caught instanceof Error ? caught.message : 'Controlled ESP32 probe failed.');
+    }
+  }, [pendingProbeApproval, token]);
 
   return useMemo(
     () => ({
@@ -497,6 +524,7 @@ export function useRoadexSession(): RoadexSessionState {
       browserDeviceCapability,
       deviceInventoryBindingRefs,
       descriptorObservation,
+      pendingProbeApproval,
       session,
       archivedSessions,
       transcript,
@@ -514,6 +542,7 @@ export function useRoadexSession(): RoadexSessionState {
       observeUsbDescriptor,
       verifyEsp32Identity,
       createProbeApproval,
+      runControlledProbe,
       retry,
     }),
     [
@@ -530,11 +559,13 @@ export function useRoadexSession(): RoadexSessionState {
       deviceBridgePolicy,
       browserDeviceCapability,
       descriptorObservation,
+      pendingProbeApproval,
       deviceInventoryBindingRefs,
       openWorkspace,
       observeUsbDescriptor,
       verifyEsp32Identity,
       createProbeApproval,
+      runControlledProbe,
       reopenArchivedSession,
       retry,
       sendPrompt,

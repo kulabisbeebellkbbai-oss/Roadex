@@ -13,6 +13,8 @@ import type {
   DeviceArtifactMetadataPublic,
   DeviceBridgeApprovalPublic,
   DeviceBridgeApprovalResponse,
+  DeviceBridgeProbeResponse,
+  DeviceBridgeProbeStartResponse,
   DeviceBridgeRequestPayload,
   DeviceBridgeRequestResponse,
   DeviceDescriptorObservationPayload,
@@ -120,6 +122,30 @@ export async function listActiveDeviceArtifacts(
     { token },
   );
   return response.artifacts;
+}
+
+export async function runDeviceBridgeProbe(
+  token: string | undefined,
+  approval: DeviceBridgeApprovalPublic,
+  deviceMac: string,
+): Promise<void> {
+  const started = await request<DeviceBridgeProbeStartResponse>(
+    `/Roadex/api/device-bridge/approvals/${encodeURIComponent(approval.id)}/start-probe`,
+    { method: 'POST', token, body: {}, requestId: crypto.randomUUID() },
+  );
+  if (!started.ok) throw new Error(started.reason);
+
+  const completed = await request<DeviceBridgeProbeResponse>(
+    `/Roadex/api/device-bridge/operations/${encodeURIComponent(started.operation.id)}/probe`,
+    {
+      method: 'POST',
+      token,
+      body: { artifactSha256: approval.artifactSha256, deviceMac },
+      requestId: crypto.randomUUID(),
+    },
+  );
+  if (!completed.ok) throw new Error(completed.reason);
+  if (completed.operation.phase !== 'verified') throw new Error('The controlled device probe did not verify.');
 }
 
 export async function cancelSession(token: string | undefined, sessionId: string): Promise<CancelResponse> {

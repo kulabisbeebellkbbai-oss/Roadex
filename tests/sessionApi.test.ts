@@ -109,4 +109,56 @@ describe('Roadex client CSRF contract', () => {
     expect(calls[3].init?.body).toBe('{}');
     expect(calls.some((call) => call.path.includes('start-probe'))).toBe(false);
   });
+
+  it('runs only the approved probe endpoints with JSON and CSRF', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input);
+      calls.push({ path, init });
+      if (path === '/api/bootstrap') {
+        return new Response(JSON.stringify({ sessions: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'x-roadex-csrf': 'private-test-value' },
+        });
+      }
+      const operation = {
+        id: 'operation',
+        artifactSha256: 'a'.repeat(64),
+        phase: path.endsWith('/probe') && !path.endsWith('/start-probe') ? 'verified' : 'probe',
+      };
+      return new Response(JSON.stringify({ ok: true, operation }), {
+        status: path.endsWith('/start-probe') ? 201 : 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }));
+
+    const { loginAndBootstrap, runDeviceBridgeProbe } = await import('../src/client/sessionApi');
+    await loginAndBootstrap();
+    await runDeviceBridgeProbe(undefined, {
+      id: 'approval',
+      requestId: 'request',
+      sessionId: 'session',
+      projectId: 'project',
+      artifactId: 'artifact',
+      artifactSha256: 'a'.repeat(64),
+      inventoryBindingId: 'binding',
+      operation: 'esp32.flash',
+      status: 'pending',
+      createdAt: new Date(0).toISOString(),
+      expiresAt: new Date(1).toISOString(),
+    }, '00:11:22:33:44:55');
+
+    expect(calls.map((call) => call.path)).toEqual([
+      '/api/bootstrap',
+      '/Roadex/api/device-bridge/approvals/approval/start-probe',
+      '/Roadex/api/device-bridge/operations/operation/probe',
+    ]);
+    for (const call of calls.slice(1)) {
+      const headers = new Headers(call.init?.headers);
+      expect(headers.get('content-type')).toBe('application/json');
+      expect(headers.has('x-roadex-csrf')).toBe(true);
+      expect(headers.get('x-roadex-request-id')).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
+    }
+    expect(calls.some((call) => /flash|erase|write|firmware/.test(call.path))).toBe(false);
+  });
 });
