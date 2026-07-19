@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   cancelSession,
   closeSession,
+  createDeviceBridgeProbeApproval,
   createSession,
   loginAndBootstrap,
+  listActiveDeviceArtifacts,
   listArchivedSessions,
   readSessionStream,
   reopenSession,
@@ -58,6 +60,7 @@ export type RoadexSessionState = {
   attachManagedThread: (threadId: string, workspaceId: string) => Promise<void>;
   observeUsbDescriptor: () => Promise<void>;
   verifyEsp32Identity: () => Promise<void>;
+  createProbeApproval: () => Promise<void>;
   retry: () => Promise<void>;
 };
 
@@ -453,6 +456,35 @@ export function useRoadexSession(): RoadexSessionState {
     }
   }, [deviceInventoryBindingRefs, session, token]);
 
+  const createProbeApproval = useCallback(async () => {
+    if (!session || descriptorObservation?.verification !== 'verified') {
+      setError('Verify the ESP32 identity before creating a probe approval.');
+      return;
+    }
+    const binding = deviceInventoryBindingRefs.find((candidate) => candidate.projectId === session.workspace.id);
+    if (!binding) {
+      setError('No active inventory binding is available for this project.');
+      return;
+    }
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      const artifacts = await listActiveDeviceArtifacts(token, session.id);
+      const artifact = artifacts[0];
+      if (!artifact) throw new Error('No active firmware artifact is available for this session.');
+      await createDeviceBridgeProbeApproval(token, session.id, {
+        workspaceId: session.workspace.id,
+        artifactId: artifact.id,
+        artifactSha256: artifact.sha256,
+        inventoryBindingId: binding.id,
+        operation: 'esp32.flash',
+      });
+      setNotice('Probe approval is ready for the controlled MSI test agent.');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Probe approval failed.');
+    }
+  }, [descriptorObservation, deviceInventoryBindingRefs, session, token]);
+
   return useMemo(
     () => ({
       connectionState,
@@ -481,6 +513,7 @@ export function useRoadexSession(): RoadexSessionState {
       attachManagedThread,
       observeUsbDescriptor,
       verifyEsp32Identity,
+      createProbeApproval,
       retry,
     }),
     [
@@ -501,6 +534,7 @@ export function useRoadexSession(): RoadexSessionState {
       openWorkspace,
       observeUsbDescriptor,
       verifyEsp32Identity,
+      createProbeApproval,
       reopenArchivedSession,
       retry,
       sendPrompt,

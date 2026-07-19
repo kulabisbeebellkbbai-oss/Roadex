@@ -432,10 +432,22 @@ function App() {
                 <KeyRound size={17} />
                 Verify ESP32
               </button>
+              <button
+                disabled={
+                  !roadex.deviceBridgePolicy?.requestIntakeEnabled ||
+                  roadex.descriptorObservation?.verification !== 'verified' ||
+                  !session
+                }
+                onClick={() => void roadex.createProbeApproval()}
+                type="button"
+              >
+                <ShieldCheck size={17} />
+                Create probe approval
+              </button>
             </div>
             <div className="timeline-note">
               <Clock3 size={18} />
-              <span>Device bridge approval is a later security-reviewed phase.</span>
+              <span>Probe approval cannot transfer firmware or write to the device.</span>
             </div>
           </article>
         </section>

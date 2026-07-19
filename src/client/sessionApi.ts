@@ -10,6 +10,11 @@ import type {
 } from '../shared/apiContracts';
 import type { CreateSessionRequest, RoadexSession, SessionResponse, StreamEvent } from '../shared/sessionContracts';
 import type {
+  DeviceArtifactMetadataPublic,
+  DeviceBridgeApprovalPublic,
+  DeviceBridgeApprovalResponse,
+  DeviceBridgeRequestPayload,
+  DeviceBridgeRequestResponse,
   DeviceDescriptorObservationPayload,
   DeviceDescriptorObservationResponse,
 } from '../shared/deviceBridgeContracts';
@@ -85,6 +90,36 @@ export async function submitDeviceDescriptorObservation(
   );
   if (!response.ok) throw new Error(response.reason);
   return response;
+}
+
+export async function createDeviceBridgeProbeApproval(
+  token: string | undefined,
+  sessionId: string,
+  body: DeviceBridgeRequestPayload,
+): Promise<DeviceBridgeApprovalPublic> {
+  const intake = await request<DeviceBridgeRequestResponse>(
+    `/Roadex/api/sessions/${encodeURIComponent(sessionId)}/device-bridge/requests`,
+    { method: 'POST', token, body, requestId: crypto.randomUUID() },
+  );
+  if (!intake.ok) throw new Error(intake.reason);
+
+  const approval = await request<DeviceBridgeApprovalResponse>(
+    `/Roadex/api/device-bridge/requests/${encodeURIComponent(intake.request.id)}/approve`,
+    { method: 'POST', token, requestId: crypto.randomUUID() },
+  );
+  if (!approval.ok) throw new Error(approval.reason);
+  return approval.approval;
+}
+
+export async function listActiveDeviceArtifacts(
+  token: string | undefined,
+  sessionId: string,
+): Promise<DeviceArtifactMetadataPublic[]> {
+  const response = await request<{ artifacts: DeviceArtifactMetadataPublic[] }>(
+    `/Roadex/api/sessions/${encodeURIComponent(sessionId)}/device-bridge/artifacts`,
+    { token },
+  );
+  return response.artifacts;
 }
 
 export async function cancelSession(token: string | undefined, sessionId: string): Promise<CancelResponse> {
