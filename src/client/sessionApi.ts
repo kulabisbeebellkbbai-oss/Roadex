@@ -81,7 +81,7 @@ export async function submitDeviceDescriptorObservation(
 ): Promise<Extract<DeviceDescriptorObservationResponse, { ok: true }>> {
   const response = await request<DeviceDescriptorObservationResponse>(
     `/Roadex/api/sessions/${encodeURIComponent(sessionId)}/device-bridge/observations`,
-    { method: 'POST', token, body },
+    { method: 'POST', token, body, requestId: crypto.randomUUID() },
   );
   if (!response.ok) throw new Error(response.reason);
   return response;
@@ -195,6 +195,7 @@ type RequestOptions = {
   method?: string;
   token?: string;
   body?: unknown;
+  requestId?: string;
 };
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -205,6 +206,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       ...(options.body ? { 'content-type': 'application/json' } : {}),
       ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
       ...(method !== 'GET' && csrfToken ? { 'x-roadex-csrf': csrfToken } : {}),
+      ...(options.requestId ? { 'x-roadex-request-id': options.requestId } : {}),
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
   });

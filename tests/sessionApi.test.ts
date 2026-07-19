@@ -45,6 +45,8 @@ describe('Roadex client CSRF contract', () => {
     });
 
     expect(calls[1].path).toBe('/Roadex/api/sessions/session/device-bridge/observations');
-    expect(new Headers(calls[1].init?.headers).has('x-roadex-csrf')).toBe(true);
+    const headers = new Headers(calls[1].init?.headers);
+    expect(headers.has('x-roadex-csrf')).toBe(true);
+    expect(headers.get('x-roadex-request-id')).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
   });
 });
