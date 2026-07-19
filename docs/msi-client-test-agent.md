@@ -96,3 +96,13 @@ For each viewport, the runner must preserve the case's assertion result before c
 The queue worker must also claim a pending suite only when `roadex.client_auth_setup` returns both `status: ok` and `authenticated: true`. It must leave the suite pending when authentication returns `needsUser` or `failed`.
 
 Acceptance requires an authentication-only success followed by the canonical `project-device-controls` and `portal-smoke` suites. Every viewport must pass, gateway streams must close as `client_closed`, and no subscriber-limit denial or device action may occur.
+
+## Version 10 Teardown Result Preservation
+
+Version 9 correctly gates suite claiming on explicit authentication success, but it still replaces passed cases with `interrupted` when non-stream app-origin requests remain in flight at deliberate browser teardown. Both canonical suites demonstrated this cleanup-only signature: no assertion failure or timeout was reported, yet every case became interrupted.
+
+The trusted runner must freeze each case's assertion result before teardown begins. After teardown starts, cancellation of an in-flight request must not alter that result when the request targets the approved Roadex origin, the request had not already produced an HTTP or transport failure, cancellation is caused by closing the owning page/context/browser, and the browser process exits within the bounded cleanup budget. This applies to live streams and ordinary Roadex requests.
+
+The runner must still fail or interrupt for any request failure observed before teardown, unexpected HTTP status, disallowed origin, browser or console error, assertion failure, cleanup timeout, or surviving browser process. Teardown classification must never suppress evidence captured before the teardown boundary.
+
+Acceptance remains an authentication-only success followed by the canonical control and portal suites. All cases must pass without weakening request, origin, browser-error, or process-exit checks.

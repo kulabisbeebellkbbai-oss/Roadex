@@ -196,6 +196,8 @@ Current checkpoint:
 - The next trusted-runner change must launch and close a separate Chromium process per viewport, await stream termination and process exit, then rerun the restored canonical three-viewport suite.
 - Roadex heartbeat deployment now makes the gateway close upstream streams promptly as `client_closed` with no subscriber-limit denial. Agent v8 still marks passed viewport work interrupted because expected EventSource cancellation remains in its request tracker.
 - Agent v9 must preserve passed assertions across expected teardown cancellation and must never claim a suite after authentication returns `needsUser` or `failed`.
+- Agent v9 fixed authentication gating, but both canonical suites reported only interrupted cases because same-origin non-stream requests remained active when deliberate browser teardown began.
+- Agent v10 must freeze the assertion result before teardown and treat cancellation of approved-origin requests caused solely by successful browser shutdown as expected cleanup, without suppressing any pre-teardown failure.
 
 ## Approval Gate
 
