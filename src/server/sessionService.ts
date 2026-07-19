@@ -34,6 +34,7 @@ import {
 } from './statePersistence.js';
 import { canAccessManagedCodexProjects, getApprovedWorkspaces, resolveWorkspaceForUser } from './workspacePolicy.js';
 import { loadManagedCodexThreads } from './codexProjectsRegistry.js';
+import { loadSerialVerificationProfiles } from './serialVerificationProfiles.js';
 import { maxDeviceArtifactBytes, readDeviceArtifact, storeDeviceArtifact } from './deviceArtifactVault.js';
 import {
   firstMilestoneGates,
@@ -78,6 +79,7 @@ import type {
   DeviceInventoryBindingRecord,
   DeviceInventoryBindingResponse,
 } from '../shared/deviceBridgeContracts.js';
+import type { SerialVerificationProfile } from '../shared/serialVerificationContracts.js';
 
 export type RoadexState = {
   sessions: SessionStore;
@@ -97,6 +99,7 @@ export type RoadexState = {
   deviceBridgeOperations: Map<string, DeviceBridgeOperationRecord>;
   deviceInventoryBindings: Map<string, DeviceInventoryBindingRecord>;
   deviceDescriptorObservations: Map<string, DeviceDescriptorObservationRecord>;
+  serialVerificationProfiles: SerialVerificationProfile[];
 };
 
 type StreamSubscriber = {
@@ -186,10 +189,12 @@ export function createInitialState(
     deviceBridgeOperations: new Map(persisted.deviceBridgeOperations.map((record) => [record.id, record])),
     deviceInventoryBindings: new Map(persisted.deviceInventoryBindings.map((record) => [record.id, record])),
     deviceDescriptorObservations: new Map(persisted.deviceDescriptorObservations.map((record) => [record.id, record])),
+    serialVerificationProfiles: loadSerialVerificationProfiles(),
   };
 }
 
 export async function bootstrap(state: RoadexState, user: UserProfile): Promise<RoadexBootstrap> {
+  const approvedWorkspaces = getApprovedWorkspaces(user);
   let userSessions = state.sessions.sessions.filter((session) => isVisibleSessionForUser(state, session, user));
   const hasArchivedSessions = state.sessions.sessions.some(
     (session) => session.userId === user.id && session.lifecycle === 'closed',
@@ -204,7 +209,7 @@ export async function bootstrap(state: RoadexState, user: UserProfile): Promise<
   const visibleSessionIds = new Set(userSessions.map((session) => session.id));
   return {
     user,
-    workspaces: getApprovedWorkspaces(user),
+    workspaces: approvedWorkspaces,
     sessions: userSessions,
     auditEvents: visibleAuditEvents(state.audit, user).slice(-8).reverse(),
     streamPreview: state.sessions.streamEvents.filter((event) => visibleSessionIds.has(event.sessionId)).slice(-8),
@@ -219,6 +224,8 @@ export async function bootstrap(state: RoadexState, user: UserProfile): Promise<
           identityVerificationAvailable: Boolean(binding.deviceMacTag),
         }))
       : [],
+    serialVerificationProfiles: state.serialVerificationProfiles.filter((profile) =>
+      approvedWorkspaces.some((workspace) => workspace.id === profile.workspaceId)),
   };
 }
 

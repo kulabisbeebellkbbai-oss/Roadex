@@ -1,5 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
 import { hasSerialRuntimeVerification, verifySerialRuntime } from '../src/client/serialRuntimeVerifier';
+import type { SerialVerificationProfile } from '../src/shared/serialVerificationContracts';
+
+const profile: SerialVerificationProfile = {
+  id: 'test-runtime',
+  workspaceId: 'test-project',
+  label: 'Test runtime verification',
+  baudRate: 115200,
+  bufferSize: 8192,
+  timeoutMs: 100,
+  requiredMarkers: ['SHT41: missing, BME680: missing', 'BLE provisioning started'],
+  successMessage: 'Runtime verified.',
+  stages: [
+    { marker: 'BLE stage: entering initialization', pendingLabel: 'initializing the BLE device' },
+    { marker: 'BLE stage: device initialized', pendingLabel: 'creating the BLE server' },
+  ],
+};
+
+const immediateProfile = { ...profile, timeoutMs: 1 };
 
 describe('serial runtime verifier', () => {
   it('recognizes bounded startup markers without writing to the device', async () => {
@@ -17,9 +35,9 @@ describe('serial runtime verifier', () => {
       },
     });
     const requestPort = vi.fn(async () => ({ open, close, readable }));
-    await expect(verifySerialRuntime({ serial: { requestPort } }, 100)).resolves.toEqual({
-      bleProvisioningStarted: true,
-      sensorsAbsent: true,
+    await expect(verifySerialRuntime({ serial: { requestPort } }, profile)).resolves.toEqual({
+      profileId: 'test-runtime',
+      requiredMarkersObserved: true,
     });
     expect(open).toHaveBeenCalledWith({ baudRate: 115200, bufferSize: 8192 });
     expect(close).toHaveBeenCalledOnce();
@@ -33,7 +51,7 @@ describe('serial runtime verifier', () => {
         controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
       .rejects.toThrow('Serial output was detected');
     expect(close).toHaveBeenCalledOnce();
   });
@@ -51,8 +69,8 @@ describe('serial runtime verifier', () => {
         else controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
-      .resolves.toEqual({ bleProvisioningStarted: true, sensorsAbsent: true });
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+      .resolves.toEqual({ profileId: 'test-runtime', requiredMarkersObserved: true });
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -70,8 +88,8 @@ describe('serial runtime verifier', () => {
         else controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
-      .resolves.toEqual({ bleProvisioningStarted: true, sensorsAbsent: true });
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+      .resolves.toEqual({ profileId: 'test-runtime', requiredMarkersObserved: true });
   });
 
   it('does not classify an empty serial chunk as output', async () => {
@@ -82,7 +100,7 @@ describe('serial runtime verifier', () => {
         controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
       .rejects.toThrow('No serial output was detected');
   });
 
@@ -108,8 +126,8 @@ describe('serial runtime verifier', () => {
         return current;
       },
     };
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => port } }, 100))
-      .resolves.toEqual({ bleProvisioningStarted: true, sensorsAbsent: true });
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => port } }, profile))
+      .resolves.toEqual({ profileId: 'test-runtime', requiredMarkersObserved: true });
     expect(failedReader.releaseLock).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
   });
@@ -118,7 +136,7 @@ describe('serial runtime verifier', () => {
     const close = vi.fn(async () => undefined);
     const cancel = vi.fn();
     const readable = new ReadableStream<Uint8Array>({ cancel });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 1))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, immediateProfile))
       .rejects.toThrow('No serial output was detected');
     expect(cancel).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
@@ -136,7 +154,7 @@ describe('serial runtime verifier', () => {
       const readable = { getReader: () => reader } as unknown as ReadableStream<Uint8Array>;
       const verification = verifySerialRuntime(
         { serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } },
-        1,
+        immediateProfile,
       );
       const outcome = expect(verification).rejects.toThrow('No serial output was detected');
       await vi.advanceTimersByTimeAsync(1000);
@@ -155,7 +173,7 @@ describe('serial runtime verifier', () => {
       releaseLock: vi.fn(),
     };
     const readable = { getReader: () => reader } as unknown as ReadableStream<Uint8Array>;
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
       .rejects.toThrow('serial connection failed');
     expect(reader.releaseLock).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
@@ -169,8 +187,8 @@ describe('serial runtime verifier', () => {
         controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
-      .rejects.toThrow('Firmware booted and handled the disconnected sensors, but BLE initialization was not detected');
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+      .rejects.toThrow('Test runtime verification did not observe every required marker');
   });
 
   it('reports the last predefined BLE initialization stage without exposing serial output', async () => {
@@ -183,8 +201,8 @@ describe('serial runtime verifier', () => {
         controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
-      .rejects.toThrow('Firmware booted, but BLE initialization stopped while creating the BLE server.');
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+      .rejects.toThrow('Test runtime verification stopped while creating the BLE server.');
   });
 
   it('distinguishes BLE initialization without the expected sensor status', async () => {
@@ -195,8 +213,8 @@ describe('serial runtime verifier', () => {
         controller.close();
       },
     });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
-      .rejects.toThrow('BLE initialization started, but the disconnected-sensor startup status was not detected');
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
+      .rejects.toThrow('Test runtime verification did not observe every required marker');
   });
 
   it('attempts port closure even when reader lock release fails', async () => {
@@ -206,7 +224,7 @@ describe('serial runtime verifier', () => {
       releaseLock: () => { throw new Error('release failed'); },
     };
     const readable = { getReader: () => reader } as unknown as ReadableStream<Uint8Array>;
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, profile))
       .rejects.toThrow('No serial output was detected');
     expect(close).toHaveBeenCalledOnce();
   });

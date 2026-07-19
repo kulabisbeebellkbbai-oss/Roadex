@@ -1,5 +1,6 @@
 import type { DeviceBridgePolicy } from './deviceBridgeContracts.js';
 import type { DeviceInventoryBindingRef } from './deviceBridgeContracts.js';
+import type { SerialVerificationProfile } from './serialVerificationContracts.js';
 
 export type SessionLifecycle =
   | 'pending'
@@ -143,6 +144,7 @@ export type RoadexBootstrap = {
   managedThreads: ManagedCodexThread[];
   deviceBridgePolicy: DeviceBridgePolicy;
   deviceInventoryBindingRefs: DeviceInventoryBindingRef[];
+  serialVerificationProfiles: SerialVerificationProfile[];
 };
 
 export type SessionResponse =

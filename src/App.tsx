@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -37,11 +37,15 @@ function App() {
   const [bleVerificationMessage, setBleVerificationMessage] = useState('');
   const [serialVerification, setSerialVerification] = useState<'idle' | 'checking' | 'verified' | 'error'>('idle');
   const [serialVerificationMessage, setSerialVerificationMessage] = useState('');
+  const serialVerificationSequence = useRef(0);
   const [layoutMode, setLayoutMode] = useState(() => resolveLayoutMode(
     readLayoutPreference(),
     window.matchMedia('(max-width: 720px)').matches,
   ));
   const session = roadex.session;
+  const serialVerificationProfile = roadex.serialVerificationProfiles.find(
+    (profile) => profile.workspaceId === session?.workspace.id,
+  );
   const selectedProject = roadex.workspaces.find(
     (workspace) => workspace.id === (selectedProjectId || session?.workspace.id),
   );
@@ -75,6 +79,9 @@ function App() {
 
   useEffect(() => {
     if (session?.workspace.id) setSelectedProjectId(session.workspace.id);
+    serialVerificationSequence.current += 1;
+    setSerialVerification('idle');
+    setSerialVerificationMessage('');
   }, [session?.id, session?.workspace.id]);
 
   async function handlePrompt(event: FormEvent<HTMLFormElement>) {
@@ -99,13 +106,17 @@ function App() {
   }
 
   async function handleSerialVerification() {
+    if (!serialVerificationProfile) return;
+    const sequence = ++serialVerificationSequence.current;
     setSerialVerification('checking');
-    setSerialVerificationMessage('Select the ESP32, then press RESET/EN while Roadex listens.');
+    setSerialVerificationMessage(`Select the serial device for ${serialVerificationProfile.label}, then reset it while Roadex listens.`);
     try {
-      await verifySerialRuntime(window.navigator);
+      await verifySerialRuntime(window.navigator, serialVerificationProfile);
+      if (sequence !== serialVerificationSequence.current) return;
       setSerialVerification('verified');
-      setSerialVerificationMessage('Boot verified; BLE initialization started and disconnected sensors were handled correctly.');
+      setSerialVerificationMessage(serialVerificationProfile.successMessage);
     } catch (error) {
+      if (sequence !== serialVerificationSequence.current) return;
       setSerialVerification('error');
       setSerialVerificationMessage(error instanceof Error ? error.message : 'Serial runtime verification failed.');
     }
@@ -449,12 +460,13 @@ function App() {
                 {bleVerification === 'checking' ? 'Checking BLE' : 'Verify BLE runtime'}
               </button>
               <button
-                disabled={!hasSerialRuntimeVerification(window.navigator) || serialVerification === 'checking'}
+                disabled={!hasSerialRuntimeVerification(window.navigator) || !serialVerificationProfile || serialVerification === 'checking'}
                 onClick={() => void handleSerialVerification()}
                 type="button"
+                title={serialVerificationProfile ? `Run ${serialVerificationProfile.label}` : 'No serial verification profile is configured for this project'}
               >
                 <TerminalSquare size={17} />
-                {serialVerification === 'checking' ? 'Listening for boot' : 'Verify serial boot'}
+                {serialVerification === 'checking' ? 'Listening for runtime' : 'Verify serial runtime'}
               </button>
               <button
                 disabled={

@@ -42,12 +42,27 @@ import type {
 } from '../src/shared/deviceBridgeContracts';
 import type { RunnerPromptRequest, SessionRunner } from '../src/server/codexRunner';
 import { storeDeviceArtifact } from '../src/server/deviceArtifactVault';
+import type { SerialVerificationProfile } from '../src/shared/serialVerificationContracts';
 
 const workspace: WorkspaceRef = {
   id: 'roadex',
   name: 'Roadex Portal',
   root: process.cwd(),
 };
+
+function serialProfile(id: string, workspaceId: string): SerialVerificationProfile {
+  return {
+    id,
+    workspaceId,
+    label: 'Runtime verification',
+    baudRate: 115200,
+    bufferSize: 8192,
+    timeoutMs: 15000,
+    requiredMarkers: ['runtime ready'],
+    successMessage: 'Runtime verified.',
+    stages: [],
+  };
+}
 
 function fakeRunner(result: 'ok' | 'failed' = 'ok', codexThreadId?: string): SessionRunner {
   let sessions = 0;
@@ -185,6 +200,19 @@ describe('createMockSession', () => {
     expect(state.deviceArtifacts.size).toBe(0);
     expect(state.deviceBridgeApprovals.size).toBe(0);
     expect(state.deviceBridgeOperations.size).toBe(0);
+    expect(result.serialVerificationProfiles).toEqual([]);
+  });
+
+  it('returns serial verification profiles only for approved workspaces', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    state.serialVerificationProfiles = [
+      serialProfile('roadex-profile', 'roadex'),
+      serialProfile('hidden-profile', 'unapproved-workspace'),
+    ];
+
+    const result = await bootstrap(state, mockUser);
+
+    expect(result.serialVerificationProfiles.map((profile) => profile.id)).toEqual(['roadex-profile']);
   });
 
   it('creates a ready mock session for an authenticated user and approved workspace', () => {

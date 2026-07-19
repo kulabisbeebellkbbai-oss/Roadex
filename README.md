@@ -42,6 +42,8 @@ Managed registry projects are canonicalized and limited to the manager roots und
 
 Runtime session, transcript, and audit metadata are written to `data/roadex-state.json` by default. The `data/` directory is ignored and must not be committed.
 
+Optional read-only serial runtime checks are configured per approved workspace through an admin-owned JSON profile file. Set `ROADEX_SERIAL_VERIFICATION_PROFILES_FILE` to its path. Profiles define bounded serial settings, required success markers, sanitized stage labels, and a success message; Roadex validates the entire registry at startup and provides no browser write endpoint for it.
+
 Prompt submission is asynchronous: `POST /api/sessions/:id/prompts` accepts work and the transcript is read from `GET /api/sessions/:id/stream` while Codex runs. Add `?live=1` for a long-lived SSE stream that sends the existing transcript followed by new runner events. The local API also supports `POST /api/sessions/:id/cancel` and `POST /api/sessions/:id/close`.
 
 Archived sessions are listed through `GET /api/sessions` and restored through `POST /api/sessions/:id/reopen`. History is owner-scoped. Reopen preserves the session transcript and Codex thread, revalidates the workspace against current server policy, and is denied when that workspace already has an active session or stale runner state exists.

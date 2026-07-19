@@ -1,4 +1,5 @@
 import { approvedUsbFilters } from './deviceCapability';
+import type { SerialVerificationProfile } from '../shared/serialVerificationContracts';
 
 type RuntimeSerialPort = {
   open: (options: { baudRate: number; bufferSize: number }) => Promise<void>;
@@ -13,19 +14,9 @@ type SerialNavigator = {
 };
 
 export type SerialRuntimeVerification = {
-  bleProvisioningStarted: true;
-  sensorsAbsent: true;
+  profileId: string;
+  requiredMarkersObserved: true;
 };
-
-const bleStageMarkers = [
-  ['BLE stage: entering initialization', 'entering BLE initialization'],
-  ['BLE stage: device initialized', 'creating the BLE server'],
-  ['BLE stage: server created', 'creating the provisioning service'],
-  ['BLE stage: service created', 'configuring provisioning characteristics'],
-  ['BLE stage: characteristics configured', 'starting the provisioning service'],
-  ['BLE stage: service started', 'configuring BLE advertising'],
-  ['BLE stage: advertising configured', 'starting BLE advertising'],
-] as const;
 
 export function hasSerialRuntimeVerification(navigatorLike: object): navigatorLike is object & SerialNavigator {
   return 'serial' in navigatorLike && Boolean(
@@ -36,21 +27,20 @@ export function hasSerialRuntimeVerification(navigatorLike: object): navigatorLi
 
 export async function verifySerialRuntime(
   navigatorLike: object,
-  timeoutMs = 15_000,
+  profile: SerialVerificationProfile,
 ): Promise<SerialRuntimeVerification> {
   if (!hasSerialRuntimeVerification(navigatorLike)) throw new Error('Web Serial is not available in this browser.');
   const port = await navigatorLike.serial.requestPort({
     filters: approvedUsbFilters.map(({ vendorId, productId }) => ({ usbVendorId: vendorId, usbProductId: productId })),
   });
   try {
-    await port.open({ baudRate: 115200, bufferSize: 8192 });
-    const deadline = Date.now() + timeoutMs;
+    await port.open({ baudRate: profile.baudRate, bufferSize: profile.bufferSize });
+    const deadline = Date.now() + profile.timeoutMs;
     const decoder = new TextDecoder();
     let output = '';
     let receivedOutput = false;
-    let sensorsHandled = false;
-    let bleStarted = false;
-    let bleStage = -1;
+    const requiredMarkers = profile.requiredMarkers.map(() => false);
+    let stage = -1;
     while (port.readable && Date.now() < deadline) {
       const stream = port.readable;
       const reader = stream.getReader();
@@ -78,13 +68,14 @@ export async function verifySerialRuntime(
           if (result.value && result.value.byteLength > 0) {
             receivedOutput = true;
             output = (output + decoder.decode(result.value, { stream: true })).slice(-8192);
-            sensorsHandled ||= output.includes('SHT41: missing, BME680: missing');
-            bleStarted ||= output.includes('BLE provisioning started');
-            for (let index = bleStage + 1; index < bleStageMarkers.length; index += 1) {
-              if (output.includes(bleStageMarkers[index][0])) bleStage = index;
+            for (let index = 0; index < profile.requiredMarkers.length; index += 1) {
+              requiredMarkers[index] ||= output.includes(profile.requiredMarkers[index]);
+            }
+            for (let index = stage + 1; index < profile.stages.length; index += 1) {
+              if (output.includes(profile.stages[index].marker)) stage = index;
             }
           }
-          if (sensorsHandled && bleStarted) return { bleProvisioningStarted: true, sensorsAbsent: true };
+          if (requiredMarkers.every(Boolean)) return { profileId: profile.id, requiredMarkersObserved: true };
           if (result.done) {
             streamEnded = true;
             break;
@@ -110,7 +101,7 @@ export async function verifySerialRuntime(
         }
       }
     }
-    throw new Error(classifyIncompleteRuntime(receivedOutput, sensorsHandled, bleStarted, bleStage));
+    throw new Error(classifyIncompleteRuntime(receivedOutput, profile, requiredMarkers, stage));
   } finally {
     await settleWithin(port.close().catch(() => undefined), 250);
   }
@@ -125,15 +116,13 @@ async function settleWithin(promise: Promise<unknown>, timeoutMs: number): Promi
 
 function classifyIncompleteRuntime(
   receivedOutput: boolean,
-  sensorsHandled: boolean,
-  bleStarted: boolean,
-  bleStage: number,
+  profile: SerialVerificationProfile,
+  requiredMarkers: boolean[],
+  stage: number,
 ): string {
   if (!receivedOutput) return 'No serial output was detected. Start listening, then press RESET/EN once and retry.';
-  if (sensorsHandled && !bleStarted && bleStage >= 0) {
-    return `Firmware booted, but BLE initialization stopped while ${bleStageMarkers[bleStage][1]}.`;
+  if (!requiredMarkers.every(Boolean) && stage >= 0) {
+    return `${profile.label} stopped while ${profile.stages[stage].pendingLabel}.`;
   }
-  if (sensorsHandled && !bleStarted) return 'Firmware booted and handled the disconnected sensors, but BLE initialization was not detected.';
-  if (!sensorsHandled && bleStarted) return 'BLE initialization started, but the disconnected-sensor startup status was not detected.';
-  return 'Serial output was detected, but it did not match the expected firmware startup markers.';
+  return `Serial output was detected, but ${profile.label} did not observe every required marker.`;
 }
