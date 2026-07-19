@@ -26,6 +26,7 @@ import { navItems } from './roadexModel';
 import { isVisibleTranscriptEvent } from './transcript';
 import { resolveLayoutMode, toggleLayoutMode } from './layoutMode';
 import { hasBleRuntimeVerification, verifyBleRuntime } from './client/bleRuntimeVerifier';
+import { hasSerialRuntimeVerification, verifySerialRuntime } from './client/serialRuntimeVerifier';
 
 function App() {
   const roadex = useRoadexSession();
@@ -34,6 +35,8 @@ function App() {
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [bleVerification, setBleVerification] = useState<'idle' | 'checking' | 'verified' | 'error'>('idle');
   const [bleVerificationMessage, setBleVerificationMessage] = useState('');
+  const [serialVerification, setSerialVerification] = useState<'idle' | 'checking' | 'verified' | 'error'>('idle');
+  const [serialVerificationMessage, setSerialVerificationMessage] = useState('');
   const [layoutMode, setLayoutMode] = useState(() => resolveLayoutMode(
     readLayoutPreference(),
     window.matchMedia('(max-width: 720px)').matches,
@@ -92,6 +95,19 @@ function App() {
     } catch (error) {
       setBleVerification('error');
       setBleVerificationMessage(error instanceof Error ? error.message : 'BLE runtime verification failed.');
+    }
+  }
+
+  async function handleSerialVerification() {
+    setSerialVerification('checking');
+    setSerialVerificationMessage('Select the ESP32, then press RESET/EN while Roadex listens.');
+    try {
+      await verifySerialRuntime(window.navigator);
+      setSerialVerification('verified');
+      setSerialVerificationMessage('Boot verified; BLE initialization started and disconnected sensors were handled correctly.');
+    } catch (error) {
+      setSerialVerification('error');
+      setSerialVerificationMessage(error instanceof Error ? error.message : 'Serial runtime verification failed.');
     }
   }
 
@@ -433,6 +449,14 @@ function App() {
                 {bleVerification === 'checking' ? 'Checking BLE' : 'Verify BLE runtime'}
               </button>
               <button
+                disabled={!hasSerialRuntimeVerification(window.navigator) || serialVerification === 'checking'}
+                onClick={() => void handleSerialVerification()}
+                type="button"
+              >
+                <TerminalSquare size={17} />
+                {serialVerification === 'checking' ? 'Listening for boot' : 'Verify serial boot'}
+              </button>
+              <button
                 disabled={
                   !roadex.deviceBridgePolicy?.descriptorObservationEnabled ||
                   roadex.browserDeviceCapability.transport !== 'webusb' ||
@@ -511,6 +535,11 @@ function App() {
               {bleVerificationMessage ? (
                 <span className={`device-verification ${bleVerification}`} role={bleVerification === 'error' ? 'alert' : 'status'}>
                   {bleVerificationMessage}
+                </span>
+              ) : null}
+              {serialVerificationMessage ? (
+                <span className={`device-verification ${serialVerification}`} role={serialVerification === 'error' ? 'alert' : 'status'}>
+                  {serialVerificationMessage}
                 </span>
               ) : null}
             </div>
