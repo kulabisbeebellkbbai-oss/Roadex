@@ -174,9 +174,9 @@ Acceptance criteria:
 
 Owner: Murdock
 
-Status: Done
+Status: In progress
 
-Active brief: Diagnose the MSI client control suite by splitting non-destructive checks into bounded profile, runtime, policy, binding, and guard cases. Run those cases through the authenticated MSI agent without opening device choosers or creating operations.
+Active brief: Isolate the v7 tablet and mobile project-device control failures using the same consolidated non-destructive flow, classify runner carryover versus responsive UI behavior, and restore the canonical three-viewport suite after diagnosis.
 
 Acceptance criteria:
 
