@@ -78,7 +78,7 @@ export async function submitDeviceDescriptorObservation(
   body: DeviceDescriptorObservationPayload,
 ): Promise<Extract<DeviceDescriptorObservationResponse, { ok: true }>> {
   const response = await request<DeviceDescriptorObservationResponse>(
-    `/api/sessions/${encodeURIComponent(sessionId)}/device-bridge/observations`,
+    `/Roadex/api/sessions/${encodeURIComponent(sessionId)}/device-bridge/observations`,
     { method: 'POST', token, body },
   );
   if (!response.ok) throw new Error(response.reason);
