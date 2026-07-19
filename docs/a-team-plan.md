@@ -169,13 +169,22 @@ Acceptance criteria:
 
 Owner: Murdock
 
-Brief: Create and run tests for the agreed release slice, then report remaining risk.
+Status: In progress
+
+Active brief: Diagnose the MSI client control suite by splitting non-destructive checks into bounded profile, runtime, policy, binding, and guard cases. Run those cases through the authenticated MSI agent without opening device choosers or creating operations.
 
 Acceptance criteria:
 
-- Automated tests pass.
-- Smoke path is documented.
-- Known gaps are listed.
+- Configured and unconfigured prerequisites are independently observable by bounded case ID.
+- Desktop, tablet, and mobile results are captured through the MSI agent.
+- No chooser, firmware transfer, write, approval, or operation action is invoked.
+- Application defects are handed to Face or B.A.; runner and contract defects remain with Murdock.
+
+Current checkpoint:
+
+- The authenticated portal suite passes on desktop, tablet, and mobile.
+- Repeated project-device suites change which identical guard cases pass, isolating a trusted-runner state-settlement race.
+- MSI agent assertions must use bounded Playwright web-first polling after project and thread selection before release verification can continue.
 
 ## Approval Gate
 
