@@ -37,6 +37,9 @@ export async function verifySerialRuntime(
     const deadline = Date.now() + timeoutMs;
     const decoder = new TextDecoder();
     let output = '';
+    let receivedOutput = false;
+    let sensorsHandled = false;
+    let bleStarted = false;
     while (port.readable && Date.now() < deadline) {
       const stream = port.readable;
       const reader = stream.getReader();
@@ -61,8 +64,13 @@ export async function verifySerialRuntime(
             streamEnded = true;
             break;
           }
-          if (result.value) output = (output + decoder.decode(result.value, { stream: true })).slice(-8192);
-          if (hasRuntimeMarkers(output)) return { bleProvisioningStarted: true, sensorsAbsent: true };
+          if (result.value && result.value.byteLength > 0) {
+            receivedOutput = true;
+            output = (output + decoder.decode(result.value, { stream: true })).slice(-8192);
+            sensorsHandled ||= output.includes('SHT41: missing, BME680: missing');
+            bleStarted ||= output.includes('BLE provisioning started');
+          }
+          if (sensorsHandled && bleStarted) return { bleProvisioningStarted: true, sensorsAbsent: true };
           if (result.done) {
             streamEnded = true;
             break;
@@ -88,7 +96,7 @@ export async function verifySerialRuntime(
         }
       }
     }
-    throw new Error('Startup markers were not observed. Press RESET/EN after serial listening begins, then retry.');
+    throw new Error(classifyIncompleteRuntime(receivedOutput, sensorsHandled, bleStarted));
   } finally {
     await settleWithin(port.close().catch(() => undefined), 250);
   }
@@ -101,6 +109,9 @@ async function settleWithin(promise: Promise<unknown>, timeoutMs: number): Promi
   ]);
 }
 
-function hasRuntimeMarkers(output: string): boolean {
-  return output.includes('SHT41: missing, BME680: missing') && output.includes('BLE provisioning started');
+function classifyIncompleteRuntime(receivedOutput: boolean, sensorsHandled: boolean, bleStarted: boolean): string {
+  if (!receivedOutput) return 'No serial output was detected. Start listening, then press RESET/EN once and retry.';
+  if (sensorsHandled && !bleStarted) return 'Firmware booted and handled the disconnected sensors, but BLE initialization was not detected.';
+  if (!sensorsHandled && bleStarted) return 'BLE initialization started, but the disconnected-sensor startup status was not detected.';
+  return 'Serial output was detected, but it did not match the expected firmware startup markers.';
 }

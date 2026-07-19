@@ -34,7 +34,7 @@ describe('serial runtime verifier', () => {
       },
     });
     await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
-      .rejects.toThrow('Startup markers were not observed');
+      .rejects.toThrow('Serial output was detected');
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -54,6 +54,36 @@ describe('serial runtime verifier', () => {
     await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
       .resolves.toEqual({ bleProvisioningStarted: true, sensorsAbsent: true });
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('retains marker state after earlier serial text is evicted from the rolling window', async () => {
+    const close = vi.fn(async () => undefined);
+    const chunks = [
+      new TextEncoder().encode('SHT41: missing, BME680: missing\n'),
+      new TextEncoder().encode('x'.repeat(9000)),
+      new TextEncoder().encode('BLE provisioning started\n'),
+    ];
+    const readable = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = chunks.shift();
+        if (chunk) controller.enqueue(chunk);
+        else controller.close();
+      },
+    });
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
+      .resolves.toEqual({ bleProvisioningStarted: true, sensorsAbsent: true });
+  });
+
+  it('does not classify an empty serial chunk as output', async () => {
+    const close = vi.fn(async () => undefined);
+    const readable = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array());
+        controller.close();
+      },
+    });
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
+      .rejects.toThrow('No serial output was detected');
   });
 
   it('recovers from a non-fatal buffer overrun using the replacement readable stream', async () => {
@@ -89,7 +119,7 @@ describe('serial runtime verifier', () => {
     const cancel = vi.fn();
     const readable = new ReadableStream<Uint8Array>({ cancel });
     await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 1))
-      .rejects.toThrow('Startup markers were not observed');
+      .rejects.toThrow('No serial output was detected');
     expect(cancel).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
   });
@@ -108,7 +138,7 @@ describe('serial runtime verifier', () => {
         { serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } },
         1,
       );
-      const outcome = expect(verification).rejects.toThrow('Startup markers were not observed');
+      const outcome = expect(verification).rejects.toThrow('No serial output was detected');
       await vi.advanceTimersByTimeAsync(1000);
       await outcome;
       expect(reader.releaseLock).toHaveBeenCalledOnce();
@@ -131,6 +161,30 @@ describe('serial runtime verifier', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it('distinguishes firmware boot without BLE initialization', async () => {
+    const close = vi.fn(async () => undefined);
+    const readable = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('SHT41: missing, BME680: missing\n'));
+        controller.close();
+      },
+    });
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
+      .rejects.toThrow('Firmware booted and handled the disconnected sensors, but BLE initialization was not detected');
+  });
+
+  it('distinguishes BLE initialization without the expected sensor status', async () => {
+    const close = vi.fn(async () => undefined);
+    const readable = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('BLE provisioning started\n'));
+        controller.close();
+      },
+    });
+    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
+      .rejects.toThrow('BLE initialization started, but the disconnected-sensor startup status was not detected');
+  });
+
   it('attempts port closure even when reader lock release fails', async () => {
     const close = vi.fn(async () => undefined);
     const reader = {
@@ -139,7 +193,7 @@ describe('serial runtime verifier', () => {
     };
     const readable = { getReader: () => reader } as unknown as ReadableStream<Uint8Array>;
     await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
-      .rejects.toThrow('Startup markers were not observed');
+      .rejects.toThrow('No serial output was detected');
     expect(close).toHaveBeenCalledOnce();
   });
 
