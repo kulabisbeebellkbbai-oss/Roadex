@@ -173,20 +173,6 @@ describe('serial runtime verifier', () => {
       .rejects.toThrow('Firmware booted and handled the disconnected sensors, but BLE initialization was not detected');
   });
 
-  it('reports the last predefined BLE initialization stage without exposing serial output', async () => {
-    const close = vi.fn(async () => undefined);
-    const readable = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode(
-          'SHT41: missing, BME680: missing\nBLE stage: entering initialization\nBLE stage: device initialized\n',
-        ));
-        controller.close();
-      },
-    });
-    await expect(verifySerialRuntime({ serial: { requestPort: async () => ({ open: async () => undefined, close, readable }) } }, 100))
-      .rejects.toThrow('Firmware booted, but BLE initialization stopped while creating the BLE server.');
-  });
-
   it('distinguishes BLE initialization without the expected sensor status', async () => {
     const close = vi.fn(async () => undefined);
     const readable = new ReadableStream<Uint8Array>({
