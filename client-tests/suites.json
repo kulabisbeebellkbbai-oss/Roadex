@@ -12,15 +12,7 @@
       "id": "project-device-controls",
       "definition": "suites/project-device-controls.json",
       "description": "Project-scoped USB, serial, BLE, and identity control checks without opening a chooser",
-      "cases": [
-        "device.configured-profile",
-        "device.configured-runtime",
-        "device.configured-usb-policy",
-        "device.configured-flash-guard",
-        "device.unconfigured-runtime-guards",
-        "device.unconfigured-usb-guards",
-        "device.unconfigured-flash-guard"
-      ],
+      "cases": ["device.project-control-boundaries"],
       "destructive": false
     },
     {

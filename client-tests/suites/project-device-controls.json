@@ -1,101 +1,48 @@
 {
   "version": 1,
   "id": "project-device-controls",
-  "viewports": ["mobile"],
+  "viewports": ["desktop", "tablet", "mobile"],
   "cases": [
     {
-      "id": "device.configured-profile",
+      "id": "device.project-control-boundaries",
       "steps": [
         { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "selectOption", "testId": "project-selector", "valueSource": "configuredProject" },
         { "action": "assertAttributeValue", "testId": "project-selector", "attribute": "data-profile-configured", "value": "true" },
         { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
-        { "action": "assertAttributeValue", "testId": "verify-serial", "attribute": "data-profile-configured", "value": "true" },
-        { "action": "assertAttributeValue", "testId": "observe-usb", "attribute": "data-profile-configured", "value": "true" },
-        { "action": "assertAttributeValue", "testId": "verify-esp32", "attribute": "data-profile-configured", "value": "true" },
-        { "action": "assertAttributeValue", "testId": "flash-firmware", "attribute": "data-profile-configured", "value": "true" },
-        { "action": "assertNoBrowserErrors" }
-      ]
-    },
-    {
-      "id": "device.configured-runtime",
-      "steps": [
-        { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
-        { "action": "selectOption", "testId": "project-selector", "valueSource": "configuredProject" },
-        { "action": "assertAttributeValue", "testId": "project-selector", "attribute": "data-profile-configured", "value": "true" },
-        { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
+        { "action": "assertAttributeValue", "testId": "verify-ble", "attribute": "data-profile-configured", "value": "true" },
         { "action": "assertAttributeValue", "testId": "verify-ble", "attribute": "data-runtime-available", "value": "true" },
         { "action": "assertEnabled", "testId": "verify-ble", "state": true },
+        { "action": "assertAttributeValue", "testId": "verify-serial", "attribute": "data-profile-configured", "value": "true" },
         { "action": "assertAttributeValue", "testId": "verify-serial", "attribute": "data-runtime-available", "value": "true" },
         { "action": "assertEnabled", "testId": "verify-serial", "state": true },
-        { "action": "assertNoBrowserErrors" }
-      ]
-    },
-    {
-      "id": "device.configured-usb-policy",
-      "steps": [
-        { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
-        { "action": "selectOption", "testId": "project-selector", "valueSource": "configuredProject" },
-        { "action": "assertAttributeValue", "testId": "project-selector", "attribute": "data-profile-configured", "value": "true" },
-        { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
+        { "action": "assertAttributeValue", "testId": "observe-usb", "attribute": "data-profile-configured", "value": "true" },
         { "action": "assertAttributeValue", "testId": "observe-usb", "attribute": "data-runtime-available", "value": "true" },
         { "action": "assertAttributeValue", "testId": "observe-usb", "attribute": "data-policy-ready", "value": "true" },
         { "action": "assertAttributeValue", "testId": "observe-usb", "attribute": "data-binding-ready", "value": "true" },
         { "action": "assertEnabled", "testId": "observe-usb", "state": true },
+        { "action": "assertAttributeValue", "testId": "verify-esp32", "attribute": "data-profile-configured", "value": "true" },
         { "action": "assertAttributeValue", "testId": "verify-esp32", "attribute": "data-runtime-available", "value": "true" },
         { "action": "assertAttributeValue", "testId": "verify-esp32", "attribute": "data-policy-ready", "value": "true" },
         { "action": "assertAttributeValue", "testId": "verify-esp32", "attribute": "data-binding-ready", "value": "true" },
         { "action": "assertEnabled", "testId": "verify-esp32", "state": true },
-        { "action": "assertNoBrowserErrors" }
-      ]
-    },
-    {
-      "id": "device.configured-flash-guard",
-      "steps": [
-        { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
-        { "action": "selectOption", "testId": "project-selector", "valueSource": "configuredProject" },
-        { "action": "assertAttributeValue", "testId": "project-selector", "attribute": "data-profile-configured", "value": "true" },
-        { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
+        { "action": "assertAttributeValue", "testId": "flash-firmware", "attribute": "data-profile-configured", "value": "true" },
         { "action": "assertAttributeValue", "testId": "flash-firmware", "attribute": "data-policy-ready", "value": "true" },
         { "action": "assertAttributeValue", "testId": "flash-firmware", "attribute": "data-firmware-ready", "value": "false" },
         { "action": "assertAttributeValue", "testId": "flash-firmware", "attribute": "data-confirmation-ready", "value": "false" },
         { "action": "assertEnabled", "testId": "flash-firmware", "state": false },
-        { "action": "assertNoBrowserErrors" }
-      ]
-    },
-    {
-      "id": "device.unconfigured-runtime-guards",
-      "steps": [
-        { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
         { "action": "selectOption", "testId": "project-selector", "valueSource": "unconfiguredProject" },
         { "action": "assertAttributeValue", "testId": "project-selector", "attribute": "data-profile-configured", "value": "false" },
         { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
+        { "action": "assertAttributeValue", "testId": "verify-ble", "attribute": "data-profile-configured", "value": "false" },
         { "action": "assertEnabled", "testId": "verify-ble", "state": false },
         { "action": "assertAttributeValue", "testId": "verify-serial", "attribute": "data-profile-configured", "value": "false" },
         { "action": "assertEnabled", "testId": "verify-serial", "state": false },
-        { "action": "assertNoBrowserErrors" }
-      ]
-    },
-    {
-      "id": "device.unconfigured-usb-guards",
-      "steps": [
-        { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
-        { "action": "selectOption", "testId": "project-selector", "valueSource": "unconfiguredProject" },
-        { "action": "assertAttributeValue", "testId": "project-selector", "attribute": "data-profile-configured", "value": "false" },
-        { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
+        { "action": "assertAttributeValue", "testId": "observe-usb", "attribute": "data-profile-configured", "value": "false" },
         { "action": "assertEnabled", "testId": "observe-usb", "state": false },
         { "action": "assertAttributeValue", "testId": "verify-esp32", "attribute": "data-profile-configured", "value": "false" },
         { "action": "assertEnabled", "testId": "verify-esp32", "state": false },
-        { "action": "assertNoBrowserErrors" }
-      ]
-    },
-    {
-      "id": "device.unconfigured-flash-guard",
-      "steps": [
-        { "action": "navigate", "path": "/Roadex", "status": 200, "cacheControl": "no-store" },
-        { "action": "selectOption", "testId": "project-selector", "valueSource": "unconfiguredProject" },
-        { "action": "assertAttributeValue", "testId": "project-selector", "attribute": "data-profile-configured", "value": "false" },
-        { "action": "selectFirstOption", "testId": "thread-selector", "labelPrefix": "Active" },
+        { "action": "assertAttributeValue", "testId": "flash-firmware", "attribute": "data-profile-configured", "value": "false" },
         { "action": "assertEnabled", "testId": "flash-firmware", "state": false },
         { "action": "assertNoBrowserErrors" }
       ]
