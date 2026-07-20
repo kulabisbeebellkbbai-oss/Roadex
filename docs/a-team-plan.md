@@ -202,6 +202,7 @@ Current checkpoint:
 - Source inspection confirmed agent v11 still mutates appended passed records in a post-cleanup block. Agent v12 must remove that mutation, report cleanup health separately, add source-level fixtures for post-teardown cancellation and real cleanup failure, and change the installed runner hash before canonical acceptance is rerun.
 - Agent v12 passed authentication and both canonical suites across desktop, tablet, and mobile. Gateway correlation showed only successful reads, normal `client_closed` streams, no diversion, and no privileged device route. Roadex now permits the optional redacted cleanup aggregate that v12 could not emit under the previous result schema.
 - Agent v13 emitted cleanup aggregates but exposed contradictory classification: passed cases coexisted with cleanup timeouts and claimed pre-teardown request failures while gateway evidence showed prompt successful closure. Agent v14 must timestamp the teardown boundary, stop waiting on request objects after browser exit, and satisfy the schema invariant that passed jobs have no cleanup timeout or pre-teardown failure.
+- Corrected agent v14 passed the canonical portal suite with clean cleanup aggregates. One initial tablet device-control assertion was transient; the immediate full canonical retry passed desktop, tablet, and mobile with all cleanups successful, no timeout, and no pre-teardown failure. Gateway correlation remained successful and non-privileged throughout.
 
 ## Approval Gate
 
