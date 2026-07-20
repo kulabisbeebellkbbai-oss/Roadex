@@ -128,3 +128,11 @@ The redacted result must add aggregate-only cleanup evidence: finalized case cou
 Do not rerun canonical acceptance until the installed runner hash changes and the source-level fixtures pass. Then run authentication followed by `project-device-controls` and `portal-smoke`, correlate successful gateway requests and `client_closed` streams, and verify that no chooser or privileged device action occurred.
 
 Version 12 acceptance passed using the existing schema-compatible result. Roadex now permits the optional redacted `cleanup` aggregate with only finalized-case, successful-cleanup, timeout, and pre-teardown-request-failure counts. The runner may adopt this field without another queue capability or any raw request lifecycle disclosure.
+
+## Version 14 Cleanup Classification Integrity
+
+The first canonical results carrying cleanup aggregates exposed contradictory runner output: every case passed while every viewport reported cleanup timeout and the aggregate reported request failures as pre-teardown. Gateway evidence for the same window showed only successful reads and prompt `client_closed` stream teardown. The result schema now rejects `passed` when cleanup reports any timeout or pre-teardown request failure.
+
+The trusted runner must record `teardownStarted` before closing the page, context, or browser and must classify request-failure callbacks by first-observed time. Callbacks first observed after that boundary are teardown cancellation and must not increment `preTeardownRequestFailures`. Cleanup succeeds when the page, context, and browser close within the bounded budget; it must not wait for Playwright request objects to transition after their owning browser process has exited.
+
+Add source-level fixtures for prompt browser exit with lingering request objects, real browser-process timeout, post-teardown cancellation callbacks, and pre-teardown HTTP or transport failure. Do not rerun canonical acceptance until the installed runner and trusted result-schema hashes change and all fixtures pass.

@@ -69,6 +69,30 @@
       "if": { "properties": { "status": { "const": "needsUser" } }, "required": ["status"] },
       "then": { "properties": { "checkpoint": true }, "required": ["checkpoint"] },
       "else": { "not": { "required": ["checkpoint"] } }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": { "const": "passed" },
+          "cleanup": {
+            "type": "object",
+            "properties": {
+              "timedOut": { "const": 0 },
+              "preTeardownRequestFailures": { "const": 0 }
+            },
+            "required": ["timedOut", "preTeardownRequestFailures"]
+          }
+        },
+        "required": ["status", "cleanup"]
+      },
+      "then": true,
+      "else": {
+        "not": {
+          "type": "object",
+          "properties": { "status": { "const": "passed" } },
+          "required": ["status", "cleanup"]
+        }
+      }
     }
   ]
 }

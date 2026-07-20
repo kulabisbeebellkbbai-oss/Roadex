@@ -165,6 +165,21 @@ describe('MSI client test contract', () => {
         requests: [{ url: 'https://roadex.home.arpa/private' }],
       },
     })).toBe(false);
+    expect(validateResult({
+      ...base,
+      cleanup: { finalizedCases: 1, succeeded: 0, timedOut: 1, preTeardownRequestFailures: 0 },
+    })).toBe(false);
+    expect(validateResult({
+      ...base,
+      cleanup: { finalizedCases: 1, succeeded: 1, timedOut: 0, preTeardownRequestFailures: 1 },
+    })).toBe(false);
+    expect(validateResult({
+      ...base,
+      status: 'interrupted',
+      aggregate: { passed: 0, failed: 0, timedOut: 0, skipped: 0, interrupted: 1, needsUser: 0, total: 1 },
+      tests: [{ project: 'desktop', case: 'portal.authenticated-page', status: 'interrupted' }],
+      cleanup: { finalizedCases: 0, succeeded: 0, timedOut: 1, preTeardownRequestFailures: 0 },
+    })).toBe(true);
   });
 });
 
