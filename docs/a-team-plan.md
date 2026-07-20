@@ -198,6 +198,7 @@ Current checkpoint:
 - Agent v9 must preserve passed assertions across expected teardown cancellation and must never claim a suite after authentication returns `needsUser` or `failed`.
 - Agent v9 fixed authentication gating, but both canonical suites reported only interrupted cases because same-origin non-stream requests remained active when deliberate browser teardown began.
 - Agent v10 must freeze the assertion result before teardown and treat cancellation of approved-origin requests caused solely by successful browser shutdown as expected cleanup, without suppressing any pre-teardown failure.
+- Agent v10 authenticated successfully and the gateway showed only successful requests with bounded `client_closed` stream teardown, but the runner still published every canonical case as interrupted. Agent v11 must make terminal case results immutable, track cleanup separately, and use event timestamps so post-teardown callbacks cannot rewrite passed assertions.
 
 ## Approval Gate
 

@@ -106,3 +106,13 @@ The trusted runner must freeze each case's assertion result before teardown begi
 The runner must still fail or interrupt for any request failure observed before teardown, unexpected HTTP status, disallowed origin, browser or console error, assertion failure, cleanup timeout, or surviving browser process. Teardown classification must never suppress evidence captured before the teardown boundary.
 
 Acceptance remains an authentication-only success followed by the canonical control and portal suites. All cases must pass without weakening request, origin, browser-error, or process-exit checks.
+
+## Version 11 Immutable Case Finalization
+
+Version 10 authenticated successfully and gateway evidence confirmed that every Roadex stream returned HTTP success and closed normally as `client_closed`. The runner nevertheless published every canonical case as `interrupted`, with no failed assertion or timeout. The remaining defect is therefore result finalization inside the trusted runner, not Roadex transport cleanup.
+
+The trusted runner must represent assertion execution and transport cleanup as separate states. Once all declared actions and browser-error checks pass, it must create an immutable terminal case result of `passed` before setting `teardownStarted`. Cleanup may append an internal cleanup outcome, but it must not mutate that terminal case result. A cleanup failure may replace `passed` with `interrupted` only for a bounded cleanup timeout, a browser process that survives the cleanup budget, or a request error whose first observation timestamp precedes `teardownStarted`.
+
+Request-failure callbacks received after `teardownStarted` must be classified using the recorded request start, response, failure, and teardown timestamps. Cancellation caused by closing the owning page, context, or browser is expected when the request targets the approved Roadex origin and no failure was recorded before teardown. Do not infer a pre-teardown failure merely because Playwright dispatches the callback during cleanup.
+
+Before publishing a result, the runner must assert that each case has exactly one terminal result and that its aggregate counters derive only from those immutable terminal results. Acceptance remains explicit authentication success followed by canonical `project-device-controls` and `portal-smoke` runs in which every case passes. Gateway correlation must continue to show successful requests and bounded `client_closed` streams, with no protected-gateway diversion, subscriber denial, chooser, firmware transfer, write, approval, or operation action.
