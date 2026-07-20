@@ -24,6 +24,17 @@
         "total": { "type": "integer", "minimum": 0, "maximum": 256 }
       }
     },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["finalizedCases", "succeeded", "timedOut", "preTeardownRequestFailures"],
+      "properties": {
+        "finalizedCases": { "type": "integer", "minimum": 0, "maximum": 256 },
+        "succeeded": { "type": "integer", "minimum": 0, "maximum": 256 },
+        "timedOut": { "type": "integer", "minimum": 0, "maximum": 256 },
+        "preTeardownRequestFailures": { "type": "integer", "minimum": 0, "maximum": 256 }
+      }
+    },
     "tests": {
       "type": "array",
       "maxItems": 256,

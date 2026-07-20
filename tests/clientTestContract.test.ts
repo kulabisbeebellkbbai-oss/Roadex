@@ -105,6 +105,7 @@ describe('MSI client test contract', () => {
     expect(compile(resultSchema)({
       schemaVersion: 1, jobId: 'contract-smoke', commit: 'a'.repeat(40), suite: 'portal-smoke', status: 'passed',
       aggregate: { passed: 1, failed: 0, timedOut: 0, skipped: 0, interrupted: 0, needsUser: 0, total: 1 },
+      cleanup: { finalizedCases: 1, succeeded: 1, timedOut: 0, preTeardownRequestFailures: 0 },
       tests: [{ project: 'desktop', case: 'portal.authenticated-page', status: 'passed' }],
     })).toBe(true);
   });
@@ -143,10 +144,27 @@ describe('MSI client test contract', () => {
 
   it('limits queue results to redacted aggregate fields', () => {
     const schema = readJson<Record<string, unknown>>('client-tests/result.schema.json');
+    const validateResult = compile(schema);
     const serialized = JSON.stringify(schema);
     for (const forbidden of ['cookie', 'csrf', 'header', 'body', 'deviceId', 'serialNumber', 'mac', 'hmac', 'screenshot']) {
       expect(serialized.toLowerCase()).not.toContain(forbidden.toLowerCase());
     }
+    const base = {
+      schemaVersion: 1, jobId: 'cleanup-smoke', commit: 'a'.repeat(40), suite: 'portal-smoke', status: 'passed',
+      aggregate: { passed: 1, failed: 0, timedOut: 0, skipped: 0, interrupted: 0, needsUser: 0, total: 1 },
+      tests: [{ project: 'desktop', case: 'portal.authenticated-page', status: 'passed' }],
+    };
+    expect(validateResult({
+      ...base,
+      cleanup: { finalizedCases: 1, succeeded: 1, timedOut: 0, preTeardownRequestFailures: 0 },
+    })).toBe(true);
+    expect(validateResult({
+      ...base,
+      cleanup: {
+        finalizedCases: 1, succeeded: 1, timedOut: 0, preTeardownRequestFailures: 0,
+        requests: [{ url: 'https://roadex.home.arpa/private' }],
+      },
+    })).toBe(false);
   });
 });
 

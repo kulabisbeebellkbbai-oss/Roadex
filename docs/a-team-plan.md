@@ -200,6 +200,7 @@ Current checkpoint:
 - Agent v10 must freeze the assertion result before teardown and treat cancellation of approved-origin requests caused solely by successful browser shutdown as expected cleanup, without suppressing any pre-teardown failure.
 - Agent v10 authenticated successfully and the gateway showed only successful requests with bounded `client_closed` stream teardown, but the runner still published every canonical case as interrupted. Agent v11 must make terminal case results immutable, track cleanup separately, and use event timestamps so post-teardown callbacks cannot rewrite passed assertions.
 - Source inspection confirmed agent v11 still mutates appended passed records in a post-cleanup block. Agent v12 must remove that mutation, report cleanup health separately, add source-level fixtures for post-teardown cancellation and real cleanup failure, and change the installed runner hash before canonical acceptance is rerun.
+- Agent v12 passed authentication and both canonical suites across desktop, tablet, and mobile. Gateway correlation showed only successful reads, normal `client_closed` streams, no diversion, and no privileged device route. Roadex now permits the optional redacted cleanup aggregate that v12 could not emit under the previous result schema.
 
 ## Approval Gate
 
