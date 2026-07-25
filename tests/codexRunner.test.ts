@@ -52,6 +52,51 @@ describe('createCodexRunner', () => {
     ]);
   });
 
+  it('loads only the source-controlled capability profile when selected', () => {
+    expect(buildCodexExecArgs(
+      '/tmp/workspace',
+      'continue',
+      'thread-123',
+      {
+        mode: 'controlled-project-manager',
+        profile: 'roadex-controlled-project-manager',
+      },
+    )).toEqual([
+      'exec',
+      '--json',
+      '--ignore-user-config',
+      '--config',
+      'approval_policy="never"',
+      '--config',
+      'sandbox_mode="workspace-write"',
+      '--config',
+      'sandbox_workspace_write.network_access=false',
+      '--config',
+      'mcp_servers.the-a-team.url="http://127.0.0.1:8795/mcp"',
+      '--config',
+      'mcp_servers.the-a-team.required=true',
+      '--config',
+      'mcp_servers.the-a-team.enabled_tools=["approve_team","clarify_project_summary","create_team","list_teams","update_assignment","update_team"]',
+      '--config',
+      'mcp_servers.the-a-team.default_tools_approval_mode="approve"',
+      '--config',
+      'mcp_servers.skiller.url="http://127.0.0.1:8794/mcp"',
+      '--config',
+      'mcp_servers.skiller.required=true',
+      '--config',
+      'mcp_servers.skiller.enabled_tools=["capture_work_product","recommend_skills","record_skill_run"]',
+      '--config',
+      'mcp_servers.skiller.default_tools_approval_mode="approve"',
+      '--sandbox',
+      'workspace-write',
+      '-C',
+      '/tmp/workspace',
+      'resume',
+      'thread-123',
+      'continue',
+    ]);
+  });
+
   it('extracts final answer text from Codex JSONL item events', () => {
     const messages = parseCodexJsonl(
       '{"type":"thread.started","thread_id":"abc"}\n' +

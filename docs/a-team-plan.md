@@ -207,3 +207,28 @@ Current checkpoint:
 ## Approval Gate
 
 This team is approved. Development after this point must be assigned and reviewed through this A-Team plan.
+
+## Controlled Runner Capability Profile
+
+Status: Deployed for the approved owner/workspace pair
+
+- B.A. implemented a default-off `controlled-project-manager` runner profile.
+- Exact authenticated user and workspace allowlists are checked on every prompt.
+- Controlled runs ignore user-global configuration and receive only fixed
+  A-Team and Skiller MCP definitions.
+- The Codex shell remains `workspace-write` with network access denied and no
+  parent workspace added.
+- Stockwell completed the privilege-boundary review.
+- Murdock verified focused tests, the full suite, lint, production build,
+  strict Codex configuration parsing, and live A-Team/Skiller calls.
+- The user service was rebuilt and restarted through approved Overseer plan
+  `admin.roadex-controlled-runner-20260725`.
+- Runtime scope is limited to authenticated user `owner` and workspace
+  `codex-project-ai-project-manager-cacb4e3a`.
+- A Roadex-managed smoke completed A-Team `list_teams` and Skiller
+  `recommend_skills` without approval cancellation.
+- No global Codex configuration, sibling project creation, gateway/firewall
+  change, device capability, or project-creation broker was enabled.
+
+Next approval boundary: design and implement a one-time Roadex grant broker
+before allowing controlled creation of a sibling project.

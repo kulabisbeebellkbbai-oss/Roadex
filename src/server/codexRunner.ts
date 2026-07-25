@@ -2,6 +2,11 @@ import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createStreamEvent } from './mockRunner.js';
+import {
+  CONTROLLED_RUNNER_CONFIG_OVERRIDES,
+  resolveRunnerCapabilityProfile,
+  type RunnerCapabilitySelection,
+} from './runnerCapabilityProfile.js';
 import type { RoadexSession, StreamEvent, WorkspaceRef } from '../shared/sessionContracts.js';
 
 export type RunnerPromptRequest = {
@@ -87,7 +92,23 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
     },
 
     runPrompt({ session, prompt, onEvent, signal }) {
+      let capabilityProfile: RunnerCapabilitySelection;
+      try {
+        capabilityProfile = resolveRunnerCapabilityProfile({
+          userId: session.userId,
+          workspaceId: session.workspace.id,
+        });
+      } catch {
+        const event = createStreamEvent(session.id, 'system', 'Controlled runner profile validation failed.');
+        onEvent?.(event);
+        return Promise.resolve({
+          ok: false,
+          events: [event],
+          reason: 'runner_profile_invalid',
+        });
+      }
       return runCodexPrompt({
+        capabilityProfile,
         executable,
         onEvent,
         prompt,
@@ -102,6 +123,7 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
 }
 
 type RunCodexPromptOptions = {
+  capabilityProfile: RunnerCapabilitySelection;
   executable: string;
   onEvent?: (event: StreamEvent) => void;
   prompt: string;
@@ -123,7 +145,12 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
   pushEvent('system', 'Starting Codex CLI runner.');
   const child = spawn(
     options.executable,
-    buildCodexExecArgs(options.workspaceRoot, options.prompt, options.codexThreadId),
+    buildCodexExecArgs(
+      options.workspaceRoot,
+      options.prompt,
+      options.codexThreadId,
+      options.capabilityProfile,
+    ),
     {
       cwd: options.workspaceRoot,
       env: runnerEnvironment(),
@@ -207,10 +234,21 @@ function stopChild(child: ChildProcess): void {
   }, 2_000).unref();
 }
 
-export function buildCodexExecArgs(workspaceRoot: string, prompt: string, codexThreadId?: string): string[] {
+export function buildCodexExecArgs(
+  workspaceRoot: string,
+  prompt: string,
+  codexThreadId?: string,
+  capabilityProfile: RunnerCapabilitySelection = { mode: 'restricted' },
+): string[] {
   const base = [
     'exec',
     '--json',
+    ...(capabilityProfile.mode === 'controlled-project-manager'
+      ? [
+          '--ignore-user-config',
+          ...CONTROLLED_RUNNER_CONFIG_OVERRIDES.flatMap((override) => ['--config', override]),
+        ]
+      : []),
     '--sandbox',
     'workspace-write',
     '-C',
