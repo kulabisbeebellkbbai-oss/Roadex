@@ -246,6 +246,7 @@ export function buildCodexExecArgs(
     ...(capabilityProfile.mode === 'controlled-project-manager'
       ? [
           '--ignore-user-config',
+          '--ignore-rules',
           ...CONTROLLED_RUNNER_CONFIG_OVERRIDES.flatMap((override) => ['--config', override]),
         ]
       : []),

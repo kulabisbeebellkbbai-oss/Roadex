@@ -186,6 +186,60 @@ button {
   background: #ffffff;
 }
 
+.project-create-command {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+}
+
+.project-create-form {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.project-create-form label {
+  display: grid;
+  gap: 5px;
+}
+
+.project-create-form input,
+.project-create-form textarea,
+.project-create-form select {
+  width: 100%;
+  min-width: 0;
+}
+
+.project-create-form textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+
+.project-confirmation {
+  display: grid;
+  gap: 8px;
+}
+
+.project-confirmation p,
+.project-create-error {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.project-confirmation > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.project-create-error {
+  color: var(--danger);
+}
+
 .sidebar-project-meta {
   min-width: 0;
   padding-top: 10px;

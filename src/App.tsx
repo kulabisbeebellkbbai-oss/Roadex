@@ -21,6 +21,13 @@ import {
   TerminalSquare,
   UserRound,
 } from 'lucide-react';
+import {
+  confirmProjectProposal,
+  createProjectProposal,
+  requestProjectConfirmation,
+  revokeProjectProposal,
+} from './client/sessionApi';
+import type { ProjectCreationProposalPublic, ProjectVisibility } from './shared/projectCreationContracts';
 import { useRoadexSession } from './hooks/useRoadexSession';
 import { navItems } from './roadexModel';
 import { isVisibleTranscriptEvent } from './transcript';
@@ -34,6 +41,19 @@ function App() {
   const [prompt, setPrompt] = useState('');
   const [sidebarPanel, setSidebarPanel] = useState<'projects' | 'sessions' | 'devices' | 'security'>('projects');
   const [selectedProjectId, setSelectedProjectId] = useState('');
+  const [projectFormOpen, setProjectFormOpen] = useState(false);
+  const [projectName, setProjectName] = useState('');
+  const [projectVisibility, setProjectVisibility] = useState<ProjectVisibility>('private');
+  const [projectOutcome, setProjectOutcome] = useState('');
+  const [projectUsers, setProjectUsers] = useState('');
+  const [projectComponents, setProjectComponents] = useState('');
+  const [projectRisks, setProjectRisks] = useState('');
+  const [projectNextSteps, setProjectNextSteps] = useState('');
+  const [projectTeamId, setProjectTeamId] = useState('');
+  const [projectProposal, setProjectProposal] = useState<ProjectCreationProposalPublic>();
+  const [projectChallenge, setProjectChallenge] = useState('');
+  const [projectCreationError, setProjectCreationError] = useState('');
+  const [projectCreationBusy, setProjectCreationBusy] = useState(false);
   const [bleVerification, setBleVerification] = useState<'idle' | 'checking' | 'verified' | 'error'>('idle');
   const [bleVerificationMessage, setBleVerificationMessage] = useState('');
   const bleVerificationSequence = useRef(0);
@@ -81,6 +101,78 @@ function App() {
     roadex.connectionState === 'error' ||
     !session ||
     session.lifecycle !== 'ready';
+  const canProposeProject = roadex.user?.authMode === 'protected-gateway'
+    && roadex.user.roles.includes('admin')
+    && roadex.user.roles.includes('security-reviewer')
+    && Boolean(session?.managedThreadId);
+
+  async function handleProjectProposal(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const majorComponents = projectLines(projectComponents);
+    const risks = projectLines(projectRisks);
+    const immediateNextSteps = projectLines(projectNextSteps);
+    if (
+      !session?.managedThreadId || !projectName.trim() || !projectOutcome.trim()
+      || !projectUsers.trim() || !projectTeamId.trim() || !majorComponents.length
+      || !risks.length || !immediateNextSteps.length
+    ) return;
+    setProjectCreationBusy(true);
+    setProjectCreationError('');
+    try {
+      const proposal = await createProjectProposal(roadex.token, {
+        sessionId: session.id,
+        projectName: projectName.trim(),
+        visibility: projectVisibility,
+        teamId: projectTeamId.trim(),
+        idempotencyKey: crypto.randomUUID(),
+        summary: {
+          outcome: projectOutcome.trim(),
+          primaryUsers: projectUsers.trim(),
+          majorComponents,
+          risks,
+          immediateNextSteps,
+        },
+      });
+      setProjectProposal(proposal);
+      const confirmation = await requestProjectConfirmation(roadex.token, proposal.id);
+      setProjectChallenge(confirmation.challenge);
+    } catch (error) {
+      setProjectCreationError(error instanceof Error ? error.message : 'Project proposal failed.');
+    } finally {
+      setProjectCreationBusy(false);
+    }
+  }
+
+  async function handleProjectConfirmation() {
+    if (!projectProposal || !projectChallenge) return;
+    setProjectCreationBusy(true);
+    setProjectCreationError('');
+    try {
+      setProjectProposal(await confirmProjectProposal(roadex.token, projectProposal.id, {
+        challenge: projectChallenge,
+        idempotencyKey: crypto.randomUUID(),
+      }));
+      setProjectChallenge('');
+    } catch (error) {
+      setProjectCreationError(error instanceof Error ? error.message : 'Project confirmation failed.');
+    } finally {
+      setProjectCreationBusy(false);
+    }
+  }
+
+  async function handleProjectRevocation() {
+    if (!projectProposal) return;
+    setProjectCreationBusy(true);
+    setProjectCreationError('');
+    try {
+      setProjectProposal(await revokeProjectProposal(roadex.token, projectProposal.id));
+      setProjectChallenge('');
+    } catch (error) {
+      setProjectCreationError(error instanceof Error ? error.message : 'Project revocation failed.');
+    } finally {
+      setProjectCreationBusy(false);
+    }
+  }
 
   useEffect(() => {
     try {
@@ -243,6 +335,72 @@ function App() {
               <span>{selectedProject?.name ?? 'No project selected'}</span>
               <strong>{session && session.workspace.id === selectedProject?.id ? session.lifecycle : 'browse'}</strong>
             </div>
+            <button
+              className="project-create-command"
+              disabled={!canProposeProject}
+              onClick={() => setProjectFormOpen((open) => !open)}
+              type="button"
+            >
+              <Plus size={16} />
+              New project
+            </button>
+            {projectFormOpen ? (
+              <form className="project-create-form" onSubmit={handleProjectProposal}>
+                <label>
+                  <span>Name</span>
+                  <input maxLength={64} onChange={(event) => setProjectName(event.target.value)} required value={projectName} />
+                </label>
+                <label>
+                  <span>Visibility</span>
+                  <select onChange={(event) => setProjectVisibility(event.target.value as ProjectVisibility)} value={projectVisibility}>
+                    <option value="private">Private</option>
+                    <option value="public">Public</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Outcome</span>
+                  <textarea maxLength={2_000} onChange={(event) => setProjectOutcome(event.target.value)} required value={projectOutcome} />
+                </label>
+                <label>
+                  <span>Primary users</span>
+                  <input maxLength={1_000} onChange={(event) => setProjectUsers(event.target.value)} required value={projectUsers} />
+                </label>
+                <label>
+                  <span>Major components</span>
+                  <textarea maxLength={2_000} onChange={(event) => setProjectComponents(event.target.value)} placeholder="One per line" required value={projectComponents} />
+                </label>
+                <label>
+                  <span>Risks</span>
+                  <textarea maxLength={2_000} onChange={(event) => setProjectRisks(event.target.value)} placeholder="One per line" required value={projectRisks} />
+                </label>
+                <label>
+                  <span>Immediate next steps</span>
+                  <textarea maxLength={2_000} onChange={(event) => setProjectNextSteps(event.target.value)} placeholder="One per line" required value={projectNextSteps} />
+                </label>
+                <label>
+                  <span>Approved A-Team ID</span>
+                  <input maxLength={128} onChange={(event) => setProjectTeamId(event.target.value)} required value={projectTeamId} />
+                </label>
+                {!projectProposal ? (
+                  <button disabled={projectCreationBusy} type="submit">Review proposal</button>
+                ) : (
+                  <div className="project-confirmation" role="status">
+                    <strong>{projectProposal.projectName}</strong>
+                    <span>{projectProposal.visibility} · {projectProposal.status}</span>
+                    {projectChallenge ? <p>Confirming creates a local project and public or private GitHub repository. This action can have external side effects.</p> : null}
+                    <div>
+                      {projectChallenge ? (
+                        <button disabled={projectCreationBusy} onClick={() => void handleProjectConfirmation()} type="button">Confirm creation</button>
+                      ) : null}
+                      {projectProposal.status === 'pending' ? (
+                        <button disabled={projectCreationBusy} onClick={() => void handleProjectRevocation()} type="button">Revoke</button>
+                      ) : null}
+                    </div>
+                  </div>
+                )}
+                {projectCreationError ? <p className="project-create-error" role="alert">{projectCreationError}</p> : null}
+              </form>
+            ) : null}
           </section>
         ) : null}
 
@@ -638,4 +796,8 @@ function deviceTransportLabel(transport: 'webusb' | 'unavailable'): string {
 
 function formatUsbId(value: number): string {
   return value.toString(16).padStart(4, '0').toUpperCase();
+}
+
+function projectLines(value: string): string[] {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }

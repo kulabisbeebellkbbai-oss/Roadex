@@ -6,6 +6,68 @@ describe('Roadex client CSRF contract', () => {
     vi.resetModules();
   });
 
+  it('uses exact owner project proposal, challenge, confirmation, and revoke routes', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input);
+      calls.push({ path, init });
+      const proposal = {
+        id: 'project-proposal-1',
+        projectName: 'Example',
+        visibility: 'private',
+        status: path.endsWith('/confirm') ? 'consumed' : path.endsWith('/revoke') ? 'revoked' : 'pending',
+        createdAt: new Date(0).toISOString(),
+        expiresAt: new Date(60_000).toISOString(),
+      };
+      const payload = path.endsWith('/challenge')
+        ? { ok: true, challenge: { proposalId: proposal.id, challenge: 'c'.repeat(43), expiresAt: proposal.expiresAt } }
+        : { ok: true, proposal };
+      return new Response(JSON.stringify(payload), {
+        status: path.endsWith('/proposals') ? 201 : 200,
+        headers: { 'content-type': 'application/json', 'x-roadex-csrf': 'private-test-value' },
+      });
+    }));
+
+    const {
+      confirmProjectProposal,
+      createProjectProposal,
+      requestProjectConfirmation,
+      revokeProjectProposal,
+    } = await import('../src/client/sessionApi');
+    const proposal = await createProjectProposal(undefined, {
+      sessionId: 'session-1',
+      projectName: 'Example',
+      visibility: 'private',
+      teamId: 'team-1',
+      idempotencyKey: 'request-key-ABCDEFGHIJKLMNOP',
+      summary: {
+        outcome: 'Create the application.',
+        primaryUsers: 'Operators',
+        majorComponents: ['UI'],
+        risks: ['Authorization'],
+        immediateNextSteps: ['Bootstrap'],
+      },
+    });
+    const challenge = await requestProjectConfirmation(undefined, proposal.id);
+    await confirmProjectProposal(undefined, proposal.id, {
+      challenge: challenge.challenge,
+      idempotencyKey: 'confirm-key-ABCDEFGHIJKLMNOP',
+    });
+    await revokeProjectProposal(undefined, proposal.id);
+
+    expect(calls.map((call) => call.path)).toEqual([
+      '/Roadex/api/project-creation/proposals',
+      '/Roadex/api/project-creation/proposals/project-proposal-1/challenge',
+      '/Roadex/api/project-creation/proposals/project-proposal-1/confirm',
+      '/Roadex/api/project-creation/proposals/project-proposal-1/revoke',
+    ]);
+    for (const call of calls) {
+      const headers = new Headers(call.init?.headers);
+      expect(headers.get('content-type')).toBe('application/json');
+      expect(headers.get('x-roadex-request-id')).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
+    }
+  });
+
   it('forwards the bootstrap CSRF header on descriptor observation', async () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

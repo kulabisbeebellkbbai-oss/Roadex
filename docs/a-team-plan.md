@@ -232,3 +232,58 @@ Status: Deployed for the approved owner/workspace pair
 
 Next approval boundary: design and implement a one-time Roadex grant broker
 before allowing controlled creation of a sibling project.
+
+## Project Creation Grant Broker Design
+
+Status: Roadex-local worker and registrar deployed; gateway/live smoke pending
+
+- Design: `docs/project-creation-grant-broker-design.md`
+- The broker is server-side and is never exposed as a Codex/model tool.
+- A fresh Roadex owner confirmation independently authorizes one exact project.
+- A-Team evidence is verified but cannot authorize creation by itself.
+- The operation is single-use, durable, idempotent, expiring, revocable before
+  lease, and recoverable after partial external success.
+- Parent-workspace writes and GitHub access remain unavailable to the Codex
+  runner.
+- The existing `codex-projects --new-project` command will not be invoked
+  unchanged because it is not transactional and delegates GitHub creation to a
+  new Codex thread.
+- Roadex now contains default-off proposal, challenge, confirmation, revocation,
+  and status source plus a durable SQLite state machine.
+- AI Project Manager contains an isolated hardened adapter and local tests.
+- Roadex now includes the owner proposal/review, fresh confirmation, status,
+  and revocation UI source.
+- Protected Service Gateway now includes exact default-off project route,
+  schema, owner-principal, Origin, CSRF, rate, IDS, durable idempotency, and
+  response-projection handling.
+- Intrusion Detection now accepts only the exact normalized project routes and
+  the redacted project-creation-disabled reason.
+- Roadex owns a durable expiring global worker lease and ordered resumable
+  operation checkpoints.
+- AI Project Manager owns fixed filesystem preparation, shell-free command
+  execution, and strict remote and upstream verification.
+- The existing `codex-projects --new-conversation` path was rejected because it
+  bypasses the controlled Roadex runner profile. Roadex now refuses to claim
+  work before any side effect unless the separately default-off controlled
+  bootstrap and hardened registrar are ready.
+- After the adapter reaches the durable `pushed` checkpoint, Roadex owns the
+  fixed controlled bootstrap and invokes the non-launching shared registrar.
+- The registrar verifies fixed-root containment, operation marker, Codex state
+  cwd and age, a dedicated HMAC binding, conflicts, durable atomic registry and
+  launcher writes, strict projection, and pseudonymized durable audit.
+- Runtime enablement, service restart, local project creation, and GitHub
+  creation remain separate deployment boundaries.
+- Roadex-local worker/bootstrap/registrar configuration was deployed on
+  2026-07-25 through Overseer plan
+  `admin.roadex-project-creation-worker-20260725`.
+- The five exact owner-only gateway routes and corresponding IDS schemas were
+  deployed on 2026-07-25 through approved Overseer plans
+  `admin.roadex-project-gateway-20260725` and
+  `admin.roadex-project-ids-20260725`.
+- Gateway and IDS full suites passed before restart, service health passed
+  after restart, and the Codex registry remained unchanged.
+- Authenticated MSI negative-schema smoke passed with a JSON `403`; gateway and
+  IDS recorded matching redacted rejection evidence, no project state was
+  created, and the Codex registry remained unchanged.
+- Sibling directory creation, GitHub creation, live controlled bootstrap, and
+  live Codex registry mutation remain a separate explicit approval boundary.

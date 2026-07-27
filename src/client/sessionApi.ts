@@ -24,6 +24,13 @@ import type {
   DeviceDescriptorObservationResponse,
 } from '../shared/deviceBridgeContracts';
 import { isApiError } from '../shared/apiContracts';
+import type {
+  ProjectCreationChallengeResponse,
+  ProjectCreationConfirmPayload,
+  ProjectCreationProposalPayload,
+  ProjectCreationProposalPublic,
+  ProjectCreationProposalResponse,
+} from '../shared/projectCreationContracts';
 
 let csrfToken: string | undefined;
 
@@ -82,6 +89,53 @@ export async function submitPrompt(
     token,
     body: { prompt },
   });
+}
+
+export async function createProjectProposal(
+  token: string | undefined,
+  body: ProjectCreationProposalPayload,
+): Promise<ProjectCreationProposalPublic> {
+  const response = await request<ProjectCreationProposalResponse>('/Roadex/api/project-creation/proposals', {
+    method: 'POST',
+    token,
+    body,
+    requestId: crypto.randomUUID(),
+  });
+  return response.proposal;
+}
+
+export async function requestProjectConfirmation(
+  token: string | undefined,
+  proposalId: string,
+): Promise<ProjectCreationChallengeResponse['challenge']> {
+  const response = await request<ProjectCreationChallengeResponse>(
+    `/Roadex/api/project-creation/proposals/${encodeURIComponent(proposalId)}/challenge`,
+    { method: 'POST', token, body: {}, requestId: crypto.randomUUID() },
+  );
+  return response.challenge;
+}
+
+export async function confirmProjectProposal(
+  token: string | undefined,
+  proposalId: string,
+  body: ProjectCreationConfirmPayload,
+): Promise<ProjectCreationProposalPublic> {
+  const response = await request<ProjectCreationProposalResponse>(
+    `/Roadex/api/project-creation/proposals/${encodeURIComponent(proposalId)}/confirm`,
+    { method: 'POST', token, body, requestId: crypto.randomUUID() },
+  );
+  return response.proposal;
+}
+
+export async function revokeProjectProposal(
+  token: string | undefined,
+  proposalId: string,
+): Promise<ProjectCreationProposalPublic> {
+  const response = await request<ProjectCreationProposalResponse>(
+    `/Roadex/api/project-creation/proposals/${encodeURIComponent(proposalId)}/revoke`,
+    { method: 'POST', token, body: {}, requestId: crypto.randomUUID() },
+  );
+  return response.proposal;
 }
 
 export async function submitDeviceDescriptorObservation(

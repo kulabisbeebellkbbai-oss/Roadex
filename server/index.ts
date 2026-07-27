@@ -38,11 +38,16 @@ import {
 } from '../src/server/deviceBridgePolicy.js';
 import type { CreateSessionRequest } from '../src/shared/sessionContracts.js';
 import { bindLiveStreamCleanup, resolveLiveStreamKeepaliveMs } from './liveStreamCleanup.js';
+import { ProjectCreationBroker, type TeamEvidence } from '../src/server/projectCreationBroker.js';
+import { isAvailableProjectCreationRoute } from '../src/server/projectCreationPolicy.js';
+import { ProjectCreationWorker } from '../src/server/projectCreationWorker.js';
 
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8780);
 const liveStreamKeepaliveMs = resolveLiveStreamKeepaliveMs(process.env.ROADEX_SSE_KEEPALIVE_MS);
 const state = createInitialState();
+let projectCreationBroker: ProjectCreationBroker | undefined;
+let projectCreationWorker: ProjectCreationWorker | undefined;
 
 if (host !== '127.0.0.1' && host !== 'localhost') {
   throw new Error('Roadex API must bind to loopback until deployment gateway review is complete.');
@@ -89,6 +94,51 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!auth) return;
     sendJson(res, 200, await bootstrap(state, auth.user));
     return;
+  }
+
+  if (url.search === '' && isAvailableProjectCreationRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    if (req.method === 'POST' && !isJsonRequest(req)) {
+      sendJson(res, 415, { error: { code: 'unsupported_media_type', message: 'JSON content type is required.' } });
+      return;
+    }
+    const broker = getProjectCreationBroker();
+    if (req.method === 'POST' && url.pathname === '/api/project-creation/proposals') {
+      const result = await broker.createProposal(auth.user, await readJson<unknown>(req, 64_000));
+      sendJson(res, result ? 201 : 403, result ? { ok: true, proposal: result } : projectCreationDenied());
+      return;
+    }
+    const match = url.pathname.match(/^\/api\/project-creation\/proposals\/([A-Za-z0-9_-]{1,128})(?:\/(challenge|confirm|revoke))?$/);
+    if (!match) {
+      sendJson(res, 404, { error: { code: 'not_found', message: 'Route not found.' } });
+      return;
+    }
+    const proposalId = match[1];
+    const action = match[2];
+    if (req.method === 'GET' && !action) {
+      const result = broker.get(auth.user, proposalId);
+      sendJson(res, result ? 200 : 404, result ? { ok: true, proposal: result } : projectCreationDenied());
+      return;
+    }
+    if (req.method === 'POST' && action === 'challenge') {
+      const result = await broker.createChallenge(auth.user, proposalId);
+      sendJson(res, result ? 200 : 403, result ? { ok: true, challenge: result } : projectCreationDenied());
+      return;
+    }
+    if (req.method === 'POST' && action === 'confirm') {
+      const result = await broker.confirm(auth.user, proposalId, await readJson<unknown>(req, 4_096));
+      sendJson(res, result ? 200 : 403, result ? { ok: true, proposal: result } : projectCreationDenied());
+      if (result?.operation) {
+        queueMicrotask(() => void getProjectCreationWorker().run(auth.user, proposalId));
+      }
+      return;
+    }
+    if (req.method === 'POST' && action === 'revoke') {
+      const result = broker.revoke(auth.user, proposalId);
+      sendJson(res, result ? 200 : 403, result ? { ok: true, proposal: result } : projectCreationDenied());
+      return;
+    }
   }
 
   if (url.pathname === '/api/sessions' && req.method === 'GET') {
@@ -397,13 +447,21 @@ function requireAuth(
   return result;
 }
 
-async function readJson<T>(req: IncomingMessage): Promise<T> {
+async function readJson<T>(req: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
   const chunks: Buffer[] = [];
+  let bytes = 0;
   for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > maxBytes) throw new Error('request_body_too_large');
+    chunks.push(buffer);
   }
   const raw = Buffer.concat(chunks).toString('utf8').trim();
   return (raw ? JSON.parse(raw) : {}) as T;
+}
+
+function isJsonRequest(req: IncomingMessage): boolean {
+  return /^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] ?? '');
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -412,6 +470,55 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
     'cache-control': 'no-store',
   });
   res.end(JSON.stringify(payload));
+}
+
+function getProjectCreationBroker(): ProjectCreationBroker {
+  projectCreationBroker ??= new ProjectCreationBroker({
+    resolveSession(userId, sessionId) {
+      const session = state.sessions.sessions.find((item) => item.id === sessionId && item.userId === userId);
+      return session ? {
+        id: session.id,
+        userId: session.userId,
+        workspaceId: session.workspace.id,
+        managedThreadId: session.managedThreadId,
+        lifecycle: session.lifecycle,
+      } : undefined;
+    },
+    async resolveTeam(teamId) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2_000);
+      try {
+        const response = await fetch(`http://127.0.0.1:8795/api/teams/${encodeURIComponent(teamId)}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) return undefined;
+        const raw = await response.text();
+        if (Buffer.byteLength(raw) > 64_000) return undefined;
+        const parsed = JSON.parse(raw) as { team?: unknown };
+        return parsed.team && typeof parsed.team === 'object' ? parsed.team as TeamEvidence : undefined;
+      } catch {
+        return undefined;
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+  });
+  return projectCreationBroker;
+}
+
+function getProjectCreationWorker(): ProjectCreationWorker {
+  projectCreationWorker ??= new ProjectCreationWorker(getProjectCreationBroker());
+  return projectCreationWorker;
+}
+
+function projectCreationDenied(): { ok: false; error: { code: string; message: string } } {
+  return {
+    ok: false,
+    error: {
+      code: 'project_creation_denied',
+      message: 'Project creation request denied.',
+    },
+  };
 }
 
 function writeSse(res: ServerResponse, events: unknown[]): void {
