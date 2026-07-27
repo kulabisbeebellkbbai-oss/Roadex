@@ -8,3 +8,12 @@ const HIDDEN_RUNNER_MESSAGES = new Set([
 export function isVisibleTranscriptEvent(event: StreamEvent): boolean {
   return !HIDDEN_RUNNER_MESSAGES.has(event.message);
 }
+
+export function shouldFollowTranscript(
+  scrollHeight: number,
+  scrollTop: number,
+  clientHeight: number,
+  threshold = 80,
+): boolean {
+  return scrollHeight - scrollTop - clientHeight < threshold;
+}

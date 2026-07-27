@@ -326,6 +326,11 @@ button {
   white-space: nowrap;
 }
 
+.mobile-title,
+.mobile-drawer-backdrop {
+  display: none;
+}
+
 .session-pill,
 .status-dot,
 .signal {
@@ -581,17 +586,33 @@ button {
 
 .app-shell.layout-mobile {
   display: block;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface-strong);
 }
 
 .app-shell.layout-mobile .sidebar {
-  position: sticky;
+  position: fixed;
   top: 0;
-  z-index: 10;
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 12px;
-  align-items: center;
-  padding: 12px;
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  display: flex;
+  align-items: stretch;
+  width: min(88vw, 360px);
+  padding: 20px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  visibility: hidden;
+  box-shadow: 18px 0 50px rgb(10 22 17 / 24%);
+  transform: translateX(-102%);
+  transition: transform 180ms ease, visibility 180ms ease;
+}
+
+.app-shell.layout-mobile .sidebar.mobile-open {
+  visibility: visible;
+  transform: translateX(0);
 }
 
 .app-shell.layout-mobile .brand div:last-child {
@@ -599,30 +620,28 @@ button {
 }
 
 .app-shell.layout-mobile .nav-list {
-  display: flex;
-  justify-content: flex-end;
-  overflow-x: auto;
+  display: grid;
+  justify-content: stretch;
+  width: 100%;
+  overflow: visible;
 }
 
 .app-shell.layout-mobile .nav-item {
-  flex: 0 0 auto;
-  justify-content: center;
-  width: 44px;
-  padding: 0;
+  justify-content: flex-start;
+  width: 100%;
+  padding: 0 12px;
 }
 
 .app-shell.layout-mobile .nav-item span {
-  display: none;
+  display: inline;
 }
 
 .app-shell.layout-mobile .sidebar-projects {
-  grid-column: 1 / -1;
-  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  grid-template-columns: minmax(0, 1fr);
 }
 
-.app-shell.layout-mobile .sidebar-panel-heading,
-.app-shell.layout-mobile .sidebar-project-meta {
-  grid-column: 1 / -1;
+.app-shell.layout-mobile .sidebar-projects > * {
+  grid-column: 1;
 }
 
 .app-shell.layout-mobile .trust-panel,
@@ -631,45 +650,186 @@ button {
 }
 
 .app-shell.layout-mobile .workspace {
-  width: min(100%, 720px);
-  margin: 0 auto;
-  padding: 14px;
-}
-
-.app-shell.layout-mobile .session-selectors {
-  grid-template-columns: minmax(0, 1fr) 40px;
-}
-
-.app-shell.layout-mobile .session-selectors label:first-child {
-  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
 }
 
 .app-shell.layout-mobile .topbar {
-  align-items: flex-start;
+  position: relative;
+  z-index: 20;
+  flex: 0 0 auto;
+  align-items: center;
+  min-height: 64px;
+  margin: 0;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  background: rgb(255 255 255 / 96%);
+  box-shadow: 0 4px 16px rgb(38 58 49 / 8%);
+}
+
+.app-shell.layout-mobile .topbar-title {
+  flex: 1 1 auto;
+}
+
+.app-shell.layout-mobile .desktop-title {
+  display: none;
+}
+
+.app-shell.layout-mobile .mobile-title {
+  display: block;
+}
+
+.app-shell.layout-mobile .topbar-title span {
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.app-shell.layout-mobile .topbar-title strong {
+  max-width: min(56vw, 360px);
+  font-size: 0.96rem;
 }
 
 .app-shell.layout-mobile .session-header,
-.app-shell.layout-mobile .dashboard-grid,
-.app-shell.layout-mobile .lower-grid,
 .app-shell.layout-mobile .side-stack {
-  grid-template-columns: 1fr;
+  display: none;
 }
 
-.app-shell.layout-mobile .session-header {
-  padding: 20px;
+.app-shell.layout-mobile .error-banner,
+.app-shell.layout-mobile .notice-banner {
+  flex: 0 0 auto;
+  margin: 8px 10px 0;
 }
 
-.app-shell.layout-mobile .session-facts {
-  justify-content: flex-start;
+.app-shell.layout-mobile .live-grid {
+  display: block;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
 }
 
-.app-shell.layout-mobile .session-row {
-  grid-template-columns: 1fr;
+.app-shell.layout-mobile .codex-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: #f4f7f5;
 }
 
-.app-shell.layout-mobile .signal,
-.app-shell.layout-mobile .inline-action {
-  justify-self: start;
+.app-shell.layout-mobile .codex-panel > .panel-heading {
+  display: none;
+}
+
+.app-shell.layout-mobile .transcript {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  padding: 16px 12px 22px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+}
+
+.app-shell.layout-mobile .transcript:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.app-shell.layout-mobile .message {
+  width: min(86%, 620px);
+  padding: 10px 12px;
+  border-radius: 16px;
+  box-shadow: 0 2px 7px rgb(36 54 46 / 7%);
+}
+
+.app-shell.layout-mobile .message.user {
+  color: #ffffff;
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.app-shell.layout-mobile .message.user p {
+  color: #ffffff;
+}
+
+.app-shell.layout-mobile .prompt-row {
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr) 44px 44px;
+  margin: 0;
+  padding: 9px 10px calc(9px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  background: var(--surface-strong);
+}
+
+.app-shell.layout-mobile .prompt-row input {
+  min-height: 44px;
+  border-radius: 22px;
+}
+
+.app-shell.layout-mobile .prompt-row button {
+  width: 44px;
+  min-height: 44px;
+  border-radius: 50%;
+}
+
+.app-shell.layout-mobile .prompt-row button:nth-of-type(3) {
+  display: none;
+}
+
+.app-shell.layout-mobile .lower-grid {
+  display: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.app-shell.layout-mobile.mobile-view-security .live-grid,
+.app-shell.layout-mobile.mobile-view-devices .live-grid {
+  display: none;
+}
+
+.app-shell.layout-mobile.mobile-view-security .lower-grid,
+.app-shell.layout-mobile.mobile-view-devices .lower-grid {
+  display: block;
+}
+
+.app-shell.layout-mobile.mobile-view-security .device-card,
+.app-shell.layout-mobile.mobile-view-devices .security-card {
+  display: none;
+}
+
+.app-shell.layout-mobile .mobile-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  display: block;
+  padding: 0;
+  visibility: hidden;
+  border: 0;
+  border-radius: 0;
+  background: rgb(7 15 12 / 48%);
+  opacity: 0;
+  transition: opacity 180ms ease, visibility 180ms ease;
+}
+
+.app-shell.layout-mobile .mobile-drawer-backdrop.visible {
+  visibility: visible;
+  opacity: 1;
 }
 
 .message {

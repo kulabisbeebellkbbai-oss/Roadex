@@ -30,7 +30,7 @@ import {
 import type { ProjectCreationProposalPublic, ProjectVisibility } from './shared/projectCreationContracts';
 import { useRoadexSession } from './hooks/useRoadexSession';
 import { navItems } from './roadexModel';
-import { isVisibleTranscriptEvent } from './transcript';
+import { isVisibleTranscriptEvent, shouldFollowTranscript } from './transcript';
 import { resolveLayoutMode, toggleLayoutMode } from './layoutMode';
 import { hasBleRuntimeVerification, verifyBleRuntime } from './client/bleRuntimeVerifier';
 import { hasSerialRuntimeVerification, verifySerialRuntime } from './client/serialRuntimeVerifier';
@@ -60,6 +60,12 @@ function App() {
   const [serialVerification, setSerialVerification] = useState<'idle' | 'checking' | 'verified' | 'error'>('idle');
   const [serialVerificationMessage, setSerialVerificationMessage] = useState('');
   const serialVerificationSequence = useRef(0);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [mobileView, setMobileView] = useState<'chat' | 'devices' | 'security'>('chat');
+  const mobileMenuButton = useRef<HTMLButtonElement>(null);
+  const mobileDrawer = useRef<HTMLElement>(null);
+  const transcript = useRef<HTMLDivElement>(null);
+  const followTranscript = useRef(true);
   const [layoutMode, setLayoutMode] = useState(() => resolveLayoutMode(
     readLayoutPreference(),
     window.matchMedia('(max-width: 720px)').matches,
@@ -83,6 +89,7 @@ function App() {
     roadex.usbDeviceProfiles,
   ].some((profiles) => profiles.some((profile) => profile.workspaceId === selectedProject?.id));
   const visibleTranscript = roadex.transcript.filter(isVisibleTranscriptEvent);
+  const lastVisibleTranscriptEventId = visibleTranscript[visibleTranscript.length - 1]?.id;
   const roadexProjectThreads = [...roadex.sessions, ...roadex.archivedSessions]
     .filter((candidate) => candidate.workspace.id === selectedProject?.id)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -95,6 +102,9 @@ function App() {
     (candidate) => candidate.project.id === selectedProject?.id && !attachedCodexThreadIds.has(candidate.id),
   );
   const selectedRoadexThread = session && session.workspace.id === selectedProject?.id ? `roadex:${session.id}` : '';
+  const selectedThreadLabel = roadex.managedThreads.find(
+    (candidate) => candidate.id === session?.codexThreadId,
+  )?.label ?? (session ? `Thread ${session.id.slice(-8)}` : 'Attaching thread');
   const composerDisabled =
     roadex.connectionState === 'loading' ||
     roadex.connectionState === 'streaming' ||
@@ -184,6 +194,8 @@ function App() {
 
   useEffect(() => {
     if (session?.workspace.id) setSelectedProjectId(session.workspace.id);
+    followTranscript.current = true;
+    setMobileView('chat');
     serialVerificationSequence.current += 1;
     bleVerificationSequence.current += 1;
     setBleVerification('idle');
@@ -192,12 +204,74 @@ function App() {
     setSerialVerificationMessage('');
   }, [session?.id, session?.workspace.id]);
 
+  useEffect(() => {
+    if (layoutMode !== 'mobile') setMobileMenuOpen(false);
+  }, [layoutMode]);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const focusTarget = mobileDrawer.current?.querySelector<HTMLButtonElement>('.nav-item');
+    focusTarget?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMobileMenuOpen(false);
+        mobileMenuButton.current?.focus();
+        return;
+      }
+      if (event.key !== 'Tab' || !mobileDrawer.current) return;
+      const focusable = [...mobileDrawer.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled])',
+      )].filter((element) => element.getClientRects().length > 0);
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [mobileMenuOpen]);
+
+  useEffect(() => {
+    if (!followTranscript.current || !transcript.current) return;
+    transcript.current.scrollTop = transcript.current.scrollHeight;
+  }, [lastVisibleTranscriptEventId, roadex.connectionState, mobileView]);
+
   async function handlePrompt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (composerDisabled || !prompt.trim()) return;
     const nextPrompt = prompt;
+    followTranscript.current = true;
     setPrompt('');
     await roadex.sendPrompt(nextPrompt);
+  }
+
+  function handleMobileMenuClose(restoreFocus = false) {
+    setMobileMenuOpen(false);
+    if (restoreFocus) requestAnimationFrame(() => mobileMenuButton.current?.focus());
+  }
+
+  function handleNavigation(label: string) {
+    if (label === 'Projects') {
+      setSidebarPanel('projects');
+      return;
+    }
+    const panel = label.toLowerCase() as 'sessions' | 'devices' | 'security';
+    setSidebarPanel(panel);
+    if (label === 'Sessions') setMobileView('chat');
+    if (label === 'Security') setMobileView('security');
+    if (label === 'Devices') setMobileView('devices');
+    if (layoutMode === 'mobile') {
+      handleMobileMenuClose();
+      return;
+    }
+    if (label === 'Security') document.getElementById('security-checks')?.scrollIntoView({ behavior: 'smooth' });
+    if (label === 'Devices') document.getElementById('device-status')?.scrollIntoView({ behavior: 'smooth' });
   }
 
   async function handleBleVerification() {
@@ -235,8 +309,14 @@ function App() {
   }
 
   return (
-    <main className={`app-shell layout-${layoutMode}`}>
-      <aside className="sidebar" aria-label="Roadex navigation">
+    <main className={`app-shell layout-${layoutMode} mobile-view-${mobileView}`}>
+      <aside
+        aria-hidden={layoutMode === 'mobile' && !mobileMenuOpen}
+        className={`sidebar${mobileMenuOpen ? ' mobile-open' : ''}`}
+        id="roadex-navigation"
+        ref={mobileDrawer}
+        aria-label="Roadex navigation"
+      >
         <div className="brand">
           <div className="brand-mark" aria-hidden="true">
             <Bot size={22} />
@@ -258,15 +338,7 @@ function App() {
                   : ''
               }`}
               key={item.label}
-              onClick={() => {
-                if (item.label === 'Projects') {
-                  setSidebarPanel('projects');
-                  return;
-                }
-                setSidebarPanel(item.label.toLowerCase() as 'sessions' | 'devices' | 'security');
-                if (item.label === 'Security') document.getElementById('security-checks')?.scrollIntoView({ behavior: 'smooth' });
-                if (item.label === 'Devices') document.getElementById('device-status')?.scrollIntoView({ behavior: 'smooth' });
-              }}
+              onClick={() => handleNavigation(item.label)}
               type="button"
             >
               <item.icon size={18} />
@@ -412,17 +484,34 @@ function App() {
           </div>
         </section>
       </aside>
+      <button
+        aria-label="Close navigation"
+        className={`mobile-drawer-backdrop${mobileMenuOpen ? ' visible' : ''}`}
+        onClick={() => handleMobileMenuClose(true)}
+        tabIndex={mobileMenuOpen ? 0 : -1}
+        type="button"
+      />
 
       <section className="workspace">
         <header className="topbar session-topbar">
-          <button className="icon-button" type="button" aria-label="Open menu">
+          <button
+            aria-controls="roadex-navigation"
+            aria-expanded={mobileMenuOpen}
+            aria-label="Open navigation and controls"
+            className="icon-button"
+            onClick={() => setMobileMenuOpen((open) => !open)}
+            ref={mobileMenuButton}
+            type="button"
+          >
             <Menu size={20} />
           </button>
           <div className="topbar-title">
-            <span>{roadex.user?.displayName ?? 'Attaching user'}</span>
-            <strong title={session?.workspace.root}>
+            <span className="desktop-title">{roadex.user?.displayName ?? 'Attaching user'}</span>
+            <strong className="desktop-title" title={session?.workspace.root}>
               {session?.workspace.root ?? '/srv/roadex/projects/...'}
             </strong>
+            <span className="mobile-title">{session?.workspace.name ?? 'Roadex'}</span>
+            <strong className="mobile-title">{selectedThreadLabel}</strong>
           </div>
           <div className="session-pill">
             <Activity size={16} />
@@ -482,7 +571,21 @@ function App() {
               <span className="status-dot">{session?.lifecycle ?? 'loading'}</span>
             </div>
 
-            <div className="transcript" aria-live="polite">
+            <div
+              aria-label="Conversation history"
+              aria-live="polite"
+              className="transcript"
+              onScroll={(event) => {
+                const target = event.currentTarget;
+                followTranscript.current = shouldFollowTranscript(
+                  target.scrollHeight,
+                  target.scrollTop,
+                  target.clientHeight,
+                );
+              }}
+              ref={transcript}
+              tabIndex={0}
+            >
               {roadex.connectionState === 'loading' ? (
                 <>
                   <div className="message skeleton" />
