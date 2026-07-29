@@ -28,7 +28,7 @@ const payload = {
   idempotencyKey: 'request-key-0001',
 } as const;
 
-function setup(overrides: NodeJS.ProcessEnv = {}) {
+function setup(overrides: NodeJS.ProcessEnv = {}, databasePath = ':memory:') {
   let now = Date.parse('2026-07-25T00:00:00.000Z');
   let team: TeamEvidence = {
     id: 'team-1',
@@ -64,7 +64,7 @@ function setup(overrides: NodeJS.ProcessEnv = {}) {
       : undefined,
     resolveTeam: async () => teamQueue.shift() ?? team,
   }, {
-    databasePath: ':memory:',
+    databasePath,
     env,
     now: () => now,
     random: () => Buffer.alloc(32, 7),
@@ -362,9 +362,127 @@ describe('ProjectCreationBroker', () => {
     expect(await context.broker.advanceExecution(
       owner, lease!.operationId, lease!.leaseToken, 'pushed',
     )).toBe(false);
-    for (const phase of ['local-prepared', 'remote-created', 'pushed', 'thread-started', 'completed'] as const) {
+    for (const phase of ['local-prepared', 'remote-created', 'pushed'] as const) {
       expect(await context.broker.advanceExecution(owner, lease!.operationId, lease!.leaseToken, phase)).toBe(true);
     }
+    expect(await context.broker.advanceExecution(
+      owner,
+      lease!.operationId,
+      lease!.leaseToken,
+      'thread-started',
+      undefined,
+      {
+        workspaceId: 'workspace-project-alpha',
+        workspaceRoot: '/home/god/Documents/Codex Workspace/Project Alpha',
+        managedThreadId: 'thread-project-alpha',
+      },
+    )).toBe(true);
+    expect(await context.broker.advanceExecution(
+      owner, lease!.operationId, lease!.leaseToken, 'completed',
+    )).toBe(true);
     expect((await context.broker.get(owner, proposal!.id))?.operation?.phase).toBe('completed');
+  });
+
+  it('creates a durable exact grant only with the completed verified thread transition', async () => {
+    const databasePath = path.join(mkdtempSync(path.join(os.tmpdir(), 'project-grant-')), 'state.sqlite');
+    const context = setup({ ROADEX_PROJECT_CREATION_EXECUTION_ENABLED: 'true' }, databasePath);
+    const proposal = await context.broker.createProposal(owner, payload);
+    const challenge = await context.broker.createChallenge(owner, proposal!.id);
+    await context.broker.confirm(owner, proposal!.id, {
+      challenge: challenge!.challenge,
+      idempotencyKey: 'confirm-key-grant',
+    });
+    const lease = await context.broker.claimExecution(owner, proposal!.id);
+    const grantContext = {
+      userId: owner.id,
+      workspaceId: 'workspace-project-alpha',
+      workspaceRoot: '/home/god/Documents/Codex Workspace/Project Alpha',
+      managedThreadId: 'thread-project-alpha',
+      codexThreadId: 'thread-project-alpha',
+    };
+    expect(context.broker.resolveControlledRunnerGrant(grantContext)).toBeUndefined();
+    for (const phase of ['local-prepared', 'remote-created', 'pushed'] as const) {
+      expect(await context.broker.advanceExecution(
+        owner, lease!.operationId, lease!.leaseToken, phase,
+      )).toBe(true);
+    }
+    expect(await context.broker.advanceExecution(
+      owner,
+      lease!.operationId,
+      lease!.leaseToken,
+      'thread-started',
+      undefined,
+      {
+        workspaceId: grantContext.workspaceId,
+        workspaceRoot: grantContext.workspaceRoot,
+        managedThreadId: grantContext.managedThreadId,
+      },
+    )).toBe(true);
+    expect(context.broker.resolveControlledRunnerGrant(grantContext)).toBeUndefined();
+    expect(await context.broker.advanceExecution(
+      owner, lease!.operationId, lease!.leaseToken, 'completed',
+    )).toBe(true);
+    expect(context.broker.resolveControlledRunnerGrant(grantContext)).toMatchObject({
+      userId: grantContext.userId,
+      workspaceId: grantContext.workspaceId,
+      workspaceRoot: grantContext.workspaceRoot,
+      managedThreadId: grantContext.managedThreadId,
+      status: 'active',
+    });
+
+    const restarted = setup({ ROADEX_PROJECT_CREATION_EXECUTION_ENABLED: 'true' }, databasePath);
+    expect(restarted.broker.resolveControlledRunnerGrant(grantContext)).toMatchObject({
+      workspaceId: grantContext.workspaceId,
+      managedThreadId: grantContext.managedThreadId,
+      status: 'active',
+    });
+    for (const changed of [
+      { ...grantContext, userId: 'other' },
+      { ...grantContext, workspaceId: 'workspace-project-alpha-neighbor' },
+      { ...grantContext, workspaceRoot: `${grantContext.workspaceRoot}-neighbor` },
+      { ...grantContext, managedThreadId: 'thread-project-alpha-neighbor' },
+      { ...grantContext, codexThreadId: 'thread-project-alpha-neighbor' },
+    ]) {
+      expect(restarted.broker.resolveControlledRunnerGrant(changed)).toBeUndefined();
+    }
+    expect(restarted.broker.revokeControlledRunnerGrant(
+      restarted.broker.resolveControlledRunnerGrant(grantContext)!.operationId,
+      owner.id,
+    )).toBe(true);
+    expect(restarted.broker.resolveControlledRunnerGrant(grantContext)).toBeUndefined();
+  });
+
+  it('rejects missing or mismatched thread evidence before completion', async () => {
+    const context = setup({ ROADEX_PROJECT_CREATION_EXECUTION_ENABLED: 'true' });
+    const proposal = await context.broker.createProposal(owner, payload);
+    const challenge = await context.broker.createChallenge(owner, proposal!.id);
+    await context.broker.confirm(owner, proposal!.id, {
+      challenge: challenge!.challenge,
+      idempotencyKey: 'confirm-key-evidence',
+    });
+    const lease = await context.broker.claimExecution(owner, proposal!.id);
+    for (const phase of ['local-prepared', 'remote-created', 'pushed'] as const) {
+      expect(await context.broker.advanceExecution(
+        owner, lease!.operationId, lease!.leaseToken, phase,
+      )).toBe(true);
+    }
+    expect(await context.broker.advanceExecution(
+      owner, lease!.operationId, lease!.leaseToken, 'thread-started',
+    )).toBe(false);
+    expect(await context.broker.advanceExecution(
+      owner,
+      lease!.operationId,
+      lease!.leaseToken,
+      'thread-started',
+      undefined,
+      {
+        workspaceId: 'workspace-project-alpha',
+        workspaceRoot: '/home/god/Documents/Codex Workspace/Project Alpha-neighbor',
+        managedThreadId: 'thread-project-alpha',
+      },
+    )).toBe(false);
+    expect(await context.broker.advanceExecution(
+      owner, lease!.operationId, lease!.leaseToken, 'completed',
+    )).toBe(false);
   });
 });

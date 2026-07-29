@@ -82,6 +82,10 @@ import type {
 import type { SerialVerificationProfile } from '../shared/serialVerificationContracts.js';
 import type { BleVerificationProfile } from '../shared/bleVerificationContracts.js';
 import type { UsbDeviceOperation, UsbDeviceProfile } from '../shared/usbDeviceProfileContracts.js';
+import type {
+  ControlledRunnerGrant,
+  RunnerCapabilityContext,
+} from './runnerCapabilityProfile.js';
 
 export type RoadexState = {
   sessions: SessionStore;
@@ -104,6 +108,7 @@ export type RoadexState = {
   serialVerificationProfiles: SerialVerificationProfile[];
   bleVerificationProfiles: BleVerificationProfile[];
   usbDeviceProfiles: UsbDeviceProfile[];
+  resolveControlledRunnerGrant: (context: RunnerCapabilityContext) => ControlledRunnerGrant | undefined;
 };
 
 type StreamSubscriber = {
@@ -194,6 +199,7 @@ export function createInitialState(
     deviceBridgeOperations: new Map(persisted.deviceBridgeOperations.map((record) => [record.id, record])),
     deviceInventoryBindings: new Map(persisted.deviceInventoryBindings.map((record) => [record.id, record])),
     deviceDescriptorObservations: new Map(persisted.deviceDescriptorObservations.map((record) => [record.id, record])),
+    resolveControlledRunnerGrant: () => undefined,
     ...deviceProfiles,
   };
 }
@@ -389,6 +395,19 @@ export function submitPrompt(
     return undefined;
   }
 
+  let capabilityGrant: ControlledRunnerGrant | undefined;
+  try {
+    capabilityGrant = state.resolveControlledRunnerGrant({
+      userId: session.userId,
+      workspaceId: session.workspace.id,
+      workspaceRoot: session.workspace.root,
+      managedThreadId: session.managedThreadId,
+      codexThreadId: session.codexThreadId,
+    });
+  } catch {
+    capabilityGrant = undefined;
+  }
+
   session.lifecycle = 'streaming';
   touchSession(session);
   const started = appendAudit(
@@ -407,6 +426,7 @@ export function submitPrompt(
       session,
       prompt: cleanPrompt,
       signal: controller.signal,
+      capabilityGrant,
       onEvent: (event) => {
         addAndPublishStreamEvents(state, [event]);
       },

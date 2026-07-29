@@ -48,6 +48,14 @@ const liveStreamKeepaliveMs = resolveLiveStreamKeepaliveMs(process.env.ROADEX_SS
 const state = createInitialState();
 let projectCreationBroker: ProjectCreationBroker | undefined;
 let projectCreationWorker: ProjectCreationWorker | undefined;
+state.resolveControlledRunnerGrant = (context) =>
+  getProjectCreationBroker().resolveControlledRunnerGrant({
+    userId: context.userId,
+    workspaceId: context.workspaceId,
+    workspaceRoot: context.workspaceRoot ?? '',
+    managedThreadId: context.managedThreadId,
+    codexThreadId: context.codexThreadId,
+  });
 
 if (host !== '127.0.0.1' && host !== 'localhost') {
   throw new Error('Roadex API must bind to loopback until deployment gateway review is complete.');

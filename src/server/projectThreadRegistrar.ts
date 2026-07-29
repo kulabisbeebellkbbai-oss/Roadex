@@ -3,6 +3,7 @@ import { createHash, createHmac } from 'node:crypto';
 import path from 'node:path';
 import { buildCodexExecArgs, parseCodexJsonlStream } from './codexRunner.js';
 import { CONTROLLED_RUNNER_PROFILE } from './runnerCapabilityProfile.js';
+import { loadManagedCodexThreads } from './codexProjectsRegistry.js';
 import type { ProjectCreationExecutionLease } from './projectCreationBroker.js';
 
 const CODEX_BIN = '/home/god/.local/bin/codex';
@@ -25,7 +26,13 @@ type RegistrationDto = {
 
 export type ProjectThreadFinalizer = {
   ready: () => boolean;
-  finalize: (lease: ProjectCreationExecutionLease) => Promise<void>;
+  finalize: (lease: ProjectCreationExecutionLease) => Promise<ProjectThreadFinalization>;
+};
+
+export type ProjectThreadFinalization = {
+  workspaceId: string;
+  workspaceRoot: string;
+  managedThreadId: string;
 };
 
 export function createProjectThreadFinalizer(
@@ -62,6 +69,15 @@ export function createProjectThreadFinalizer(
         bootstrap_binding: bootstrapBinding,
       }, env);
       verifyRegistration(result, lease.operationId, lease.spec.projectName, threadId);
+      const registered = loadManagedCodexThreads().find(
+        (candidate) => candidate.id === threadId && candidate.project.root === projectRoot,
+      );
+      if (!registered) throw new Error('registered_thread_not_resolvable');
+      return {
+        workspaceId: registered.project.id,
+        workspaceRoot: registered.project.root,
+        managedThreadId: registered.id,
+      };
     },
   };
 }

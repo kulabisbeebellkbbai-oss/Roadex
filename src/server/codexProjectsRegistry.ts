@@ -80,7 +80,7 @@ export function managedCodexWorkspaces(options: RegistryOptions = {}): Workspace
   return [...workspaces.values()].sort((left, right) => left.name.localeCompare(right.name));
 }
 
-function workspaceForProject(root: string): WorkspaceRef {
+export function workspaceForProject(root: string): WorkspaceRef {
   const slug = basename(root).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project';
   const digest = createHash('sha256').update(root).digest('hex').slice(0, 8);
   return {

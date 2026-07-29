@@ -28,7 +28,11 @@ const lease: ProjectCreationExecutionLease = {
 
 const readyFinalizer = {
   ready: () => true,
-  finalize: vi.fn(async () => {}),
+  finalize: vi.fn(async () => ({
+    workspaceId: 'workspace-project-alpha',
+    workspaceRoot: '/home/god/Documents/Codex Workspace/Project Alpha',
+    managedThreadId: 'thread-project-alpha',
+  })),
 };
 
 describe('ProjectCreationWorker', () => {
@@ -57,7 +61,11 @@ describe('ProjectCreationWorker', () => {
       advanceExecution: vi.fn(async () => false),
     }, execute, {
       ready: () => false,
-      finalize: vi.fn(async () => {}),
+      finalize: vi.fn(async () => ({
+        workspaceId: 'workspace-project-alpha',
+        workspaceRoot: '/home/god/Documents/Codex Workspace/Project Alpha',
+        managedThreadId: 'thread-project-alpha',
+      })),
     });
     expect(await worker.run(owner, lease.proposalId)).toBe(false);
     expect(claimExecution).not.toHaveBeenCalled();
@@ -89,6 +97,11 @@ describe('ProjectCreationWorker', () => {
     expect(advanceExecution.mock.calls.map((call) => call[3])).toEqual([
       'local-prepared', 'remote-created', 'pushed', 'thread-started', 'completed',
     ]);
+    expect(advanceExecution.mock.calls[3]?.[5]).toEqual({
+      workspaceId: 'workspace-project-alpha',
+      workspaceRoot: '/home/god/Documents/Codex Workspace/Project Alpha',
+      managedThreadId: 'thread-project-alpha',
+    });
     expect(JSON.stringify(advanceExecution.mock.calls)).not.toContain('command output');
   });
 

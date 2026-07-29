@@ -4,6 +4,7 @@ import type { ProjectCreationOperationPhase } from '../shared/projectCreationCon
 import type { ProjectCreationBroker, ProjectCreationExecutionLease } from './projectCreationBroker.js';
 import {
   createProjectThreadFinalizer,
+  type ProjectThreadFinalization,
   type ProjectThreadFinalizer,
 } from './projectThreadRegistrar.js';
 
@@ -42,9 +43,9 @@ export class ProjectCreationWorker {
         if (event.type === 'done') {
           if (attemptedPhase !== 'pushed' || terminal) throw new Error('worker_done_before_finalization');
           attemptedPhase = 'thread-started';
-          await this.finalizer.finalize(lease);
+          const finalization: ProjectThreadFinalization = await this.finalizer.finalize(lease);
           const registered = await this.broker.advanceExecution(
-            user, lease.operationId, lease.leaseToken, 'thread-started',
+            user, lease.operationId, lease.leaseToken, 'thread-started', undefined, finalization,
           );
           if (!registered) throw new Error('worker_checkpoint_denied');
           const completed = await this.broker.advanceExecution(

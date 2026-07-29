@@ -5,6 +5,7 @@ import { createStreamEvent } from './mockRunner.js';
 import {
   CONTROLLED_RUNNER_CONFIG_OVERRIDES,
   resolveRunnerCapabilityProfile,
+  type ControlledRunnerGrant,
   type RunnerCapabilitySelection,
 } from './runnerCapabilityProfile.js';
 import type { RoadexSession, StreamEvent, WorkspaceRef } from '../shared/sessionContracts.js';
@@ -14,6 +15,7 @@ export type RunnerPromptRequest = {
   prompt: string;
   onEvent?: (event: StreamEvent) => void;
   signal?: AbortSignal;
+  capabilityGrant?: ControlledRunnerGrant;
 };
 
 export type RunnerPromptResult =
@@ -91,13 +93,16 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
       };
     },
 
-    runPrompt({ session, prompt, onEvent, signal }) {
+    runPrompt({ session, prompt, onEvent, signal, capabilityGrant }) {
       let capabilityProfile: RunnerCapabilitySelection;
       try {
         capabilityProfile = resolveRunnerCapabilityProfile({
           userId: session.userId,
           workspaceId: session.workspace.id,
-        });
+          workspaceRoot: session.workspace.root,
+          managedThreadId: session.managedThreadId,
+          codexThreadId: session.codexThreadId,
+        }, { grant: capabilityGrant });
       } catch {
         const event = createStreamEvent(session.id, 'system', 'Controlled runner profile validation failed.');
         onEvent?.(event);

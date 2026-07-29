@@ -1,4 +1,5 @@
 export const CONTROLLED_RUNNER_PROFILE = 'roadex-controlled-project-manager';
+export const CONTROLLED_OVERSEER_MCP = '/home/god/Documents/Codex Workspace/Roadex/dist-server/src/server/overseerMcp.js';
 export const CONTROLLED_RUNNER_CONFIG_OVERRIDES = [
   'approval_policy="never"',
   'sandbox_mode="workspace-write"',
@@ -11,6 +12,11 @@ export const CONTROLLED_RUNNER_CONFIG_OVERRIDES = [
   'mcp_servers.skiller.required=true',
   'mcp_servers.skiller.enabled_tools=["capture_work_product","recommend_skills","record_skill_run"]',
   'mcp_servers.skiller.default_tools_approval_mode="approve"',
+  'mcp_servers.overseer.command="node"',
+  `mcp_servers.overseer.args=["${CONTROLLED_OVERSEER_MCP}"]`,
+  'mcp_servers.overseer.required=true',
+  'mcp_servers.overseer.enabled_tools=["service_status","remote_testing_status","record_crew_message"]',
+  'mcp_servers.overseer.default_tools_approval_mode="approve"',
 ] as const;
 
 export type RunnerCapabilitySelection =
@@ -23,10 +29,23 @@ export type RunnerCapabilitySelection =
 export type RunnerCapabilityContext = {
   userId: string;
   workspaceId: string;
+  workspaceRoot?: string;
+  managedThreadId?: string;
+  codexThreadId?: string;
+};
+
+export type ControlledRunnerGrant = {
+  userId: string;
+  workspaceId: string;
+  workspaceRoot: string;
+  managedThreadId: string;
+  operationId: string;
+  status: 'active';
 };
 
 export type RunnerCapabilityPolicyOptions = {
   env?: NodeJS.ProcessEnv;
+  grant?: ControlledRunnerGrant;
 };
 
 export function resolveRunnerCapabilityProfile(
@@ -40,7 +59,18 @@ export function resolveRunnerCapabilityProfile(
 
   const allowedUsers = parseExactAllowlist(env.ROADEX_CONTROLLED_RUNNER_AUTHORIZED_USERS);
   const allowedWorkspaces = parseExactAllowlist(env.ROADEX_CONTROLLED_RUNNER_WORKSPACE_IDS);
-  if (!allowedUsers.has(context.userId) || !allowedWorkspaces.has(context.workspaceId)) {
+  const staticallyAllowed = allowedUsers.has(context.userId) && allowedWorkspaces.has(context.workspaceId);
+  const grant = options.grant;
+  const dynamicallyAllowed = Boolean(
+    grant
+    && grant.status === 'active'
+    && grant.userId === context.userId
+    && grant.workspaceId === context.workspaceId
+    && grant.workspaceRoot === context.workspaceRoot
+    && grant.managedThreadId === context.managedThreadId
+    && grant.managedThreadId === context.codexThreadId,
+  );
+  if (!staticallyAllowed && !dynamicallyAllowed) {
     return { mode: 'restricted' };
   }
 

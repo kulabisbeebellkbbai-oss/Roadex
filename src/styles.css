@@ -749,9 +749,16 @@ button {
 
 .app-shell.layout-mobile .message {
   width: min(86%, 620px);
+  min-width: 0;
   padding: 10px 12px;
   border-radius: 16px;
   box-shadow: 0 2px 7px rgb(36 54 46 / 7%);
+}
+
+.app-shell.layout-mobile .message p {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .app-shell.layout-mobile .message.user {

@@ -11,9 +11,11 @@
     "preview": "vite preview --host 0.0.0.0",
     "lint": "eslint .",
     "test": "vitest run --dir tests",
+    "test:mobile": "playwright test --config playwright.mobile.config.ts",
     "start": "node dist-server/server/index.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@vitejs/plugin-react": "^6.0.3",
     "csv-parse": "^6.2.1",
     "esptool-js": "^0.6.0",
@@ -22,10 +24,12 @@
     "react-dom": "^19.0.0",
     "spark-md5": "^3.0.2",
     "typescript": "^5.7.2",
-    "vite": "^8.1.5"
+    "vite": "^8.1.5",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
+    "@playwright/test": "^1.62.0",
     "@types/node": "^24.10.1",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",

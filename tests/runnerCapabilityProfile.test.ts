@@ -47,6 +47,25 @@ describe('resolveRunnerCapabilityProfile', () => {
     });
   });
 
+  it('allows each exact configured workspace without matching a neighboring workspace', () => {
+    const options = {
+      env: controlledEnv({
+        ROADEX_CONTROLLED_RUNNER_WORKSPACE_IDS: 'codex-project-ai-project-manager-cacb4e3a,codex-project-donuthole-5ccf3f70',
+      }),
+    };
+    expect(resolveRunnerCapabilityProfile(
+      { userId: 'owner', workspaceId: 'codex-project-donuthole-5ccf3f70' },
+      options,
+    )).toEqual({
+      mode: 'controlled-project-manager',
+      profile: CONTROLLED_RUNNER_PROFILE,
+    });
+    expect(resolveRunnerCapabilityProfile(
+      { userId: 'owner', workspaceId: 'codex-project-donuthole-5ccf3f70-other' },
+      options,
+    )).toEqual({ mode: 'restricted' });
+  });
+
   it('ignores malformed allowlist entries instead of broadening access', () => {
     expect(resolveRunnerCapabilityProfile(
       { userId: '../owner', workspaceId: 'roadex' },
@@ -56,5 +75,59 @@ describe('resolveRunnerCapabilityProfile', () => {
         }),
       },
     )).toEqual({ mode: 'restricted' });
+  });
+
+  it('accepts an exact active server grant when the static workspace allowlist does not match', () => {
+    expect(resolveRunnerCapabilityProfile(
+      {
+        userId: 'owner',
+        workspaceId: 'workspace-created',
+        workspaceRoot: '/srv/projects/Created',
+        managedThreadId: 'thread-created',
+        codexThreadId: 'thread-created',
+      },
+      {
+        env: controlledEnv(),
+        grant: {
+          userId: 'owner',
+          workspaceId: 'workspace-created',
+          workspaceRoot: '/srv/projects/Created',
+          managedThreadId: 'thread-created',
+          operationId: 'operation-created',
+          status: 'active',
+        },
+      },
+    )).toEqual({
+      mode: 'controlled-project-manager',
+      profile: CONTROLLED_RUNNER_PROFILE,
+    });
+  });
+
+  it.each([
+    ['userId', 'other'],
+    ['workspaceId', 'workspace-neighbor'],
+    ['workspaceRoot', '/srv/projects/Neighbor'],
+    ['managedThreadId', 'thread-neighbor'],
+    ['codexThreadId', 'thread-neighbor'],
+  ] as const)('rejects a durable grant when %s drifts', (field, value) => {
+    const context = {
+      userId: 'owner',
+      workspaceId: 'workspace-created',
+      workspaceRoot: '/srv/projects/Created',
+      managedThreadId: 'thread-created',
+      codexThreadId: 'thread-created',
+      [field]: value,
+    };
+    expect(resolveRunnerCapabilityProfile(context, {
+      env: controlledEnv(),
+      grant: {
+        userId: 'owner',
+        workspaceId: 'workspace-created',
+        workspaceRoot: '/srv/projects/Created',
+        managedThreadId: 'thread-created',
+        operationId: 'operation-created',
+        status: 'active',
+      },
+    })).toEqual({ mode: 'restricted' });
   });
 });

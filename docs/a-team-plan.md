@@ -273,6 +273,14 @@ Status: Roadex-local worker and registrar deployed; gateway/live smoke pending
   launcher writes, strict projection, and pseudonymized durable audit.
 - Runtime enablement, service restart, local project creation, and GitHub
   creation remain separate deployment boundaries.
+- Approved project creation now stages automatic controlled-runner enrollment:
+  the verified registered workspace/thread evidence is persisted at the
+  `thread-started` checkpoint and an exact server-owned grant is inserted in
+  the same SQLite transaction as `completed`. Selection revalidates the
+  authenticated owner, workspace ID/root, and managed/Codex thread identity on
+  every prompt. Static workspace entries remain a compatibility path.
+- Automatic enrollment source and local regression tests do not by themselves
+  authorize rebuilding or restarting the live Roadex service.
 - Roadex-local worker/bootstrap/registrar configuration was deployed on
   2026-07-25 through Overseer plan
   `admin.roadex-project-creation-worker-20260725`.

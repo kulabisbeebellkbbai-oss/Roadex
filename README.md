@@ -20,6 +20,7 @@ The current implementation provides a secure responsive portal plus a server-sid
 - `npm run build` - type-check and build the production bundle.
 - `npm run lint` - run ESLint against the TypeScript source.
 - `npm run test` - run the Vitest test suite.
+- `npm run test:mobile` - run local Pixel 7 Chromium and iPhone 15 WebKit UI emulation.
 - `npm start` - run the compiled server after `npm run build`.
 
 ## Codex Runner

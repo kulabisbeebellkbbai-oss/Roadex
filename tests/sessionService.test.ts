@@ -1710,6 +1710,39 @@ describe('Roadex session service', () => {
     expect(streamEventsForSession(state, intruder, response.session.id)).toBeUndefined();
   });
 
+  it('resolves a server-only capability grant before prompt dispatch and fails restricted on lookup error', async () => {
+    const runner = fakeRunner();
+    const originalRunPrompt = runner.runPrompt;
+    let receivedGrant: RunnerPromptRequest['capabilityGrant'];
+    runner.runPrompt = async (request) => {
+      receivedGrant = request.capabilityGrant;
+      return originalRunPrompt(request);
+    };
+    const state = createInitialState(runner, createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+    const grant = {
+      userId: mockUser.id,
+      workspaceId: response.session.workspace.id,
+      workspaceRoot: response.session.workspace.root,
+      managedThreadId: 'thread-granted',
+      operationId: 'operation-granted',
+      status: 'active' as const,
+    };
+    state.resolveControlledRunnerGrant = () => grant;
+    expect(submitPrompt(state, mockUser, response.session.id, 'with grant')).toMatchObject({ accepted: true });
+    await flushRunner();
+    expect(receivedGrant).toEqual(grant);
+
+    state.resolveControlledRunnerGrant = () => {
+      throw new Error('injected lookup failure');
+    };
+    expect(submitPrompt(state, mockUser, response.session.id, 'restricted fallback')).toMatchObject({ accepted: true });
+    await flushRunner();
+    expect(receivedGrant).toBeUndefined();
+  });
+
   it('publishes runner events to live subscribers for the owning session', async () => {
     const state = createInitialState(fakeRunner(), createMemoryPersistence());
     const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });

@@ -1,6 +1,8 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { join } from 'node:path';
 import type { UserProfile } from '../shared/sessionContracts.js';
+import type { ControlledRunnerGrant } from './runnerCapabilityProfile.js';
 import type {
   ProjectCreationChallengePublic,
   ProjectCreationConfirmPayload,
@@ -72,8 +74,37 @@ type OperationRow = {
   lease_digest: string | null;
   lease_expires_at: string | null;
   failure_class: string | null;
+  workspace_id: string | null;
+  workspace_root: string | null;
+  managed_thread_id: string | null;
   created_at: string;
   updated_at: string;
+};
+
+type ControlledRunnerGrantRow = {
+  id: string;
+  operation_id: string;
+  user_id: string;
+  workspace_id: string;
+  workspace_root: string;
+  managed_thread_id: string;
+  status: 'active' | 'revoked';
+  created_at: string;
+  revoked_at: string | null;
+};
+
+export type ControlledRunnerGrantEvidence = {
+  workspaceId: string;
+  workspaceRoot: string;
+  managedThreadId: string;
+};
+
+export type ControlledRunnerGrantContext = {
+  userId: string;
+  workspaceId: string;
+  workspaceRoot: string;
+  managedThreadId?: string;
+  codexThreadId?: string;
 };
 
 export type ProjectCreationExecutionLease = {
@@ -131,6 +162,7 @@ export class ProjectCreationBroker {
       );
     `);
     this.#migrateLegacyOperations();
+    this.#ensureControlledRunnerGrantSchema();
   }
 
   async createProposal(user: UserProfile, payload: unknown): Promise<ProjectCreationProposalPublic | undefined> {
@@ -235,16 +267,19 @@ export class ProjectCreationBroker {
         lease_digest: null,
         lease_expires_at: null,
         failure_class: null,
+        workspace_id: null,
+        workspace_root: null,
+        managed_thread_id: null,
         created_at: iso(this.#now()),
         updated_at: iso(this.#now()),
       };
       this.#db.prepare(`
         INSERT INTO operations(
           id,proposal_id,phase,resume_phase,lease_digest,lease_expires_at,
-          failure_class,created_at,updated_at
+          failure_class,workspace_id,workspace_root,managed_thread_id,created_at,updated_at
         ) VALUES (
           @id,@proposal_id,@phase,@resume_phase,@lease_digest,@lease_expires_at,
-          @failure_class,@created_at,@updated_at
+          @failure_class,@workspace_id,@workspace_root,@managed_thread_id,@created_at,@updated_at
         )
       `).run(operation);
       this.#db.prepare(`
@@ -350,6 +385,7 @@ export class ProjectCreationBroker {
     leaseToken: string,
     nextPhase: ProjectCreationOperationPhase,
     failureClass?: string,
+    grantEvidence?: ControlledRunnerGrantEvidence,
   ): Promise<boolean> {
     if (!this.executionEnabled() || !this.#authorized(user)) return false;
     const operation = this.#operation(operationId);
@@ -360,6 +396,18 @@ export class ProjectCreationBroker {
     if (!operation.lease_expires_at || expired(operation.lease_expires_at, this.#now())) return false;
     const classification = failureClass ? validFailureClass(failureClass) : undefined;
     if (failureClass && !classification) return false;
+    if (grantEvidence && nextPhase !== 'thread-started') return false;
+    const verifiedEvidence = nextPhase === 'thread-started'
+      ? validGrantEvidence(
+        grantEvidence,
+        join(this.#env.ROADEX_PROJECT_CREATION_WORKSPACE_ROOT ?? '', proposal.project_name),
+      )
+      : undefined;
+    if (nextPhase === 'thread-started' && !verifiedEvidence) return false;
+    if (
+      nextPhase === 'completed'
+      && !validStoredGrantEvidence(operation)
+    ) return false;
     const allowed = nextPhase === 'failed-retryable'
       || nextPhase === 'reconcile-required'
       || nextExecutionPhase(operation.phase) === nextPhase;
@@ -368,19 +416,77 @@ export class ProjectCreationBroker {
       const terminal = ['completed', 'reconcile-required', 'failed-retryable'].includes(nextPhase);
       const update = this.#db.prepare(`
         UPDATE operations SET phase=?, resume_phase=?, lease_digest=?, lease_expires_at=?,
-          failure_class=?, updated_at=? WHERE id=? AND lease_digest=?
+          failure_class=?, workspace_id=?, workspace_root=?, managed_thread_id=?,
+          updated_at=? WHERE id=? AND lease_digest=?
       `).run(
         nextPhase,
         nextPhase === 'failed-retryable' ? operation.phase : null,
         terminal ? null : operation.lease_digest,
         terminal ? null : operation.lease_expires_at,
         classification ?? null,
+        verifiedEvidence?.workspaceId ?? operation.workspace_id,
+        verifiedEvidence?.workspaceRoot ?? operation.workspace_root,
+        verifiedEvidence?.managedThreadId ?? operation.managed_thread_id,
         iso(this.#now()),
         operation.id,
         operation.lease_digest,
       );
       if (update.changes !== 1) throw new Error('stale_lease');
+      if (nextPhase === 'completed') {
+        this.#db.prepare(`
+          INSERT INTO controlled_runner_grants(
+            id,operation_id,user_id,workspace_id,workspace_root,managed_thread_id,
+            status,created_at,revoked_at
+          ) VALUES(?,?,?,?,?,?,'active',?,NULL)
+        `).run(
+          `controlled-grant-${operation.id}`,
+          operation.id,
+          proposal.user_id,
+          operation.workspace_id,
+          operation.workspace_root,
+          operation.managed_thread_id,
+          iso(this.#now()),
+        );
+      }
       this.#audit(user.id, operation.id, 'operation.phase', 'allowed', nextPhase);
+      return true;
+    }));
+  }
+
+  resolveControlledRunnerGrant(context: ControlledRunnerGrantContext): ControlledRunnerGrant | undefined {
+    if (
+      !validIdentifier(context.userId)
+      || !validIdentifier(context.workspaceId)
+      || !validRoot(context.workspaceRoot)
+      || !validIdentifier(context.managedThreadId)
+      || context.managedThreadId !== context.codexThreadId
+    ) return undefined;
+    const row = this.#db.prepare(`
+      SELECT grants.* FROM controlled_runner_grants AS grants
+      JOIN operations ON operations.id=grants.operation_id
+      JOIN proposals ON proposals.id=operations.proposal_id
+      WHERE grants.user_id=? AND grants.workspace_id=? AND grants.workspace_root=?
+        AND grants.managed_thread_id=? AND grants.status='active'
+        AND operations.phase='completed' AND proposals.status='consumed'
+      LIMIT 1
+    `).get(
+      context.userId,
+      context.workspaceId,
+      context.workspaceRoot,
+      context.managedThreadId,
+    ) as ControlledRunnerGrantRow | undefined;
+    return row ? publicControlledRunnerGrant(row) : undefined;
+  }
+
+  revokeControlledRunnerGrant(operationId: string, actorId: string): boolean {
+    if (!validIdentifier(operationId) || !validIdentifier(actorId)) return false;
+    return Boolean(this.#transaction(() => {
+      const update = this.#db.prepare(`
+        UPDATE controlled_runner_grants SET status='revoked', revoked_at=?
+        WHERE operation_id=? AND status='active'
+      `).run(iso(this.#now()), operationId);
+      if (update.changes !== 1) throw new Error('grant_not_active');
+      this.#audit(actorId, operationId, 'controlled_runner.revoke', 'allowed', 'revoked');
       return true;
     }));
   }
@@ -480,18 +586,43 @@ export class ProjectCreationBroker {
 
   #migrateLegacyOperations(): void {
     const columns = this.#db.prepare('PRAGMA table_info(operations)').all() as Array<{ name: string }>;
-    if (columns.some((column) => column.name === 'updated_at')) return;
+    if (!columns.some((column) => column.name === 'updated_at')) {
+      this.#db.exec(`
+        ALTER TABLE operations RENAME TO operations_legacy;
+        CREATE TABLE operations (
+          id TEXT PRIMARY KEY, proposal_id TEXT NOT NULL UNIQUE REFERENCES proposals(id),
+          phase TEXT NOT NULL, resume_phase TEXT, lease_digest TEXT,
+          lease_expires_at TEXT, failure_class TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        INSERT INTO operations(id,proposal_id,phase,created_at,updated_at)
+          SELECT id,proposal_id,phase,created_at,created_at FROM operations_legacy;
+        DROP TABLE operations_legacy;
+      `);
+    }
+  }
+
+  #ensureControlledRunnerGrantSchema(): void {
+    const columns = this.#db.prepare('PRAGMA table_info(operations)').all() as Array<{ name: string }>;
+    for (const name of ['workspace_id', 'workspace_root', 'managed_thread_id']) {
+      if (!columns.some((column) => column.name === name)) {
+        this.#db.exec(`ALTER TABLE operations ADD COLUMN ${name} TEXT`);
+      }
+    }
     this.#db.exec(`
-      ALTER TABLE operations RENAME TO operations_legacy;
-      CREATE TABLE operations (
-        id TEXT PRIMARY KEY, proposal_id TEXT NOT NULL UNIQUE REFERENCES proposals(id),
-        phase TEXT NOT NULL, resume_phase TEXT, lease_digest TEXT,
-        lease_expires_at TEXT, failure_class TEXT,
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      CREATE TABLE IF NOT EXISTS controlled_runner_grants (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id),
+        user_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        workspace_root TEXT NOT NULL,
+        managed_thread_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL CHECK (status IN ('active','revoked')),
+        created_at TEXT NOT NULL,
+        revoked_at TEXT
       );
-      INSERT INTO operations(id,proposal_id,phase,created_at,updated_at)
-        SELECT id,proposal_id,phase,created_at,created_at FROM operations_legacy;
-      DROP TABLE operations_legacy;
+      CREATE INDEX IF NOT EXISTS controlled_runner_grant_lookup
+        ON controlled_runner_grants(user_id,workspace_id,workspace_root,managed_thread_id,status);
     `);
   }
 }
@@ -624,6 +755,54 @@ function validGithubOwner(value: string | undefined): string | undefined {
 
 function validFailureClass(value: string): string | undefined {
   return /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : undefined;
+}
+
+function validGrantEvidence(
+  value: ControlledRunnerGrantEvidence | undefined,
+  expectedRoot: string,
+): ControlledRunnerGrantEvidence | undefined {
+  return value
+    && validIdentifier(value.workspaceId)
+    && validRoot(value.workspaceRoot)
+    && value.workspaceRoot === expectedRoot
+    && validIdentifier(value.managedThreadId)
+    ? { ...value }
+    : undefined;
+}
+
+function validStoredGrantEvidence(
+  operation: OperationRow,
+): operation is OperationRow & {
+  workspace_id: string;
+  workspace_root: string;
+  managed_thread_id: string;
+} {
+  return validIdentifier(operation.workspace_id)
+    && validRoot(operation.workspace_root)
+    && validIdentifier(operation.managed_thread_id);
+}
+
+function validIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/.test(value);
+}
+
+function validRoot(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.startsWith('/home/god/Documents/Codex Workspace/')
+    && value.length <= 512
+    && !value.includes('\0')
+    && !value.split('/').includes('..');
+}
+
+function publicControlledRunnerGrant(row: ControlledRunnerGrantRow): ControlledRunnerGrant {
+  return {
+    userId: row.user_id,
+    workspaceId: row.workspace_id,
+    workspaceRoot: row.workspace_root,
+    managedThreadId: row.managed_thread_id,
+    operationId: row.operation_id,
+    status: 'active',
+  };
 }
 
 function renderSummary(projectName: string, summary: ProjectSummary): string {
