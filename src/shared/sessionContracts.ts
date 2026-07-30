@@ -46,6 +46,7 @@ export type AuditEvent = {
     | 'session.cancel'
     | 'session.close'
     | 'session.reopen'
+    | 'session.recover'
     | 'session.stream_open'
     | 'device_bridge.artifact'
     | 'device_bridge.inventory_binding'
@@ -91,8 +92,17 @@ export type ReopenSessionResponse = {
   auditEvent: AuditEvent;
 } | {
   reopened: false;
-  gate: 'session-limit';
+  gate: 'session-limit' | 'session-state';
   reason: string;
+};
+
+export type RecoverSessionResponse = {
+  recovered: true;
+  session: RoadexSession;
+  auditEvent: AuditEvent;
+} | {
+  recovered: false;
+  reason: 'active-runner' | 'invalid-lifecycle' | 'workspace-unavailable';
 };
 
 export type RoadexSession = {

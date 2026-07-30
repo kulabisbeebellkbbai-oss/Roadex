@@ -75,6 +75,8 @@ export type RoadexSessionState = {
   sendPrompt: (prompt: string) => Promise<void>;
   cancelPrompt: () => Promise<void>;
   closeCurrentSession: () => Promise<void>;
+  archiveThread: (sessionId: string) => Promise<void>;
+  recoverThread: (sessionId: string) => Promise<void>;
   reopenArchivedSession: (sessionId: string) => Promise<void>;
   openWorkspace: (workspaceId: string) => Promise<void>;
   createThread: (workspaceId: string) => Promise<void>;
@@ -291,6 +293,42 @@ export function useRoadexSession(): RoadexSessionState {
       setConnectionState('error');
     }
   }, [session, token]);
+
+  const archiveThread = useCallback(async (sessionId: string) => {
+    if (session?.id === sessionId) {
+      await closeCurrentSession();
+      return;
+    }
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      const response = await closeSession(token, sessionId);
+      const archived = await listArchivedSessions(token);
+      setSessions((existing) => existing.filter((candidate) => candidate.id !== sessionId));
+      setArchivedSessions(archived.sessions);
+      setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
+      setNotice('Thread archived. Active thread capacity is available.');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Thread archive failed.');
+    }
+  }, [closeCurrentSession, session?.id, token]);
+
+  const recoverThread = useCallback(async (sessionId: string) => {
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      const response = await reopenSession(token, sessionId);
+      setSessions((existing) => updateSessionLifecycle(existing, sessionId, 'ready'));
+      setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
+      if (session?.id === sessionId) {
+        setSession(response.session);
+        setConnectionState('connected');
+      }
+      setNotice('Thread recovered. Send a prompt to continue its existing Codex conversation.');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Thread recovery failed.');
+    }
+  }, [session?.id, token]);
 
   const reopenArchivedSession = useCallback(async (sessionId: string) => {
     setConnectionState('loading');
@@ -701,6 +739,8 @@ export function useRoadexSession(): RoadexSessionState {
       sendPrompt,
       cancelPrompt,
       closeCurrentSession,
+      archiveThread,
+      recoverThread,
       reopenArchivedSession,
       openWorkspace,
       createThread,
@@ -718,6 +758,7 @@ export function useRoadexSession(): RoadexSessionState {
     [
       auditEvents,
       archivedSessions,
+      archiveThread,
       attachManagedThread,
       cancelPrompt,
       closeCurrentSession,
@@ -745,6 +786,7 @@ export function useRoadexSession(): RoadexSessionState {
       loadConfirmedFirmware,
       flashConfirmedFirmware,
       reopenArchivedSession,
+      recoverThread,
       retry,
       sendPrompt,
       session,

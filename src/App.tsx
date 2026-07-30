@@ -16,6 +16,7 @@ import {
   PlugZap,
   Plus,
   RadioTower,
+  RotateCcw,
   ShieldCheck,
   Smartphone,
   TerminalSquare,
@@ -101,6 +102,9 @@ function App() {
   const managedProjectThreads = roadex.managedThreads.filter(
     (candidate) => candidate.project.id === selectedProject?.id && !attachedCodexThreadIds.has(candidate.id),
   );
+  const activeProjectThreads = roadex.sessions
+    .filter((candidate) => candidate.workspace.id === selectedProject?.id)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   const selectedRoadexThread = session && session.workspace.id === selectedProject?.id ? `roadex:${session.id}` : '';
   const selectedThreadLabel = roadex.managedThreads.find(
     (candidate) => candidate.id === session?.codexThreadId,
@@ -409,6 +413,41 @@ function App() {
             <div className="sidebar-project-meta" title={selectedProject?.root}>
               <span>{selectedProject?.name ?? 'No project selected'}</span>
               <strong>{session && session.workspace.id === selectedProject?.id ? session.lifecycle : 'browse'}</strong>
+            </div>
+            <div className="thread-actions-list" aria-label="Active thread management">
+              {activeProjectThreads.map((candidate) => (
+                <div className="thread-action-row" key={candidate.id}>
+                  <button
+                    className="thread-open-action"
+                    onClick={() => void roadex.selectThread(candidate.id)}
+                    type="button"
+                  >
+                    <span>{candidate.id.slice(-8)}</span>
+                    <strong>{candidate.lifecycle}</strong>
+                  </button>
+                  {candidate.lifecycle === 'blocked' || candidate.lifecycle === 'paused' ? (
+                    <button
+                      aria-label={`Recover thread ${candidate.id.slice(-8)}`}
+                      className="thread-icon-action"
+                      onClick={() => void roadex.recoverThread(candidate.id)}
+                      title="Recover thread"
+                      type="button"
+                    >
+                      <RotateCcw size={16} />
+                    </button>
+                  ) : <span aria-hidden="true" />}
+                  <button
+                    aria-label={`Archive thread ${candidate.id.slice(-8)}`}
+                    className="thread-icon-action"
+                    disabled={candidate.lifecycle === 'streaming'}
+                    onClick={() => void roadex.archiveThread(candidate.id)}
+                    title={candidate.lifecycle === 'streaming' ? 'Cancel active work before archiving' : 'Archive thread'}
+                    type="button"
+                  >
+                    <Archive size={16} />
+                  </button>
+                </div>
+              ))}
             </div>
             <button
               className="project-create-command"

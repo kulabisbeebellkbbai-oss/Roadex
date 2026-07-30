@@ -18,6 +18,7 @@ export function lifecycleAfterTranscript(
   const latest = runnerEvents[runnerEvents.length - 1];
   if (!latest) return session.lifecycle;
   if (isRunnerStart(latest)) return 'streaming';
+  if (session.lifecycle === 'ready' && isLegacyTimeoutFailure(runnerEvents)) return 'ready';
   return lifecycleForTerminalEvent(latest) ?? session.lifecycle;
 }
 
@@ -37,4 +38,10 @@ export function isRunnerTerminal(event: StreamEvent): boolean {
 
 function isRunnerStart(event: StreamEvent): boolean {
   return event.message === 'Starting Codex CLI runner.';
+}
+
+function isLegacyTimeoutFailure(events: StreamEvent[]): boolean {
+  const terminal = events.filter(isRunnerTerminal).slice(-2);
+  return terminal[0]?.message === 'Codex runner timed out and was stopped.'
+    && terminal[1]?.message === 'Codex runner failed.';
 }

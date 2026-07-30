@@ -50,6 +50,7 @@ import {
   type CancelSessionResponse,
   type CloseSessionResponse,
   type ReopenSessionResponse,
+  type RecoverSessionResponse,
   type PromptAcceptedResponse,
 } from '../shared/sessionContracts.js';
 import type {
@@ -565,6 +566,18 @@ export function reopenSession(
     saveState(state);
     return undefined;
   }
+  if (session.lifecycle === 'blocked' || session.lifecycle === 'paused' || session.lifecycle === 'ready') {
+    const recovered = recoverSession(state, user, sessionId);
+    return recovered?.recovered
+      ? { reopened: true, session: recovered.session, auditEvent: recovered.auditEvent }
+      : {
+          reopened: false,
+          gate: 'session-state',
+          reason: recovered?.reason === 'active-runner'
+            ? 'Active work must finish or be cancelled before recovery.'
+            : 'Session recovery is unavailable.',
+        };
+  }
   if (session.lifecycle !== 'closed') {
     appendAudit(
       state.audit,
@@ -630,6 +643,52 @@ export function reopenSession(
   );
   saveState(state);
   return { reopened: true, session, auditEvent };
+}
+
+export function recoverSession(
+  state: RoadexState,
+  user: UserProfile,
+  sessionId: string,
+): RecoverSessionResponse | undefined {
+  const session = getOwnedSession(state.sessions, user.id, sessionId);
+  if (!session || !isManagedSessionAuthorized(state, user, session)) {
+    appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Recover denied: session is unavailable.');
+    saveState(state);
+    return undefined;
+  }
+  if (state.activeRuns.has(sessionId)) {
+    appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Recover denied: active runner present.');
+    saveState(state);
+    return { recovered: false, reason: 'active-runner' };
+  }
+  if (session.lifecycle !== 'blocked' && session.lifecycle !== 'paused' && session.lifecycle !== 'ready') {
+    appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Recover denied: lifecycle is not recoverable.');
+    saveState(state);
+    return { recovered: false, reason: 'invalid-lifecycle' };
+  }
+  const workspaceDecision = resolveWorkspaceForUser(user, session.workspace.id);
+  if (!workspaceDecision.ok || workspaceDecision.workspace.root !== session.workspace.root) {
+    appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Recover denied: workspace is unavailable.');
+    saveState(state);
+    return { recovered: false, reason: 'workspace-unavailable' };
+  }
+
+  const alreadyReady = session.lifecycle === 'ready';
+  session.lifecycle = 'ready';
+  session.runActivity = undefined;
+  touchSession(session);
+  const auditEvent = appendAudit(
+    state.audit,
+    user,
+    'session.recover',
+    sessionId,
+    'allowed',
+    alreadyReady
+      ? 'Recovery confirmed session was already ready without starting a runner.'
+      : 'Recovered stopped session without starting a runner.',
+  );
+  saveState(state);
+  return { recovered: true, session, auditEvent };
 }
 
 export function requestDeviceBridgeIntake(

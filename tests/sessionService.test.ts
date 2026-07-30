@@ -23,6 +23,7 @@ import {
   listArchivedSessions,
   observeDeviceDescriptor,
   reopenSession,
+  recoverSession,
   reportDeviceBridgeWrite,
   registerDeviceArtifactMetadata,
   requestDeviceBridgeIntake,
@@ -2183,6 +2184,109 @@ describe('Roadex session service', () => {
     });
   });
 
+  it('recovers an owned blocked thread without changing its identity or transcript', async () => {
+    const state = createInitialState(fakeRunner('ok', 'thread-roadex-recover'), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+    submitPrompt(state, mockUser, response.session.id, 'preserve recovery history');
+    await flushRunner();
+    response.session.lifecycle = 'blocked';
+    const before = streamEventsForSession(state, mockUser, response.session.id);
+
+    const recovered = recoverSession(state, mockUser, response.session.id);
+
+    expect(recovered).toMatchObject({
+      recovered: true,
+      session: {
+        id: response.session.id,
+        lifecycle: 'ready',
+        codexThreadId: 'thread-roadex-recover',
+      },
+      auditEvent: { action: 'session.recover', outcome: 'allowed' },
+    });
+    expect(streamEventsForSession(state, mockUser, response.session.id)).toEqual(before);
+    expect(state.activeRuns.has(response.session.id)).toBe(false);
+  });
+
+  it('recovers a blocked thread through the protected reopen contract', async () => {
+    const state = createInitialState(fakeRunner('ok', 'thread-roadex-reopen-recover'), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+    response.session.codexThreadId = 'thread-roadex-reopen-recover';
+    response.session.lifecycle = 'blocked';
+
+    const reopened = reopenSession(state, mockUser, response.session.id);
+
+    expect(reopened).toMatchObject({
+      reopened: true,
+      session: {
+        id: response.session.id,
+        lifecycle: 'ready',
+        codexThreadId: 'thread-roadex-reopen-recover',
+      },
+      auditEvent: { action: 'session.recover', outcome: 'allowed' },
+    });
+  });
+
+  it('denies recovery across owners, during active work, and for closed sessions', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+    response.session.lifecycle = 'blocked';
+
+    expect(recoverSession(state, { ...mockUser, id: 'other-user' }, response.session.id)).toBeUndefined();
+    expect(response.session.lifecycle).toBe('blocked');
+    state.activeRuns.set(response.session.id, new AbortController());
+    expect(recoverSession(state, mockUser, response.session.id)).toEqual({
+      recovered: false,
+      reason: 'active-runner',
+    });
+    state.activeRuns.delete(response.session.id);
+    response.session.lifecycle = 'closed';
+    expect(recoverSession(state, mockUser, response.session.id)).toEqual({
+      recovered: false,
+      reason: 'invalid-lifecycle',
+    });
+  });
+
+  it('returns a structured conflict when reopen recovery is blocked by active work', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+    response.session.lifecycle = 'blocked';
+    state.activeRuns.set(response.session.id, new AbortController());
+
+    expect(reopenSession(state, mockUser, response.session.id)).toEqual({
+      reopened: false,
+      gate: 'session-state',
+      reason: 'Active work must finish or be cancelled before recovery.',
+    });
+  });
+
+  it('treats recovery of an already-ready owned thread as an idempotent success', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    const reopened = reopenSession(state, mockUser, response.session.id);
+
+    expect(reopened).toMatchObject({
+      reopened: true,
+      session: { id: response.session.id, lifecycle: 'ready' },
+      auditEvent: {
+        action: 'session.recover',
+        outcome: 'allowed',
+        summary: 'Recovery confirmed session was already ready without starting a runner.',
+      },
+    });
+    expect(state.activeRuns.has(response.session.id)).toBe(false);
+  });
+
   it('lists only archived sessions owned by the authenticated user', async () => {
     const state = createInitialState(fakeRunner(), createMemoryPersistence());
     const otherUser = { ...mockUser, id: 'other-user' };
@@ -2249,15 +2353,18 @@ describe('Roadex session service', () => {
     expect(state.audit.events.at(-1)?.summary).toContain('session_not_owned_or_missing');
   });
 
-  it('denies reopening a session unless it is closed and has no active runner', async () => {
+  it('makes ready recovery idempotent and denies archived reopen with an active runner', async () => {
     const state = createInitialState(fakeRunner(), createMemoryPersistence());
     const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
 
     expect(response.ok).toBe(true);
     if (!response.ok) return;
 
-    expect(reopenSession(state, mockUser, response.session.id)).toBeUndefined();
-    expect(state.audit.events.at(-1)?.summary).toContain('session_not_closed');
+    expect(reopenSession(state, mockUser, response.session.id)).toMatchObject({
+      reopened: true,
+      session: { lifecycle: 'ready' },
+      auditEvent: { action: 'session.recover', outcome: 'allowed' },
+    });
 
     closeSession(state, mockUser, response.session.id);
     state.activeRuns.set(response.session.id, new AbortController());

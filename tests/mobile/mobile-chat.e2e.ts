@@ -176,11 +176,11 @@ test('keeps desktop conversation history in a fixed scroll viewport', async ({ p
 });
 
 test('restores the selected owned thread after reload', async ({ page }) => {
-  const sessions = ['session-first', 'session-selected'].map((id) => ({
+  const sessions = ['session-first', 'session-selected'].map((id, index) => ({
     id,
     userId: 'owner',
     workspace: { id: 'roadex', name: 'Roadex', root: '/srv/roadex' },
-    lifecycle: 'ready',
+    lifecycle: index === 0 ? 'ready' : 'blocked',
     runnerMode: 'codex',
     transport: 'sse',
     deviceBridge: 'disabled',
@@ -221,10 +221,49 @@ test('restores the selected owned thread after reload', async ({ page }) => {
     contentType: 'text/event-stream',
     body: '',
   }));
+  await page.route('**/api/sessions/session-selected/reopen', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({
+      reopened: true,
+      session: { ...sessions[1], lifecycle: 'ready' },
+      auditEvent: {
+        id: 'audit-recover',
+        actorId: 'owner',
+        action: 'session.recover',
+        resourceId: 'session-selected',
+        outcome: 'allowed',
+        detail: 'Recovered stopped session without starting a runner.',
+        createdAt: '2026-07-30T00:01:00.000Z',
+      },
+    }),
+  }));
+  await page.route('**/api/sessions/session-first/close', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({
+      closed: true,
+      auditEvent: {
+        id: 'audit-close',
+        actorId: 'owner',
+        action: 'session.close',
+        resourceId: 'session-first',
+        outcome: 'allowed',
+        detail: 'Archived unused thread.',
+        createdAt: '2026-07-30T00:02:00.000Z',
+      },
+    }),
+  }));
   await page.evaluate(() => window.localStorage.setItem('roadex-selected-session', 'session-selected'));
   await page.reload();
   await page.getByRole('button', { name: 'Open navigation and controls' }).click();
   await expect(page.getByTestId('thread-selector')).toHaveValue('roadex:session-selected');
+  const recover = page.getByRole('button', { name: /Recover thread/ });
+  await expect(recover).toBeVisible();
+  await recover.click();
+  await expect(recover).toHaveCount(0);
+
+  const unusedArchive = page.getByRole('button', { name: 'Archive thread on-first' });
+  await unusedArchive.click();
+  await expect(unusedArchive).toHaveCount(0);
 
   await page.evaluate(() => window.localStorage.setItem('roadex-selected-session', 'session-other-owner'));
   await page.reload();

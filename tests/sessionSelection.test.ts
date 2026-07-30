@@ -23,6 +23,22 @@ describe('thread selection lifecycle', () => {
       .toBe('blocked');
   });
 
+  it('preserves authoritative ready state after the removed legacy timeout sequence', () => {
+    expect(lifecycleAfterTranscript(session('ready'), [
+      event('Starting Codex CLI runner.'),
+      event('Codex runner timed out and was stopped.'),
+      event('Codex runner failed.'),
+    ])).toBe('ready');
+  });
+
+  it('does not reinterpret an unrecovered legacy timeout sequence as ready', () => {
+    expect(lifecycleAfterTranscript(session('blocked'), [
+      event('Starting Codex CLI runner.'),
+      event('Codex runner timed out and was stopped.'),
+      event('Codex runner failed.'),
+    ])).toBe('blocked');
+  });
+
   it('restores only an exact active session returned for the current owner', () => {
     const first = session('ready', 'session-first');
     const selected = session('ready', 'session-selected');

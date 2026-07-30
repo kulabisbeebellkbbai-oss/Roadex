@@ -55,6 +55,12 @@ Browser thread selection is remembered by opaque session ID and restored only
 when that ID is present in the current authenticated user's active session
 list.
 
+The Projects panel lists each active thread with owner-scoped open and archive
+controls so users can free active-thread capacity without first switching
+threads. Blocked or paused threads also expose a recover control. Recovery
+uses `POST /api/sessions/:id/reopen`, preserves the session ID, transcript, and
+Codex thread, and never starts work or repeats a prompt.
+
 Archived sessions are listed through `GET /api/sessions` and restored through `POST /api/sessions/:id/reopen`. History is owner-scoped. Reopen preserves the session transcript and Codex thread, revalidates the workspace against current server policy, and is denied when that workspace already has an active session or stale runner state exists.
 
 Roadex limits live streams per session to protect the long-lived endpoint. Set `ROADEX_MAX_STREAMS_PER_SESSION` to a positive integer to override the default of four. Rejected excess streams are recorded as security denial audit events. Bootstrap audit and transcript previews are scoped to the authenticated user; `admin` and `security-reviewer` roles may inspect the global audit tail, but not another user's session transcript.

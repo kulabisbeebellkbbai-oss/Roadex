@@ -290,6 +290,10 @@ Status: Roadex-local worker and registrar deployed; gateway/live smoke pending
   remembers only an opaque selected session ID and restores it only after an
   exact match against the current authenticated user's active bootstrap
   sessions; stale or cross-user values fall back safely.
+- The Projects panel provides accessible per-thread archive actions to release
+  active-session capacity. Blocked or paused owned sessions can be recovered
+  through the existing protected reopen contract only when no runner is active;
+  recovery preserves identity and transcript and does not submit work.
 - Roadex-local worker/bootstrap/registrar configuration was deployed on
   2026-07-25 through Overseer plan
   `admin.roadex-project-creation-worker-20260725`.

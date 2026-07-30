@@ -260,6 +260,57 @@ button {
   color: #7ed8c4;
 }
 
+.thread-actions-list {
+  display: grid;
+  gap: 6px;
+  max-height: 210px;
+  overflow-y: auto;
+}
+
+.thread-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px 34px;
+  gap: 5px;
+  align-items: center;
+}
+
+.thread-open-action {
+  display: flex;
+  min-width: 0;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 9px;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 6px;
+  color: #ffffff;
+  background: rgb(255 255 255 / 7%);
+}
+
+.thread-open-action span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thread-open-action strong {
+  color: #aebdb6;
+  font-size: 0.7rem;
+}
+
+.thread-icon-action {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 6px;
+  color: #ffffff;
+  background: rgb(255 255 255 / 7%);
+}
+
 .trust-panel {
   display: flex;
   gap: 12px;
