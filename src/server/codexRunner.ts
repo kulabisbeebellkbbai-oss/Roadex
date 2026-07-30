@@ -1,9 +1,23 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import {
+  closeSync,
+  fchmodSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { constants as fsConstants } from 'node:fs';
+import { join } from 'node:path';
 import { createStreamEvent } from './mockRunner.js';
 import {
   CONTROLLED_RUNNER_CONFIG_OVERRIDES,
+  CONTROLLED_OPERATION_TOKEN_DIRECTORY,
+  controlledOperationConfigOverrides,
   resolveRunnerCapabilityProfile,
   type ControlledRunnerGrant,
   type RunnerCapabilitySelection,
@@ -16,6 +30,7 @@ export type RunnerPromptRequest = {
   onEvent?: (event: StreamEvent) => void;
   signal?: AbortSignal;
   capabilityGrant?: ControlledRunnerGrant;
+  controlledOperationToken?: string;
   onActivity?: () => void;
 };
 
@@ -94,7 +109,7 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
       };
     },
 
-    runPrompt({ session, prompt, onEvent, onActivity, signal, capabilityGrant }) {
+    runPrompt({ session, prompt, onEvent, onActivity, signal, capabilityGrant, controlledOperationToken }) {
       let capabilityProfile: RunnerCapabilitySelection;
       try {
         capabilityProfile = resolveRunnerCapabilityProfile({
@@ -115,6 +130,7 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
       }
       return runCodexPrompt({
         capabilityProfile,
+        controlledOperationToken,
         executable,
         activityHeartbeatMs,
         onActivity,
@@ -131,6 +147,7 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
 
 type RunCodexPromptOptions = {
   capabilityProfile: RunnerCapabilitySelection;
+  controlledOperationToken?: string;
   executable: string;
   activityHeartbeatMs: number;
   onActivity?: () => void;
@@ -151,20 +168,33 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
     options.onEvent?.(event);
   };
   pushEvent('system', 'Starting Codex CLI runner.');
-  const child = spawn(
-    options.executable,
-    buildCodexExecArgs(
-      options.workspaceRoot,
-      options.prompt,
-      options.codexThreadId,
-      options.capabilityProfile,
-    ),
-    {
-      cwd: options.workspaceRoot,
-      env: runnerEnvironment(),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
+  const controlledOperationTokenFile = (
+    options.capabilityProfile.mode === 'controlled-project-manager'
+    && options.controlledOperationToken
+  )
+    ? createControlledOperationTokenFile(options.controlledOperationToken)
+    : undefined;
+  let child;
+  try {
+    child = spawn(
+      options.executable,
+      buildCodexExecArgs(
+        options.workspaceRoot,
+        options.prompt,
+        options.codexThreadId,
+        options.capabilityProfile,
+        controlledOperationTokenFile,
+      ),
+      {
+        cwd: options.workspaceRoot,
+        env: runnerEnvironment(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+  } catch (error) {
+    removeControlledOperationTokenFile(controlledOperationTokenFile);
+    throw error;
+  }
 
   let stderr = '';
   let stdoutBuffer = '';
@@ -201,6 +231,7 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
   }).finally(() => {
     clearInterval(activityHeartbeat);
     options.signal?.removeEventListener('abort', abort);
+    removeControlledOperationTokenFile(controlledOperationTokenFile);
   });
 
   if (stdoutBuffer.trim()) {
@@ -243,7 +274,12 @@ export function buildCodexExecArgs(
   prompt: string,
   codexThreadId?: string,
   capabilityProfile: RunnerCapabilitySelection = { mode: 'restricted' },
+  controlledOperationTokenFile?: string,
 ): string[] {
+  const operationOverrides = controlledOperationConfigOverrides(controlledOperationTokenFile);
+  const effectivePrompt = operationOverrides.length
+    ? controlledOperationPrompt(prompt)
+    : prompt;
   const base = [
     'exec',
     '--json',
@@ -251,7 +287,10 @@ export function buildCodexExecArgs(
       ? [
           '--ignore-user-config',
           '--ignore-rules',
-          ...CONTROLLED_RUNNER_CONFIG_OVERRIDES.flatMap((override) => ['--config', override]),
+          ...[
+            ...CONTROLLED_RUNNER_CONFIG_OVERRIDES,
+            ...operationOverrides,
+          ].flatMap((override) => ['--config', override]),
         ]
       : []),
     '--sandbox',
@@ -260,9 +299,55 @@ export function buildCodexExecArgs(
     workspaceRoot,
   ];
   if (codexThreadId) {
-    return [...base, 'resume', codexThreadId, prompt];
+    return [...base, 'resume', codexThreadId, effectivePrompt];
   }
-  return [...base, prompt];
+  return [...base, effectivePrompt];
+}
+
+function controlledOperationPrompt(prompt: string): string {
+  return [
+    'Execute this approved directive only through the matching roadex-operations MCP tool.',
+    'For dependency installation and verification, call install_and_verify_workspace with no arguments.',
+    'For commit or push directives, call publish_git_changes with a concise imperative commit message.',
+    'Do not run npm installation, git commit, or git push commands directly.',
+    'Do not retry the operation after the tool returns; report its sanitized result.',
+    `Approved directive: ${prompt}`,
+  ].join('\n');
+}
+
+export function createControlledOperationTokenFile(token: string): string {
+  if (!/^[A-Za-z0-9_-]{20,16000}$/.test(token)) throw new Error('controlled_operation_token_invalid');
+  mkdirSync(CONTROLLED_OPERATION_TOKEN_DIRECTORY, { recursive: true, mode: 0o700 });
+  const directory = lstatSync(CONTROLLED_OPERATION_TOKEN_DIRECTORY);
+  if (
+    !directory.isDirectory()
+    || directory.isSymbolicLink()
+    || directory.uid !== process.getuid?.()
+    || (directory.mode & 0o077) !== 0
+  ) throw new Error('controlled_operation_token_directory_invalid');
+  const path = join(CONTROLLED_OPERATION_TOKEN_DIRECTORY, randomUUID());
+  const descriptor = openSync(
+    path,
+    fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    fchmodSync(descriptor, 0o600);
+    writeFileSync(descriptor, token, { encoding: 'utf8' });
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  return path;
+}
+
+function removeControlledOperationTokenFile(path: string | undefined): void {
+  if (!path) return;
+  try {
+    unlinkSync(path);
+  } catch {
+    // The MCP adapter normally removes the one-time file after reading it.
+  }
 }
 
 export function parseCodexJsonl(chunk: string): string[] {

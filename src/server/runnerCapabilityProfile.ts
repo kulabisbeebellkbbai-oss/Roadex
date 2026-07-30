@@ -1,5 +1,8 @@
 export const CONTROLLED_RUNNER_PROFILE = 'roadex-controlled-project-manager';
 export const CONTROLLED_OVERSEER_MCP = '/home/god/Documents/Codex Workspace/Roadex/dist-server/src/server/overseerMcp.js';
+export const CONTROLLED_OPERATIONS_MCP = '/home/god/Documents/Codex Workspace/Roadex/dist-server/src/server/controlledOperationsMcp.js';
+export const CONTROLLED_OPERATIONS_SOCKET = '/run/user/1000/roadex-controlled-operations.sock';
+export const CONTROLLED_OPERATION_TOKEN_DIRECTORY = '/run/user/1000/roadex-controlled-operation-tokens';
 export const CONTROLLED_RUNNER_CONFIG_OVERRIDES = [
   'approval_policy="never"',
   'sandbox_mode="workspace-write"',
@@ -18,6 +21,21 @@ export const CONTROLLED_RUNNER_CONFIG_OVERRIDES = [
   'mcp_servers.overseer.enabled_tools=["service_status","remote_testing_status","record_crew_message"]',
   'mcp_servers.overseer.default_tools_approval_mode="approve"',
 ] as const;
+
+export function controlledOperationConfigOverrides(tokenFile: string | undefined): string[] {
+  if (
+    !tokenFile
+    || !new RegExp(`^${CONTROLLED_OPERATION_TOKEN_DIRECTORY}/[0-9a-f-]{36}$`).test(tokenFile)
+  ) return [];
+  return [
+    'mcp_servers.roadex-operations.command="node"',
+    `mcp_servers.roadex-operations.args=["${CONTROLLED_OPERATIONS_MCP}"]`,
+    `mcp_servers.roadex-operations.env={ROADEX_CONTROLLED_OPERATION_TOKEN_FILE="${tokenFile}",ROADEX_CONTROLLED_OPERATION_SOCKET="${CONTROLLED_OPERATIONS_SOCKET}"}`,
+    'mcp_servers.roadex-operations.required=true',
+    'mcp_servers.roadex-operations.enabled_tools=["install_and_verify_workspace","publish_git_changes"]',
+    'mcp_servers.roadex-operations.default_tools_approval_mode="approve"',
+  ];
+}
 
 export type RunnerCapabilitySelection =
   | { mode: 'restricted' }

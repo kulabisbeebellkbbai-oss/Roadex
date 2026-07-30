@@ -87,6 +87,7 @@ import type {
   ControlledRunnerGrant,
   RunnerCapabilityContext,
 } from './runnerCapabilityProfile.js';
+import type { ControlledOperationGrantIssueContext } from './controlledOperationGrantIssuer.js';
 
 export type RoadexState = {
   sessions: SessionStore;
@@ -110,6 +111,7 @@ export type RoadexState = {
   bleVerificationProfiles: BleVerificationProfile[];
   usbDeviceProfiles: UsbDeviceProfile[];
   resolveControlledRunnerGrant: (context: RunnerCapabilityContext) => ControlledRunnerGrant | undefined;
+  issueControlledOperationToken: (context: ControlledOperationGrantIssueContext) => string | undefined;
 };
 
 type StreamSubscriber = {
@@ -201,6 +203,7 @@ export function createInitialState(
     deviceInventoryBindings: new Map(persisted.deviceInventoryBindings.map((record) => [record.id, record])),
     deviceDescriptorObservations: new Map(persisted.deviceDescriptorObservations.map((record) => [record.id, record])),
     resolveControlledRunnerGrant: () => undefined,
+    issueControlledOperationToken: () => undefined,
     ...deviceProfiles,
   };
 }
@@ -408,6 +411,26 @@ export function submitPrompt(
   } catch {
     capabilityGrant = undefined;
   }
+  let controlledOperationToken: string | undefined;
+  try {
+    controlledOperationToken = state.issueControlledOperationToken({
+      user,
+      session,
+      prompt: cleanPrompt,
+    });
+  } catch {
+    controlledOperationToken = undefined;
+  }
+  if (controlledOperationToken) {
+    appendAudit(
+      state.audit,
+      user,
+      'controlled_operation.grant',
+      pseudonymizeControlledOperationResource(session.id),
+      'allowed',
+      'Issued a short-lived controlled operation grant.',
+    );
+  }
 
   session.lifecycle = 'streaming';
   const runStartedAt = new Date().toISOString();
@@ -434,6 +457,7 @@ export function submitPrompt(
       prompt: cleanPrompt,
       signal: controller.signal,
       capabilityGrant,
+      controlledOperationToken,
       onActivity: () => {
         if (session.lifecycle !== 'streaming' || !session.runActivity) return;
         session.runActivity.lastObservedAt = new Date().toISOString();
@@ -2556,6 +2580,12 @@ function saveState(state: RoadexState): void {
     deviceInventoryBindings: [...state.deviceInventoryBindings.values()],
     deviceDescriptorObservations: [...state.deviceDescriptorObservations.values()],
   }));
+}
+
+function pseudonymizeControlledOperationResource(sessionId: string): string {
+  const key = process.env.ROADEX_CONTROLLED_OPERATIONS_AUDIT_HMAC_KEY;
+  if (!key || Buffer.byteLength(key) < 32) return 'controlled-operation-unavailable';
+  return `controlled-operation-${createHmac('sha256', key).update(sessionId).digest('hex').slice(0, 24)}`;
 }
 
 function persistStateSnapshot(

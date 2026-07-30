@@ -53,6 +53,9 @@ Standards:
 
 Role: Product Designer and UI Engineer
 
+Coding model: `gpt-5.3-codex-spark` primary, with `gpt-5.6` reserved for
+architecture, security-sensitive, or failed-implementation escalation.
+
 Responsibilities:
 
 - Shape user flows, interaction details, interface states, and frontend implementation tasks.
@@ -68,6 +71,9 @@ Standards:
 ### B.A.
 
 Role: Backend and Infrastructure Engineer
+
+Coding model: `gpt-5.3-codex-spark` primary, with `gpt-5.6` reserved for
+architecture, security-sensitive, or failed-implementation escalation.
 
 Responsibilities:
 
@@ -290,6 +296,10 @@ Status: Roadex-local worker and registrar deployed; gateway/live smoke pending
   remembers only an opaque selected session ID and restores it only after an
   exact match against the current authenticated user's active bootstrap
   sessions; stale or cross-user values fall back safely.
+- Controlled verification and Git publication are being designed as separate
+  default-off, prompt-bound host operations. General runner networking remains
+  denied; exact grants bind current workspace and repository state, and no live
+  broker or operation is authorized by source implementation alone.
 - The Projects panel provides accessible per-thread archive actions to release
   active-session capacity. Blocked or paused owned sessions can be recovered
   through the existing protected reopen contract only when no runner is active;
@@ -308,3 +318,26 @@ Status: Roadex-local worker and registrar deployed; gateway/live smoke pending
   created, and the Codex registry remained unchanged.
 - Sibling directory creation, GitHub creation, live controlled bootstrap, and
   live Codex registry mutation remain a separate explicit approval boundary.
+
+## Controlled Operations Deployment
+
+Status: deployed and locally verified; live DonutHole mutation not authorized
+
+- B.A. implemented the exact grant, broker, workspace inspector, durable replay
+  and audit, fixed executor, Unix listener, MCP transport, and dedicated npm
+  registry and GitHub SSH adapters.
+- Stockwell required and verified exact `roadex.service` cgroup peer pinning,
+  global-unicast-only DNS allowlisting, transactional installer rollback,
+  strict SSH host keys, fixed commands, key separation, and fail-closed gates.
+- Murdock's final gate passed all 39 test files and 308 tests, lint, production
+  build, zero-vulnerability dependency audit, diff checks, disposable npm
+  adapter smoke, forced installer rollback, and same-UID denial.
+- O'Brien/Overseer plans
+  `admin.roadex-controlled-operations-final-activation-20260730` and
+  `admin.roadex-controlled-operations-final-roadex-20260730` completed.
+- `roadex.service` and `roadex-controlled-operations.service` are active; the
+  Unix socket is owner-only and an arbitrary same-UID process outside the
+  Roadex service cgroup is denied.
+- No grant has been consumed, no controlled audit event exists, and no
+  DonutHole dependency install, lockfile creation, commit, or push occurred.
+- The next boundary is explicit approval for one live DonutHole operation.

@@ -1746,6 +1746,37 @@ describe('Roadex session service', () => {
     expect(receivedGrant).toBeUndefined();
   });
 
+  it('passes a server-issued controlled operation token without exposing it in audit records', async () => {
+    const originalAuditKey = process.env.ROADEX_CONTROLLED_OPERATIONS_AUDIT_HMAC_KEY;
+    process.env.ROADEX_CONTROLLED_OPERATIONS_AUDIT_HMAC_KEY = 'audit-key'.repeat(4);
+    try {
+      const runner = fakeRunner();
+      const originalRunPrompt = runner.runPrompt;
+      let receivedToken: string | undefined;
+      runner.runPrompt = async (request) => {
+        receivedToken = request.controlledOperationToken;
+        return originalRunPrompt(request);
+      };
+      const state = createInitialState(runner, createMemoryPersistence());
+      const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      state.issueControlledOperationToken = () => 'opaque-controlled-token';
+      expect(submitPrompt(state, mockUser, response.session.id, 'commit')).toMatchObject({ accepted: true });
+      await flushRunner();
+      expect(receivedToken).toBe('opaque-controlled-token');
+      const serialized = JSON.stringify(state.audit.events);
+      expect(serialized).not.toContain('opaque-controlled-token');
+      expect(state.audit.events).toContainEqual(expect.objectContaining({
+        action: 'controlled_operation.grant',
+        outcome: 'allowed',
+        resource: expect.stringMatching(/^controlled-operation-[a-f0-9]{24}$/),
+      }));
+    } finally {
+      restoreEnv('ROADEX_CONTROLLED_OPERATIONS_AUDIT_HMAC_KEY', originalAuditKey);
+    }
+  });
+
   it('publishes runner events to live subscribers for the owning session', async () => {
     const state = createInitialState(fakeRunner(), createMemoryPersistence());
     const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });

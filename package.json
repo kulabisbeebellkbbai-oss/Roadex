@@ -12,7 +12,8 @@
     "lint": "eslint .",
     "test": "vitest run --dir tests",
     "test:mobile": "playwright test --config playwright.mobile.config.ts",
-    "start": "node dist-server/server/index.js"
+    "start": "node dist-server/server/index.js",
+    "start:controlled-operations": "node dist-server/src/server/controlledOperationsHostMain.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -28,7 +29,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@eslint/js": "^9.17.0",
+    "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.0",
     "@types/node": "^24.10.1",
     "@types/react": "^19.0.2",
@@ -37,12 +38,12 @@
     "@types/w3c-web-serial": "^1.0.3",
     "ajv": "^8.20.0",
     "concurrently": "^9.2.1",
-    "eslint": "^9.17.0",
-    "eslint-plugin-react-hooks": "^5.1.0",
-    "eslint-plugin-react-refresh": "^0.4.16",
+    "eslint": "^10.8.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.3",
     "globals": "^15.14.0",
     "tsx": "^4.20.6",
-    "typescript-eslint": "^8.18.2",
+    "typescript-eslint": "^8.65.0",
     "vitest": "^4.1.10"
   }
 }

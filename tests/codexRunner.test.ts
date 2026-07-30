@@ -111,6 +111,43 @@ describe('createCodexRunner', () => {
     ]);
   });
 
+  it('adds the bounded operations MCP only when a fixed one-time token file is supplied', () => {
+    const tokenFile = '/run/user/1000/roadex-controlled-operation-tokens/12345678-1234-1234-1234-123456789abc';
+    const args = buildCodexExecArgs(
+      '/tmp/workspace',
+      'commit and push',
+      'thread-123',
+      {
+        mode: 'controlled-project-manager',
+        profile: 'roadex-controlled-project-manager',
+      },
+      tokenFile,
+    );
+
+    expect(args).toContain('mcp_servers.roadex-operations.command="node"');
+    expect(args).toContain(
+      `mcp_servers.roadex-operations.env={ROADEX_CONTROLLED_OPERATION_TOKEN_FILE="${tokenFile}",ROADEX_CONTROLLED_OPERATION_SOCKET="/run/user/1000/roadex-controlled-operations.sock"}`,
+    );
+    expect(args.at(-1)).toContain(
+      'Execute this approved directive only through the matching roadex-operations MCP tool.',
+    );
+    expect(args.at(-1)).toContain('Approved directive: commit and push');
+    expect(args.at(-1)).toContain('Do not run npm installation, git commit, or git push commands directly.');
+    expect(args.join('\n')).not.toContain('a'.repeat(40));
+    const invalidTokenArgs = buildCodexExecArgs(
+      '/tmp/workspace',
+      'continue',
+      'thread-123',
+      {
+        mode: 'controlled-project-manager',
+        profile: 'roadex-controlled-project-manager',
+      },
+      'bad token',
+    );
+    expect(invalidTokenArgs.join('\n')).not.toContain('roadex-operations');
+    expect(invalidTokenArgs.at(-1)).toBe('continue');
+  });
+
   it('extracts final answer text from Codex JSONL item events', () => {
     const messages = parseCodexJsonl(
       '{"type":"thread.started","thread_id":"abc"}\n' +

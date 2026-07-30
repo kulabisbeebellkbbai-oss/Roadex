@@ -41,6 +41,7 @@ import { bindLiveStreamCleanup, resolveLiveStreamKeepaliveMs } from './liveStrea
 import { ProjectCreationBroker, type TeamEvidence } from '../src/server/projectCreationBroker.js';
 import { isAvailableProjectCreationRoute } from '../src/server/projectCreationPolicy.js';
 import { ProjectCreationWorker } from '../src/server/projectCreationWorker.js';
+import { createControlledOperationGrantIssuer } from '../src/server/controlledOperationGrantIssuer.js';
 
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8780);
@@ -56,6 +57,7 @@ state.resolveControlledRunnerGrant = (context) =>
     managedThreadId: context.managedThreadId,
     codexThreadId: context.codexThreadId,
   });
+state.issueControlledOperationToken = createControlledOperationGrantIssuer(process.env);
 
 if (host !== '127.0.0.1' && host !== 'localhost') {
   throw new Error('Roadex API must bind to loopback until deployment gateway review is complete.');

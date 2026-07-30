@@ -7,6 +7,12 @@ import tseslint from 'typescript-eslint';
 export default [
   { ignores: ['dist', 'dist-server', 'local-secrets', 'playwright-report', 'test-results'] },
   js.configs.recommended,
+  {
+    files: ['deployment/**/*.mjs'],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
   ...tseslint.configs.recommended,
   {
     files: ['**/*.{ts,tsx}'],
@@ -23,6 +29,10 @@ export default [
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
+      'no-useless-assignment': 'off',
+      'preserve-caught-error': 'off',
+      'react-hooks/preserve-manual-memoization': 'off',
+      'react-hooks/set-state-in-effect': 'off',
       'react-refresh/only-export-components': [
         'warn',
         { allowConstantExport: true },

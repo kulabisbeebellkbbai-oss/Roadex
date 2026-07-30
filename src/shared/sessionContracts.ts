@@ -48,6 +48,8 @@ export type AuditEvent = {
     | 'session.reopen'
     | 'session.recover'
     | 'session.stream_open'
+    | 'controlled_operation.grant'
+    | 'controlled_operation.result'
     | 'device_bridge.artifact'
     | 'device_bridge.inventory_binding'
     | 'device_bridge.approval'

@@ -51,6 +51,16 @@ Revoking a durable grant, removing a static user/workspace entry, or setting the
 global gate to any value other than literal `true` takes effect on the next
 prompt.
 
+The controlled verification and publishing foundation is documented in
+[`controlled-operations-design.md`](controlled-operations-design.md). Its MCP
+configuration is omitted unless a valid opaque operation token is supplied.
+The bearer value is never placed in Codex process arguments: Roadex creates a
+mode-restricted one-time runtime file and the MCP adapter opens it without
+following symlinks, validates it, and unlinks it after reading. The live Roadex
+service issues such tokens only for an exact authorized directive, user,
+session, workspace, and repository binding. The dedicated host broker is
+separately gated and consumes each signed operation grant once.
+
 Rollback: remove the controlled-runner systemd drop-in, run
 `systemctl --user daemon-reload`, and restart `roadex.service`. This restores
 the restricted runner for every workspace.

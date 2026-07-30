@@ -1,0 +1,28 @@
+[Unit]
+Description=Roadex controlled operations host
+After=network-online.target roadex.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/Codex Workspace/Roadex
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/roadex/controlled-operations.env
+ExecStart=%h/.local/bin/npm run start:controlled-operations
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateDevices=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=false
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryMax=1G
+TasksMax=128
+
+[Install]
+WantedBy=default.target
