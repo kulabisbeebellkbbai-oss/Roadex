@@ -281,6 +281,15 @@ Status: Roadex-local worker and registrar deployed; gateway/live smoke pending
   every prompt. Static workspace entries remain a compatibility path.
 - Automatic enrollment source and local regression tests do not by themselves
   authorize rebuilding or restarting the live Roadex service.
+- Long-running Codex directives are supervised until child-process completion
+  rather than terminated by a fixed wall-clock deadline. The owning session
+  carries bounded active-run timestamps, the UI displays an accessible working
+  indicator, and explicit cancellation plus global runner concurrency limits
+  remain enforced.
+- Conversation history uses a fixed responsive scroll viewport. The browser
+  remembers only an opaque selected session ID and restores it only after an
+  exact match against the current authenticated user's active bootstrap
+  sessions; stale or cross-user values fall back safely.
 - Roadex-local worker/bootstrap/registrar configuration was deployed on
   2026-07-25 through Overseer plan
   `admin.roadex-project-creation-worker-20260725`.

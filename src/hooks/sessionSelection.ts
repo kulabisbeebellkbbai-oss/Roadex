@@ -1,5 +1,13 @@
 import type { RoadexSession, StreamEvent } from '../shared/sessionContracts';
 
+export function resolveRememberedSession(
+  sessions: RoadexSession[],
+  rememberedSessionId: string | undefined,
+): RoadexSession | undefined {
+  if (!rememberedSessionId) return sessions[0];
+  return sessions.find((session) => session.id === rememberedSessionId) ?? sessions[0];
+}
+
 export function lifecycleAfterTranscript(
   session: RoadexSession,
   events: StreamEvent[],

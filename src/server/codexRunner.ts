@@ -16,6 +16,7 @@ export type RunnerPromptRequest = {
   onEvent?: (event: StreamEvent) => void;
   signal?: AbortSignal;
   capabilityGrant?: ControlledRunnerGrant;
+  onActivity?: () => void;
 };
 
 export type RunnerPromptResult =
@@ -44,12 +45,12 @@ export type SessionRunner = {
 
 export type CodexRunnerOptions = {
   executable?: string;
-  timeoutMs?: number;
+  activityHeartbeatMs?: number;
 };
 
 export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunner {
   const executable = options.executable ?? process.env.ROADEX_CODEX_BIN ?? 'codex';
-  const timeoutMs = options.timeoutMs ?? Number(process.env.ROADEX_CODEX_TIMEOUT_MS ?? 600_000);
+  const activityHeartbeatMs = options.activityHeartbeatMs ?? 30_000;
 
   return {
     createSession({ userId, workspace }) {
@@ -93,7 +94,7 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
       };
     },
 
-    runPrompt({ session, prompt, onEvent, signal, capabilityGrant }) {
+    runPrompt({ session, prompt, onEvent, onActivity, signal, capabilityGrant }) {
       let capabilityProfile: RunnerCapabilitySelection;
       try {
         capabilityProfile = resolveRunnerCapabilityProfile({
@@ -115,12 +116,13 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
       return runCodexPrompt({
         capabilityProfile,
         executable,
+        activityHeartbeatMs,
+        onActivity,
         onEvent,
         prompt,
         signal,
         sessionId: session.id,
         codexThreadId: session.codexThreadId,
-        timeoutMs,
         workspaceRoot: session.workspace.root,
       });
     },
@@ -130,12 +132,13 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
 type RunCodexPromptOptions = {
   capabilityProfile: RunnerCapabilitySelection;
   executable: string;
+  activityHeartbeatMs: number;
+  onActivity?: () => void;
   onEvent?: (event: StreamEvent) => void;
   prompt: string;
   signal?: AbortSignal;
   sessionId: string;
   codexThreadId?: string;
-  timeoutMs: number;
   workspaceRoot: string;
 };
 
@@ -165,12 +168,11 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
 
   let stderr = '';
   let stdoutBuffer = '';
-  let timedOut = false;
   let aborted = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    stopChild(child);
-  }, options.timeoutMs);
+  const activityHeartbeat = setInterval(() => {
+    options.onActivity?.();
+  }, options.activityHeartbeatMs);
+  activityHeartbeat.unref();
   const abort = () => {
     aborted = true;
     stopChild(child);
@@ -180,6 +182,7 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   child.stdout.on('data', (chunk: string) => {
+    options.onActivity?.();
     const parsed = parseCodexJsonlStream(stdoutBuffer + chunk);
     stdoutBuffer = parsed.remainder;
     codexThreadId = parsed.codexThreadId ?? codexThreadId;
@@ -188,6 +191,7 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
     }
   });
   child.stderr.on('data', (chunk: string) => {
+    options.onActivity?.();
     stderr += chunk;
   });
 
@@ -195,7 +199,7 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
     child.on('error', reject);
     child.on('close', resolve);
   }).finally(() => {
-    clearTimeout(timeout);
+    clearInterval(activityHeartbeat);
     options.signal?.removeEventListener('abort', abort);
   });
 
@@ -210,11 +214,6 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
   if (aborted) {
     pushEvent('system', 'Codex runner was cancelled.');
     return { ok: false, events, reason: 'runner_cancelled', exitCode: exitCode ?? undefined, codexThreadId };
-  }
-
-  if (timedOut) {
-    pushEvent('system', 'Codex runner timed out and was stopped.');
-    return { ok: false, events, reason: 'runner_timeout', exitCode: exitCode ?? undefined, codexThreadId };
   }
 
   if (exitCode !== 0) {
@@ -232,10 +231,10 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
 }
 
 function stopChild(child: ChildProcess): void {
-  if (child.killed) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill('SIGTERM');
   setTimeout(() => {
-    if (!child.killed) child.kill('SIGKILL');
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
   }, 2_000).unref();
 }
 

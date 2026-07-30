@@ -27,7 +27,12 @@ import type {
   UserProfile,
   WorkspaceRef,
 } from '../shared/sessionContracts';
-import { isRunnerTerminal, lifecycleAfterTranscript, lifecycleForTerminalEvent } from './sessionSelection';
+import {
+  isRunnerTerminal,
+  lifecycleAfterTranscript,
+  lifecycleForTerminalEvent,
+  resolveRememberedSession,
+} from './sessionSelection';
 import { detectDeviceCapability, requestUsbDescriptor } from '../client/deviceCapability';
 import { probeEsp32Identity } from '../client/esp32IdentityProbe';
 import type {
@@ -129,7 +134,10 @@ export function useRoadexSession(): RoadexSessionState {
     setNotice(undefined);
     try {
       const result = await loginAndBootstrap();
-      const activeSession = result.bootstrap.sessions[0];
+      const activeSession = resolveRememberedSession(
+        result.bootstrap.sessions,
+        readSelectedSessionPreference(),
+      );
       setToken(result.token);
       setUser(result.bootstrap.user);
       setWorkspaces(result.bootstrap.workspaces);
@@ -144,7 +152,9 @@ export function useRoadexSession(): RoadexSessionState {
       const archived = await listArchivedSessions(result.token);
       setArchivedSessions(archived.sessions);
       setAuditEvents(result.bootstrap.auditEvents);
-      setTranscript(result.bootstrap.streamPreview);
+      setTranscript(result.bootstrap.streamPreview.filter(
+        (event) => !activeSession || event.sessionId === activeSession.id,
+      ));
       if (activeSession) {
         const events = await readSessionStream(result.token, activeSession.id);
         setTranscript(events);
@@ -159,6 +169,10 @@ export function useRoadexSession(): RoadexSessionState {
   useEffect(() => {
     void attach();
   }, [attach]);
+
+  useEffect(() => {
+    if (session?.id) writeSelectedSessionPreference(session.id);
+  }, [session?.id]);
 
   const sessionId = session?.id;
   useEffect(() => {
@@ -758,4 +772,23 @@ function updateSessionLifecycle(
   lifecycle: RoadexSession['lifecycle'],
 ): RoadexSession[] {
   return sessions.map((candidate) => candidate.id === sessionId ? { ...candidate, lifecycle } : candidate);
+}
+
+const SELECTED_SESSION_KEY = 'roadex-selected-session';
+
+function readSelectedSessionPreference(): string | undefined {
+  try {
+    const value = window.localStorage.getItem(SELECTED_SESSION_KEY)?.trim();
+    return value && value.length <= 160 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeSelectedSessionPreference(sessionId: string): void {
+  try {
+    window.localStorage.setItem(SELECTED_SESSION_KEY, sessionId);
+  } catch {
+    // Storage can be unavailable in privacy-restricted browser contexts.
+  }
 }

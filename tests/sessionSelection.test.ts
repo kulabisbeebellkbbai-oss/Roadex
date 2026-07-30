@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lifecycleAfterTranscript } from '../src/hooks/sessionSelection';
+import { lifecycleAfterTranscript, resolveRememberedSession } from '../src/hooks/sessionSelection';
 import type { RoadexSession, StreamEvent } from '../src/shared/sessionContracts';
 
 describe('thread selection lifecycle', () => {
@@ -22,11 +22,19 @@ describe('thread selection lifecycle', () => {
     expect(lifecycleAfterTranscript(session('streaming'), [event('Starting Codex CLI runner.'), event('Codex runner timed out after the server limit.')]))
       .toBe('blocked');
   });
+
+  it('restores only an exact active session returned for the current owner', () => {
+    const first = session('ready', 'session-first');
+    const selected = session('ready', 'session-selected');
+    expect(resolveRememberedSession([first, selected], selected.id)).toBe(selected);
+    expect(resolveRememberedSession([first, selected], 'session-other-owner')).toBe(first);
+    expect(resolveRememberedSession([first, selected], undefined)).toBe(first);
+  });
 });
 
-function session(lifecycle: RoadexSession['lifecycle']): RoadexSession {
+function session(lifecycle: RoadexSession['lifecycle'], id = 'session'): RoadexSession {
   return {
-    id: 'session',
+    id,
     userId: 'user',
     workspace: { id: 'roadex', name: 'Roadex', root: '/srv/roadex' },
     lifecycle,

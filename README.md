@@ -47,6 +47,14 @@ Project device capabilities are configured atomically through one admin-owned JS
 
 Prompt submission is asynchronous: `POST /api/sessions/:id/prompts` accepts work and the transcript is read from `GET /api/sessions/:id/stream` while Codex runs. Add `?live=1` for a long-lived SSE stream that sends the existing transcript followed by new runner events. The local API also supports `POST /api/sessions/:id/cancel` and `POST /api/sessions/:id/close`.
 
+Codex prompts do not have a fixed wall-clock deadline. Roadex supervises the
+child process until it exits, publishes terminal completion or failure, and
+keeps an owner-scoped working indicator active during long directives. Active
+runner concurrency remains bounded and users can explicitly cancel a run.
+Browser thread selection is remembered by opaque session ID and restored only
+when that ID is present in the current authenticated user's active session
+list.
+
 Archived sessions are listed through `GET /api/sessions` and restored through `POST /api/sessions/:id/reopen`. History is owner-scoped. Reopen preserves the session transcript and Codex thread, revalidates the workspace against current server policy, and is denied when that workspace already has an active session or stale runner state exists.
 
 Roadex limits live streams per session to protect the long-lived endpoint. Set `ROADEX_MAX_STREAMS_PER_SESSION` to a positive integer to override the default of four. Rejected excess streams are recorded as security denial audit events. Bootstrap audit and transcript previews are scoped to the authenticated user; `admin` and `security-reviewer` roles may inspect the global audit tail, but not another user's session transcript.

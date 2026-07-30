@@ -108,6 +108,11 @@ export type RoadexSession = {
   updatedAt: string;
   codexThreadId?: string;
   managedThreadId?: string;
+  runActivity?: {
+    status: 'working';
+    startedAt: string;
+    lastObservedAt: string;
+  };
 };
 
 export type ManagedThreadClaim = {

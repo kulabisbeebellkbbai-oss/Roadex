@@ -146,3 +146,88 @@ test('exposes controls and information views through the mobile drawer', async (
   await expect(menu).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('.transcript')).toBeVisible();
 });
+
+test('keeps desktop conversation history in a fixed scroll viewport', async ({ page }) => {
+  await page.getByTestId('layout-toggle').click();
+  await expect(page.locator('main.app-shell')).toHaveClass(/layout-desktop/);
+  const transcript = page.locator('.transcript');
+  const before = await page.evaluate(() => ({
+    bodyHeight: document.body.getBoundingClientRect().height,
+    transcriptHeight: document.querySelector<HTMLElement>('.transcript')?.getBoundingClientRect().height ?? 0,
+  }));
+  await transcript.evaluate((element) => {
+    for (let index = 0; index < 60; index += 1) {
+      const message = document.createElement('div');
+      message.className = 'message assistant';
+      message.textContent = `Desktop history fixture ${index}`;
+      element.append(message);
+    }
+  });
+  const after = await transcript.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    overflowY: getComputedStyle(element).overflowY,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(after.overflowY).toBe('auto');
+  expect(after.scrollHeight).toBeGreaterThan(after.clientHeight);
+  expect(after.clientHeight).toBeLessThanOrEqual(before.transcriptHeight + 1);
+  expect(await page.evaluate(() => document.body.getBoundingClientRect().height))
+    .toBeLessThanOrEqual(before.bodyHeight + 1);
+});
+
+test('restores the selected owned thread after reload', async ({ page }) => {
+  const sessions = ['session-first', 'session-selected'].map((id) => ({
+    id,
+    userId: 'owner',
+    workspace: { id: 'roadex', name: 'Roadex', root: '/srv/roadex' },
+    lifecycle: 'ready',
+    runnerMode: 'codex',
+    transport: 'sse',
+    deviceBridge: 'disabled',
+    gates: [],
+    createdAt: '2026-07-30T00:00:00.000Z',
+    updatedAt: '2026-07-30T00:00:00.000Z',
+  }));
+  await page.route('**/api/bootstrap', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({
+      user: { id: 'owner', displayName: 'Owner', authMode: 'protected-gateway', roles: ['user'] },
+      workspaces: [sessions[0].workspace],
+      sessions,
+      auditEvents: [],
+      streamPreview: [],
+      managedThreads: [],
+      deviceBridgePolicy: {
+        state: 'disabled',
+        approvedFoundation: true,
+        operations: ['esp32.flash'],
+        requestIntakeEnabled: false,
+        descriptorObservationEnabled: false,
+        operationsEnabled: false,
+        writeEnabled: false,
+        reason: 'disabled',
+      },
+      deviceInventoryBindingRefs: [],
+      serialVerificationProfiles: [],
+      bleVerificationProfiles: [],
+      usbDeviceProfiles: [],
+    }),
+  }));
+  await page.route('**/api/sessions', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ sessions: [] }),
+  }));
+  await page.route('**/api/sessions/*/stream*', (route) => route.fulfill({
+    contentType: 'text/event-stream',
+    body: '',
+  }));
+  await page.evaluate(() => window.localStorage.setItem('roadex-selected-session', 'session-selected'));
+  await page.reload();
+  await page.getByRole('button', { name: 'Open navigation and controls' }).click();
+  await expect(page.getByTestId('thread-selector')).toHaveValue('roadex:session-selected');
+
+  await page.evaluate(() => window.localStorage.setItem('roadex-selected-session', 'session-other-owner'));
+  await page.reload();
+  await page.getByRole('button', { name: 'Open navigation and controls' }).click();
+  await expect(page.getByTestId('thread-selector')).toHaveValue('roadex:session-first');
+});

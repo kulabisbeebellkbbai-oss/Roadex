@@ -106,7 +106,8 @@ function fakeRunner(result: 'ok' | 'failed' = 'ok', codexThreadId?: string): Ses
         updatedAt: now,
       };
     },
-    async runPrompt({ session, prompt, onEvent, signal }: RunnerPromptRequest) {
+    async runPrompt({ session, prompt, onActivity, onEvent, signal }: RunnerPromptRequest) {
+      onActivity?.();
       const events = [createStreamEvent(session.id, 'assistant', `Codex read: ${prompt}`)];
       for (const event of events) {
         if (signal?.aborted) break;
@@ -139,7 +140,8 @@ function controllableRunner(): SessionRunner {
         updatedAt: now,
       };
     },
-    async runPrompt({ session, onEvent, signal }: RunnerPromptRequest) {
+    async runPrompt({ session, onActivity, onEvent, signal }: RunnerPromptRequest) {
+      onActivity?.();
       onEvent?.(createStreamEvent(session.id, 'assistant', 'runner started'));
       await new Promise<void>((resolve) => {
         signal?.addEventListener('abort', () => resolve(), { once: true });
@@ -2390,6 +2392,34 @@ describe('Roadex session service', () => {
       outcome: 'denied',
     });
     expect(state.audit.events.at(-1)?.summary).toContain('session_not_owned_or_missing');
+  });
+
+  it('exposes bounded activity only while an owned runner is active', async () => {
+    const persistence = createMemoryPersistence();
+    const state = createInitialState(controllableRunner(), persistence);
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    submitPrompt(state, mockUser, response.session.id, 'long run');
+    await flushRunner();
+    expect(response.session).toMatchObject({
+      lifecycle: 'streaming',
+      runActivity: {
+        status: 'working',
+      },
+    });
+    expect(response.session.runActivity?.startedAt).toMatch(/Z$/);
+    expect(response.session.runActivity?.lastObservedAt).toMatch(/Z$/);
+
+    const persisted = persistence.load();
+    expect(persisted.sessions[0]?.lifecycle).toBe('ready');
+    expect(persisted.sessions[0]?.runActivity).toBeUndefined();
+
+    cancelSessionRun(state, mockUser, response.session.id);
+    await flushRunner();
+    expect(response.session.lifecycle).toBe('ready');
+    expect(response.session.runActivity).toBeUndefined();
   });
 
   it('adds an alert-style audit event for repeated inactive cancel attempts', async () => {

@@ -409,6 +409,12 @@ export function submitPrompt(
   }
 
   session.lifecycle = 'streaming';
+  const runStartedAt = new Date().toISOString();
+  session.runActivity = {
+    status: 'working',
+    startedAt: runStartedAt,
+    lastObservedAt: runStartedAt,
+  };
   touchSession(session);
   const started = appendAudit(
     state.audit,
@@ -427,7 +433,15 @@ export function submitPrompt(
       prompt: cleanPrompt,
       signal: controller.signal,
       capabilityGrant,
+      onActivity: () => {
+        if (session.lifecycle !== 'streaming' || !session.runActivity) return;
+        session.runActivity.lastObservedAt = new Date().toISOString();
+        touchSession(session);
+      },
       onEvent: (event) => {
+        if (session.runActivity) {
+          session.runActivity.lastObservedAt = event.at;
+        }
         addAndPublishStreamEvents(state, [event]);
       },
     })
@@ -435,6 +449,7 @@ export function submitPrompt(
       if (session.lifecycle === 'closed') return;
       if (session.managedThreadId && result.codexThreadId && result.codexThreadId !== session.managedThreadId) {
         session.lifecycle = 'blocked';
+        session.runActivity = undefined;
         touchSession(session);
         appendAudit(
           state.audit,
@@ -450,14 +465,17 @@ export function submitPrompt(
       updateCodexThreadId(session, result.codexThreadId);
       if (result.ok) {
         session.lifecycle = 'ready';
+        session.runActivity = undefined;
         touchSession(session);
         appendAudit(state.audit, user, 'session.runner_complete', sessionId, 'allowed', 'Codex runner completed.');
       } else if (result.reason === 'runner_cancelled') {
         session.lifecycle = 'ready';
+        session.runActivity = undefined;
         touchSession(session);
         appendAudit(state.audit, user, 'session.cancel', sessionId, 'allowed', 'Codex runner was cancelled.');
       } else {
         session.lifecycle = 'blocked';
+        session.runActivity = undefined;
         touchSession(session);
         appendAudit(state.audit, user, 'session.runner_failed', sessionId, 'denied', result.reason);
         addAndPublishStreamEvents(state, [createStreamEvent(session.id, 'system', 'Codex runner failed.')]);
@@ -466,6 +484,7 @@ export function submitPrompt(
     .catch((error: unknown) => {
       if (session.lifecycle === 'closed') return;
       session.lifecycle = 'blocked';
+      session.runActivity = undefined;
       touchSession(session);
       appendAudit(
         state.audit,

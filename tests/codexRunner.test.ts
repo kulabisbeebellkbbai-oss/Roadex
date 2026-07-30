@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildCodexExecArgs, createCodexRunner, parseCodexJsonl, parseCodexJsonlEvents } from '../src/server/codexRunner';
 
 describe('createCodexRunner', () => {
@@ -129,5 +132,34 @@ describe('createCodexRunner', () => {
       { message: 'linked', codexThreadId: undefined },
     ]);
     expect(parseCodexJsonl('{"type":"thread.started","thread_id":"thread-abc"}\n')).toEqual([]);
+  });
+
+  it('allows a long-running child to complete without a wall-clock deadline', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'roadex-runner-'));
+    const executable = join(directory, 'slow-codex');
+    writeFileSync(executable, [
+      '#!/bin/sh',
+      'sleep 0.05',
+      `printf '%s\\n' '{"type":"item.completed","item":{"text":"long run completed"}}'`,
+    ].join('\n'));
+    chmodSync(executable, 0o700);
+    const runner = createCodexRunner({ executable, activityHeartbeatMs: 5 });
+    const session = runner.createSession({
+      userId: 'user-1',
+      workspace: { id: 'roadex', name: 'Roadex', root: directory },
+    });
+    let activityChecks = 0;
+    const result = await runner.runPrompt({
+      session,
+      prompt: 'continue',
+      onActivity: () => {
+        activityChecks += 1;
+      },
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(activityChecks).toBeGreaterThan(0);
+    expect(result.events.some((event) => event.message === 'long run completed')).toBe(true);
+    expect(result.events.some((event) => event.message.includes('timed out'))).toBe(false);
   });
 });

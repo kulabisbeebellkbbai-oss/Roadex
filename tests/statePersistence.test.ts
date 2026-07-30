@@ -42,6 +42,26 @@ describe('state persistence', () => {
     expect(persistence.load().streamEvents).toHaveLength(1);
   });
 
+  it('recovers only sessions blocked by the removed legacy runner timeout', () => {
+    const timedOut = sessionFixture('timed-out', 'blocked', new Date(0).toISOString());
+    const failed = sessionFixture('failed', 'blocked', new Date(0).toISOString());
+    const state = serializeState(
+      {
+        sessions: [timedOut, failed],
+        streamEvents: [
+          { ...streamEvent('timeout', timedOut.id), kind: 'system', message: 'Codex runner timed out and was stopped.' },
+          { ...streamEvent('timeout-failed', timedOut.id), kind: 'system', message: 'Codex runner failed.' },
+          { ...streamEvent('ordinary-failed', failed.id), kind: 'system', message: 'Codex runner failed.' },
+        ],
+        auditEvents: [],
+      },
+      { now: 0, sessionRetentionMs: 1 },
+    );
+
+    expect(state.sessions.find((session) => session.id === timedOut.id)?.lifecycle).toBe('ready');
+    expect(state.sessions.find((session) => session.id === failed.id)?.lifecycle).toBe('blocked');
+  });
+
   it('trims stale closed sessions and their transcript events during serialization', () => {
     const now = Date.UTC(2026, 6, 17);
     const fresh = sessionFixture('fresh', 'ready', new Date(now).toISOString());

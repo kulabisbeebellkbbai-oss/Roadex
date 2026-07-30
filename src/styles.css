@@ -541,7 +541,33 @@ button {
 .transcript {
   display: grid;
   gap: 10px;
+  height: clamp(360px, 58vh, 720px);
   min-height: 270px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.status-dot.working {
+  color: #075f3f;
+  border-color: #78b99d;
+  background: #dff4e9;
+}
+
+.status-dot.working::before {
+  width: 7px;
+  height: 7px;
+  content: "";
+  border-radius: 50%;
+  background: currentColor;
+  animation: working-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes working-pulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .session-selectors {
@@ -733,6 +759,7 @@ button {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
+  height: auto;
   min-height: 0;
   padding: 16px 12px 22px;
   overflow-x: hidden;

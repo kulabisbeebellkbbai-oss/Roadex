@@ -111,6 +111,9 @@ function App() {
     roadex.connectionState === 'error' ||
     !session ||
     session.lifecycle !== 'ready';
+  const threadIsWorking = roadex.connectionState === 'streaming'
+    || session?.lifecycle === 'streaming'
+    || session?.runActivity?.status === 'working';
   const canProposeProject = roadex.user?.authMode === 'protected-gateway'
     && roadex.user.roles.includes('admin')
     && roadex.user.roles.includes('security-reviewer')
@@ -513,9 +516,9 @@ function App() {
             <span className="mobile-title">{session?.workspace.name ?? 'Roadex'}</span>
             <strong className="mobile-title">{selectedThreadLabel}</strong>
           </div>
-          <div className="session-pill">
+          <div aria-live="polite" className="session-pill" role="status">
             <Activity size={16} />
-            <span>{roadex.connectionState}</span>
+            <span>{threadIsWorking ? 'Working' : roadex.connectionState}</span>
           </div>
           <button
             data-testid="layout-toggle"
@@ -568,7 +571,13 @@ function App() {
                 <span className="section-label">Active stream</span>
                 <h2>Transcript</h2>
               </div>
-              <span className="status-dot">{session?.lifecycle ?? 'loading'}</span>
+              <span
+                aria-live="polite"
+                className={`status-dot${threadIsWorking ? ' working' : ''}`}
+                role="status"
+              >
+                {threadIsWorking ? 'Working' : session?.lifecycle ?? 'loading'}
+              </span>
             </div>
 
             <div

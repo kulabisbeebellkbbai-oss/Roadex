@@ -90,10 +90,16 @@ export function serializeState(state: Partial<PersistedRoadexState>, options: Re
 
 function sanitizeState(state: Partial<PersistedRoadexState>, now = Date.now()): PersistedRoadexState {
   const timestamp = new Date(now).toISOString();
+  const legacyTimeoutSessions = legacyTimeoutBlockedSessionIds(state.streamEvents ?? []);
   return {
     sessions: (state.sessions ?? []).map((session) => ({
       ...session,
-      lifecycle: session.lifecycle === 'streaming' || session.lifecycle === 'pending' ? 'ready' : session.lifecycle,
+      lifecycle: session.lifecycle === 'streaming'
+        || session.lifecycle === 'pending'
+        || (session.lifecycle === 'blocked' && legacyTimeoutSessions.has(session.id))
+        ? 'ready'
+        : session.lifecycle,
+      runActivity: undefined,
       deviceBridge: 'disabled',
       createdAt: session.createdAt ?? timestamp,
       updatedAt: session.updatedAt ?? session.createdAt ?? timestamp,
@@ -112,6 +118,32 @@ function sanitizeState(state: Partial<PersistedRoadexState>, now = Date.now()): 
     deviceInventoryBindings: (state.deviceInventoryBindings ?? []).flatMap((record) => sanitizeInventoryBinding(record) ?? []),
     deviceDescriptorObservations: (state.deviceDescriptorObservations ?? []).flatMap((record) => sanitizeDescriptorObservation(record) ?? []),
   };
+}
+
+function legacyTimeoutBlockedSessionIds(events: StreamEvent[]): Set<string> {
+  const terminalBySession = new Map<string, string[]>();
+  for (const event of events) {
+    if (
+      event.kind !== 'system'
+      || ![
+        'Codex runner completed.',
+        'Codex runner was cancelled.',
+        'Codex runner timed out and was stopped.',
+        'Codex runner failed.',
+      ].includes(event.message)
+    ) continue;
+    const terminal = terminalBySession.get(event.sessionId) ?? [];
+    terminal.push(event.message);
+    terminalBySession.set(event.sessionId, terminal.slice(-2));
+  }
+  return new Set(
+    [...terminalBySession.entries()]
+      .filter(([, terminal]) => (
+        terminal[0] === 'Codex runner timed out and was stopped.'
+        && terminal[1] === 'Codex runner failed.'
+      ))
+      .map(([sessionId]) => sessionId),
+  );
 }
 
 function applyRetention(state: PersistedRoadexState, options: RetentionOptions): PersistedRoadexState {
