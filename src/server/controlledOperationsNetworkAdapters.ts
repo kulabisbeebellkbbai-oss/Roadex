@@ -88,9 +88,26 @@ async function executeRestrictedNetworkCommand(input: {
   chmodSync(temporaryRoot, 0o700);
   try {
     const hostsPath = join(temporaryRoot, 'hosts');
+    const passwdPath = join(temporaryRoot, 'passwd');
+    const groupPath = join(temporaryRoot, 'group');
+    const uid = process.getuid?.();
+    const gid = process.getgid?.();
+    if (!Number.isSafeInteger(uid) || !Number.isSafeInteger(gid)) {
+      throw new ControlledOperationError('credential_configuration_invalid');
+    }
     writeFileSync(
       hostsPath,
       `127.0.0.1 localhost\n::1 localhost\n${addresses.map((address) => `${address} ${input.hostname}`).join('\n')}\n`,
+      { encoding: 'utf8', mode: 0o600, flag: 'wx' },
+    );
+    writeFileSync(
+      passwdPath,
+      `roadex:x:${uid}:${gid}:Roadex controlled operation:/nonexistent:/usr/sbin/nologin\n`,
+      { encoding: 'utf8', mode: 0o600, flag: 'wx' },
+    );
+    writeFileSync(
+      groupPath,
+      `roadex:x:${gid}:\n`,
       { encoding: 'utf8', mode: 0o600, flag: 'wx' },
     );
     return await spawnBounded(
@@ -125,6 +142,8 @@ async function executeRestrictedNetworkCommand(input: {
         '--symlink', 'usr/lib64', '/lib64',
         '--dir', '/etc',
         '--ro-bind', hostsPath, '/etc/hosts',
+        '--ro-bind', passwdPath, '/etc/passwd',
+        '--ro-bind', groupPath, '/etc/group',
         '--ro-bind', '/etc/nsswitch.conf', '/etc/nsswitch.conf',
         '--ro-bind', '/etc/ssl', '/etc/ssl',
         '--dir', '/home',

@@ -18,15 +18,32 @@ describe('controlled workspace inspector', () => {
       remote: 'git@github.com:owner/project.git',
       branch: 'main',
       visibility: 'private',
+      workingTreeState: 'clean',
+      aheadCount: 0,
+      behindCount: 0,
     });
     writeFileSync(join(root, 'src.ts'), 'export const value = 2;\n');
     const second = inspect(root);
+    expect(second.workingTreeState).toBe('dirty');
     expect(second.treeDigest).not.toBe(first.treeDigest);
     expect(second.manifestDigest).toBe(first.manifestDigest);
     git(root, ['commit', '--allow-empty', '-m', 'Change ancestry']);
     const third = inspect(root);
     expect(third.headCommit).not.toBe(second.headCommit);
     expect(third.treeDigest).not.toBe(second.treeDigest);
+  });
+
+  it('derives exact upstream ahead and behind counts', () => {
+    const root = repository();
+    git(root, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+    git(root, ['branch', '--set-upstream-to=origin/main', 'main']);
+    expect(inspect(root)).toMatchObject({ aheadCount: 0, behindCount: 0 });
+    git(root, ['commit', '--allow-empty', '-m', 'Local publication']);
+    expect(inspect(root)).toMatchObject({
+      workingTreeState: 'clean',
+      aheadCount: 1,
+      behindCount: 0,
+    });
   });
 
   it('rejects roots above the repository and non-GitHub SSH remotes', () => {

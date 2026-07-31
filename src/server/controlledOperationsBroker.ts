@@ -97,12 +97,12 @@ export class ControlledOperationsBroker {
           summary: sanitizeControlledOperationResult(result.summary).slice(0, 2_000),
           ...(!result.ok ? { reason: 'operation_failed' } : {}),
         };
-      } catch {
+      } catch (error) {
         response = {
           ok: false,
           operationId: authenticated.operationId,
           status: 'failed',
-          reason: 'operation_failed',
+          reason: error instanceof ControlledOperationError ? error.code : 'operation_failed',
         };
       }
       try {

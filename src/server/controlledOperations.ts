@@ -23,6 +23,9 @@ export type ControlledWorkspaceSnapshot = {
   headCommit: string;
   upstreamRef?: string;
   upstreamCommit?: string;
+  workingTreeState: 'clean' | 'dirty';
+  aheadCount: number;
+  behindCount: number;
   treeDigest: string;
   manifestDigest?: string;
   lockfileState: 'missing' | 'validated';
@@ -168,7 +171,8 @@ export function verifyControlledOperationGrant(input: {
   for (const field of [
     'workspaceId', 'workspaceRoot', 'managedThreadId', 'repository',
     'remote', 'branch', 'headCommit', 'upstreamRef', 'upstreamCommit',
-    'treeDigest', 'manifestDigest', 'lockfileState', 'visibility',
+    'workingTreeState', 'aheadCount', 'behindCount', 'treeDigest',
+    'manifestDigest', 'lockfileState', 'visibility',
   ] as const) {
     if (grant[field] !== input.current[field]) throw new ControlledOperationError('workspace_drift');
   }
@@ -281,12 +285,20 @@ export function buildControlledOperationPlan(
       });
     }
   } else {
-    commands.push(
-      fixedGit(['config', 'user.name', 'kulabisbeebellkbbai-oss']),
-      fixedGit(['config', 'user.email', 'kulabisbeebellkbbai-oss@users.noreply.github.com']),
-      fixedGit(['add', '--all']),
-      fixedGit(['commit', '-m', safeMessage]),
-    );
+    if (grant.intent === 'commit-and-push' && (
+      !grant.upstreamRef
+      || grant.behindCount !== 0
+    )) throw new ControlledOperationError('upstream_invalid');
+    if (grant.workingTreeState === 'dirty') {
+      commands.push(
+        fixedGit(['config', 'user.name', 'kulabisbeebellkbbai-oss']),
+        fixedGit(['config', 'user.email', 'kulabisbeebellkbbai-oss@users.noreply.github.com']),
+        fixedGit(['add', '--all']),
+        fixedGit(['commit', '-m', safeMessage]),
+      );
+    } else if (grant.intent === 'commit' || grant.aheadCount < 1) {
+      throw new ControlledOperationError('working_tree_clean');
+    }
     if (grant.intent !== 'commit') {
       commands.push({
         ...fixedGit(['push', '--receive-pack=git-receive-pack', 'origin', grant.branch]),
@@ -332,12 +344,19 @@ export function validatePackageManifests(
 }
 
 export function sanitizeControlledOperationResult(value: string): string {
+  return redactControlledOperationResult(value).slice(0, 12_000);
+}
+
+export function sanitizeControlledOperationTail(value: string): string {
+  return redactControlledOperationResult(value).slice(-6_000);
+}
+
+function redactControlledOperationResult(value: string): string {
   return value
     .replace(/gh[pousr]_[A-Za-z0-9_]+/g, '[redacted-token]')
     .replace(/sk-[A-Za-z0-9_-]+/g, '[redacted-token]')
     .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted-token]')
-    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[redacted-private-key]')
-    .slice(0, 12_000);
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[redacted-private-key]');
 }
 
 function signGrant(grant: ControlledOperationGrant, key: string): SignedControlledOperationGrant {
@@ -393,6 +412,18 @@ function validateSnapshot(snapshot: ControlledWorkspaceSnapshot): void {
     || (snapshot.upstreamRef !== undefined
       && snapshot.upstreamRef !== `refs/remotes/origin/${snapshot.branch}`)
     || (snapshot.upstreamCommit !== undefined && !/^[a-f0-9]{40,64}$/.test(snapshot.upstreamCommit))
+  ) throw new ControlledOperationError('upstream_invalid');
+  if (snapshot.workingTreeState !== 'clean' && snapshot.workingTreeState !== 'dirty') {
+    throw new ControlledOperationError('workspace_invalid');
+  }
+  if (
+    !Number.isSafeInteger(snapshot.aheadCount)
+    || snapshot.aheadCount < 0
+    || snapshot.aheadCount > 10_000
+    || !Number.isSafeInteger(snapshot.behindCount)
+    || snapshot.behindCount < 0
+    || snapshot.behindCount > 10_000
+    || (!snapshot.upstreamRef && (snapshot.aheadCount !== 0 || snapshot.behindCount !== 0))
   ) throw new ControlledOperationError('upstream_invalid');
   if (!/^[a-f0-9]{64}$/.test(snapshot.treeDigest)) throw new ControlledOperationError('digest_invalid');
   if (snapshot.manifestDigest && !/^[a-f0-9]{64}$/.test(snapshot.manifestDigest)) {

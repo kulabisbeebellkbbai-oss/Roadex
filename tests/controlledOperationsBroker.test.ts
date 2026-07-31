@@ -20,6 +20,9 @@ const snapshot: ControlledWorkspaceSnapshot = {
   headCommit: '1'.repeat(40),
   upstreamRef: 'refs/remotes/origin/main',
   upstreamCommit: '2'.repeat(40),
+  workingTreeState: 'dirty',
+  aheadCount: 0,
+  behindCount: 0,
   treeDigest: 'a'.repeat(64),
   manifestDigest: 'c'.repeat(64),
   lockfileState: 'validated',
@@ -207,6 +210,27 @@ describe('controlled operations broker', () => {
       commitMessage: 'Update fixture',
     })).toMatchObject({ ok: false, status: 'failed', reason: 'operation_failed' });
     expect(phases).toEqual(['accepted', 'failed']);
+  });
+
+  it('preserves fixed controlled failure classifications from execution', async () => {
+    const broker = new ControlledOperationsBroker({
+      hmacKey: key,
+      replayStore: new ControlledOperationReplayStore(),
+      resolveCurrentSnapshot: async () => snapshot,
+      auditPublication: async () => {},
+      executePlan: async () => {
+        throw new ControlledOperationError('network_resolution_failed');
+      },
+    });
+    expect(await broker.execute({
+      token: token('commit'),
+      tool: 'publish_git_changes',
+      commitMessage: 'Update fixture',
+    })).toMatchObject({
+      ok: false,
+      status: 'failed',
+      reason: 'network_resolution_failed',
+    });
   });
 
   it('reports an indeterminate audit state without claiming a completed mutation was denied', async () => {

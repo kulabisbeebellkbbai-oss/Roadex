@@ -11,6 +11,7 @@ import {
   ControlledOperationError,
   buildControlledOperationPlan,
   sanitizeControlledOperationResult,
+  sanitizeControlledOperationTail,
   type ControlledCommand,
   type ControlledOperationGrant,
   type ControlledOperationPlan,
@@ -79,9 +80,16 @@ export class ControlledOperationsExecutor {
         }
         const adapter = this.adapterFor(command.network);
         const result = await adapter.execute(command, anchoredRoot, grant.workspaceRoot, descriptor);
-        summaries.push(sanitizeControlledOperationResult(result.output));
+        const commandSummary = sanitizeControlledOperationResult(result.output).slice(-2_000);
+        summaries.push(commandSummary);
         if (result.exitCode !== 0) {
-          return { ok: false, summary: summaries.join('\n').slice(0, 12_000) };
+          return {
+            ok: false,
+            summary: [
+              ...summaries.slice(0, -1),
+              sanitizeControlledOperationTail(result.output),
+            ].join('\n').slice(-12_000),
+          };
         }
         if (command.postcondition === 'package-lock-provenance') {
           const current = await this.options.inspectWorkspace(grant, false, anchoredRoot);
@@ -236,6 +244,12 @@ function commitMessageFromPlan(plan: ControlledOperationPlan): string {
   });
   const index = command?.args.indexOf('commit') ?? -1;
   const message = index >= 0 ? command?.args[index + 2] : undefined;
+  if (
+    !message
+    && plan.intent === 'commit-and-push'
+    && plan.commands.length === 1
+    && plan.commands[0]?.network === 'github-ssh-only'
+  ) return 'Update project';
   if (!message) throw new ControlledOperationError('plan_invalid');
   return message;
 }
@@ -267,7 +281,8 @@ function assertSnapshotMatches(
 ): void {
   for (const field of [
     'workspaceId', 'workspaceRoot', 'managedThreadId', 'repository', 'remote', 'branch',
-    'headCommit', 'upstreamRef', 'upstreamCommit', 'treeDigest', 'manifestDigest',
+    'headCommit', 'upstreamRef', 'upstreamCommit', 'workingTreeState', 'aheadCount',
+    'behindCount', 'treeDigest', 'manifestDigest',
     'lockfileState', 'visibility',
   ] as const) {
     if (expected[field] !== current[field]) throw new ControlledOperationError('workspace_drift');
@@ -280,7 +295,8 @@ function assertLockfilePostcondition(
 ): void {
   for (const field of [
     'workspaceId', 'workspaceRoot', 'managedThreadId', 'repository', 'remote', 'branch',
-    'headCommit', 'upstreamRef', 'upstreamCommit', 'visibility',
+    'headCommit', 'upstreamRef', 'upstreamCommit', 'workingTreeState', 'aheadCount',
+    'behindCount', 'visibility',
   ] as const) {
     if (approved[field] !== current[field]) throw new ControlledOperationError('workspace_drift');
   }

@@ -24,6 +24,9 @@ const snapshot: ControlledWorkspaceSnapshot = {
   headCommit: '1'.repeat(40),
   upstreamRef: 'refs/remotes/origin/main',
   upstreamCommit: '2'.repeat(40),
+  workingTreeState: 'dirty',
+  aheadCount: 0,
+  behindCount: 0,
   treeDigest: 'a'.repeat(64),
   manifestDigest: 'b'.repeat(64),
   lockfileState: 'validated',
@@ -67,12 +70,47 @@ describe('controlled operations executor', () => {
     expect(auditPublication).toHaveBeenCalledTimes(1);
   });
 
+  it('accepts an exact push-only plan for a signed clean-ahead recovery', async () => {
+    const recoveryGrant = {
+      ...grant,
+      workingTreeState: 'clean' as const,
+      aheadCount: 1,
+      behindCount: 0,
+    };
+    const githubSsh = successfulAdapter();
+    const executor = createExecutor({ githubSsh });
+    await expect(executor.execute(
+      buildControlledOperationPlan(recoveryGrant, 'Message is not encoded in a push-only plan'),
+      recoveryGrant,
+    )).resolves.toMatchObject({ ok: true });
+    expect(githubSsh.execute).toHaveBeenCalledTimes(1);
+  });
+
   it('fails closed when a required network adapter is absent', async () => {
     const executor = createExecutor({ noNetwork: successfulAdapter() });
     await expect(executor.execute(
       buildControlledOperationPlan(grant, 'Update project'),
       grant,
     )).rejects.toEqual(new ControlledOperationError('network_adapter_unavailable'));
+  });
+
+  it('preserves the redacted terminal failure tail', async () => {
+    const failed = {
+      execute: vi.fn(async () => ({
+        exitCode: 1,
+        output: `${'commit output\n'.repeat(2_000)}ghp_abcdefghijklmnopqrstuvwxyz123456\nssh terminal failure`,
+      })),
+    };
+    const executor = createExecutor({ noNetwork: failed, githubSsh: successfulAdapter() });
+    await expect(executor.execute(
+      buildControlledOperationPlan(grant, 'Update project'),
+      grant,
+    )).resolves.toMatchObject({
+      ok: false,
+      summary: expect.stringContaining('ssh terminal failure'),
+    });
+    const result = await executor.execute(buildControlledOperationPlan(grant, 'Update project'), grant);
+    expect(result.summary).not.toContain('abcdefghijklmnopqrstuvwxyz');
   });
 
   it('requires a validated generated lock before npm ci', async () => {

@@ -9,6 +9,7 @@ import {
   controlledOperationPolicyFromEnv,
   issueControlledOperationGrant,
   sanitizeControlledOperationResult,
+  sanitizeControlledOperationTail,
   validatePackageManifests,
   verifyAndConsumeControlledOperationGrant,
   type ControlledWorkspaceSnapshot,
@@ -25,6 +26,9 @@ const snapshot: ControlledWorkspaceSnapshot = {
   headCommit: '1'.repeat(40),
   upstreamRef: 'refs/remotes/origin/main',
   upstreamCommit: '2'.repeat(40),
+  workingTreeState: 'dirty',
+  aheadCount: 0,
+  behindCount: 0,
   treeDigest: 'a'.repeat(64),
   manifestDigest: 'b'.repeat(64),
   lockfileState: 'validated',
@@ -83,6 +87,13 @@ describe('controlled operation authorization', () => {
       current: { ...snapshot, treeDigest: 'c'.repeat(64) },
       now: 2_000,
     })).toThrowError(new ControlledOperationError('workspace_drift'));
+    expect(() => verifyAndConsumeControlledOperationGrant({
+      token: issue({ now: 1_000 })!,
+      hmacKey: key,
+      replayStore: new ControlledOperationReplayStore(),
+      current: { ...snapshot, aheadCount: 1 },
+      now: 2_000,
+    })).toThrowError(new ControlledOperationError('workspace_drift'));
   });
 
   it('rejects expired and tampered grants', () => {
@@ -131,6 +142,35 @@ describe('controlled operation authorization', () => {
     expect(() => buildControlledOperationPlan(publishGrant, 'bad\nmessage')).toThrowError(
       new ControlledOperationError('commit_message_invalid'),
     );
+  });
+
+  it('builds push-only recovery only for a clean strictly-ahead branch', () => {
+    const recovery = buildControlledOperationPlan({
+      ...snapshot,
+      ...verify(issue()!),
+      workingTreeState: 'clean',
+      aheadCount: 1,
+      behindCount: 0,
+    }, 'Ignored for recovery');
+    expect(recovery.commands).toHaveLength(1);
+    expect(recovery.commands[0]).toMatchObject({
+      network: 'github-ssh-only',
+      args: expect.arrayContaining(['push', 'origin', 'main']),
+    });
+    expect(() => buildControlledOperationPlan({
+      ...snapshot,
+      ...verify(issue()!),
+      workingTreeState: 'clean',
+      aheadCount: 1,
+      behindCount: 1,
+    })).toThrowError(new ControlledOperationError('upstream_invalid'));
+    expect(() => buildControlledOperationPlan({
+      ...snapshot,
+      ...verify(issue()!),
+      workingTreeState: 'clean',
+      aheadCount: 0,
+      behindCount: 0,
+    })).toThrowError(new ControlledOperationError('working_tree_clean'));
   });
 
   it('requires lockfile provenance between metadata resolution and package extraction', () => {
@@ -193,6 +233,9 @@ describe('controlled operation authorization', () => {
     expect(sanitized).not.toContain('abcdefghijklmnopqrstuvwxyz');
     expect(sanitized).not.toContain('abc.def.ghi');
     expect(sanitized).not.toContain('private-material');
+    const tail = sanitizeControlledOperationTail(`${'prefix\n'.repeat(2_000)}${value}\nterminal failure`);
+    expect(tail).toContain('terminal failure');
+    expect(tail).not.toContain('private-material');
   });
 });
 

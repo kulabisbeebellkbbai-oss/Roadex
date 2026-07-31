@@ -68,6 +68,9 @@ export function inspectControlledWorkspace(input: {
   const upstreamCommit = upstreamRef
     ? git(root, ['rev-parse', '--verify', `${upstreamRef}^{commit}`]).trim()
     : undefined;
+  const [behindCount, aheadCount] = upstreamRef
+    ? parseAheadBehind(git(root, ['rev-list', '--left-right', '--count', `${upstreamRef}...HEAD`]))
+    : [0, 0];
   const status = git(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
   const changedPaths = parseStatusPaths(status);
   const manifests = collectManifests(root);
@@ -83,11 +86,28 @@ export function inspectControlledWorkspace(input: {
     headCommit,
     upstreamRef,
     upstreamCommit,
+    workingTreeState: status.length === 0 ? 'clean' : 'dirty',
+    aheadCount,
+    behindCount,
     treeDigest: hashWorkspaceState(root, status, changedPaths, headCommit, upstreamRef, upstreamCommit),
     manifestDigest: hashManifestState(manifests, lockfile),
     lockfileState: lockfile.state,
     visibility: input.visibility,
   };
+}
+
+function parseAheadBehind(value: string): [number, number] {
+  const match = value.trim().match(/^(\d+)\s+(\d+)$/);
+  if (!match) throw new ControlledOperationError('upstream_invalid');
+  const behind = Number(match[1]);
+  const ahead = Number(match[2]);
+  if (
+    !Number.isSafeInteger(behind)
+    || !Number.isSafeInteger(ahead)
+    || behind > 10_000
+    || ahead > 10_000
+  ) throw new ControlledOperationError('upstream_invalid');
+  return [behind, ahead];
 }
 
 export function auditControlledPublication(input: {
