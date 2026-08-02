@@ -548,22 +548,32 @@ function sanitizeApprovalWait(record: unknown): ApprovalWaitRecord | undefined {
   if (!isApprovalAuthorityClass(candidate.authorityClass)) return undefined;
   const consoleSurface = consoleForAuthority(candidate.authorityClass);
   const checkAttempt = candidate.checkAttempt as number;
+  const id = cleanCanonicalOpaqueString(candidate.id, 128);
+  const sessionId = cleanCanonicalOpaqueString(candidate.sessionId, 128);
+  const userId = cleanCanonicalOpaqueString(candidate.userId, 128);
+  const projectId = cleanCanonicalOpaqueString(candidate.projectId, 128);
+  const workspaceId = cleanCanonicalOpaqueString(candidate.workspaceId, 128);
+  const managedThreadId = cleanCanonicalOpaqueString(candidate.managedThreadId, 128);
+  const approvalRef = cleanCanonicalOpaqueString(candidate.approvalRef, 256);
+  const resourceRef = cleanCanonicalOpaqueString(candidate.resourceRef, 256);
+  const decisionVersion = cleanCanonicalOpaqueString(candidate.decisionVersion, 128);
+  const continuationId = cleanCanonicalOpaqueString(candidate.continuationId, 256);
   if (!(
-    validBoundedString(candidate.id, 128) &&
-    validBoundedString(candidate.sessionId, 128) &&
-    validBoundedString(candidate.userId, 128) &&
-    validBoundedString(candidate.projectId, 128) &&
-    validBoundedString(candidate.workspaceId, 128) &&
-    validBoundedString(candidate.managedThreadId, 128) &&
+    id !== undefined &&
+    sessionId !== undefined &&
+    userId !== undefined &&
+    projectId !== undefined &&
+    workspaceId !== undefined &&
+    managedThreadId !== undefined &&
+    approvalRef !== undefined &&
+    resourceRef !== undefined &&
     validBoundedString(candidate.consoleSurface, 16) &&
     candidate.consoleSurface === consoleSurface &&
     candidate.provider === 'overseer' &&
-    validBoundedString(candidate.approvalRef, 256) &&
-    validBoundedString(candidate.resourceRef, 256) &&
     validBoundedString(candidate.subject, 256) &&
     isApprovalWaitState(candidate.state) &&
-    validBoundedString(candidate.decisionVersion, 128) &&
-    validBoundedString(candidate.continuationId, 256) &&
+    decisionVersion !== undefined &&
+    continuationId !== undefined &&
     Number.isSafeInteger(checkAttempt) &&
     checkAttempt >= 0 &&
     validIsoDate(candidate.nextCheckAt) &&
@@ -575,21 +585,21 @@ function sanitizeApprovalWait(record: unknown): ApprovalWaitRecord | undefined {
     validOptionalIsoDate(candidate.resumedAt)
   )) return undefined;
   return {
-    id: cleanOptionalString(candidate.id)!,
-    sessionId: cleanOptionalString(candidate.sessionId)!,
-    userId: cleanOptionalString(candidate.userId)!,
-    projectId: cleanOptionalString(candidate.projectId)!,
-    workspaceId: cleanOptionalString(candidate.workspaceId)!,
-    managedThreadId: cleanOptionalString(candidate.managedThreadId)!,
+    id,
+    sessionId,
+    userId,
+    projectId,
+    workspaceId,
+    managedThreadId,
     provider: 'overseer',
-    approvalRef: cleanOptionalString(candidate.approvalRef)!,
-    resourceRef: cleanOptionalString(candidate.resourceRef)!,
+    approvalRef,
+    resourceRef,
     authorityClass: candidate.authorityClass,
     consoleSurface,
     subject: cleanOptionalString(candidate.subject)!,
     state: candidate.state,
-    decisionVersion: cleanOptionalString(candidate.decisionVersion)!,
-    continuationId: cleanOptionalString(candidate.continuationId)!,
+    decisionVersion,
+    continuationId,
     checkAttempt,
     nextCheckAt: cleanOptionalIsoDate(candidate.nextCheckAt)!,
     createdAt: cleanOptionalIsoDate(candidate.createdAt)!,
@@ -656,13 +666,13 @@ function validIsoDate(value: unknown): boolean {
   if (Number.isNaN(expectedSeconds)) return false;
   const timezoneMinutes = match[8] === 'Z'
     ? 0
-    : (Number(match[9]) * 60 + Number(match[10])) * (match[8] === '-' ? -1 : 1);
+    : ((Number(match[10]) * 60 + Number(match[11])) * (match[9] === '-' ? -1 : 1));
   if (
     Number.isNaN(timezoneMinutes)
     || hour > 23
     || minute > 59
-    || Number(match[9]) > 23
-    || Number(match[10]) > 59
+    || Number(match[10]) > 23
+    || Number(match[11]) > 59
   ) return false;
   const utcTime = Date.UTC(year, month - 1, day, hour, minute, second, fraction) - timezoneMinutes * 60000;
   const parsed = new Date(value);
@@ -677,6 +687,20 @@ function validOptionalIsoDate(value: unknown): boolean {
 function validBoundedString(value: unknown, maxLength: number): boolean {
   const cleaned = cleanOptionalString(value);
   return Boolean(cleaned && cleaned.length <= maxLength);
+}
+
+function validCanonicalOpaqueString(value: unknown, maxLength: number): boolean {
+  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) return false;
+  if (value.trim() !== value) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.charCodeAt(index);
+    if (codePoint <= 0x1f || codePoint === 0x7f) return false;
+  }
+  return true;
+}
+
+function cleanCanonicalOpaqueString(value: unknown, maxLength: number): string | undefined {
+  return validCanonicalOpaqueString(value, maxLength) ? (value as string) : undefined;
 }
 
 function validOptionalBoundedString(value: unknown, maxLength: number): boolean {
