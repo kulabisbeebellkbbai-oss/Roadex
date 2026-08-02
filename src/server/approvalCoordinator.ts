@@ -118,6 +118,7 @@ export class ApprovalCoordinator {
   readonly #sessionGeneration: Map<string, number>;
   readonly #sessionLocks: Map<string, Promise<unknown>>;
   readonly #waitIdReservations: Set<string>;
+  readonly #closedSessionRetirements: ApprovalWaitRecord[];
   #waitIdReservationLock = Promise.resolve();
 
   #tickInProgress = false;
@@ -139,6 +140,23 @@ export class ApprovalCoordinator {
     this.#sessionGeneration = new Map();
     this.#sessionLocks = new Map();
     this.#waitIdReservations = new Set();
+    this.#closedSessionRetirements = [];
+
+    const retiredAt = this.#clock.now();
+    this.#sessions
+      .filter((session) => session.lifecycle === 'closed')
+      .forEach((session) => {
+        this.#waits
+          .filter((wait) => wait.sessionId === session.id && WAIT_STATES_BLOCKING.has(wait.state))
+          .forEach((wait) => {
+            wait.state = 'session-closed';
+            wait.updatedAt = retiredAt;
+            wait.nextCheckAt = retiredAt;
+            delete wait.dispatchReservedAt;
+            delete wait.runnerRunId;
+            this.#closedSessionRetirements.push(wait);
+          });
+      });
 
     this.#sessions.forEach((session) => {
       this.projectSessionForWait(session);
@@ -421,6 +439,10 @@ export class ApprovalCoordinator {
 
     this.#tickInProgress = true;
     try {
+      if (!await this.#persistClosedSessionRetirements()) {
+        return;
+      }
+
       const nowMs = Date.parse(this.#clock.now());
       if (!Number.isFinite(nowMs)) {
         return;
@@ -455,6 +477,25 @@ export class ApprovalCoordinator {
     } finally {
       this.#tickInProgress = false;
     }
+  }
+
+  async #persistClosedSessionRetirements(): Promise<boolean> {
+    if (this.#closedSessionRetirements.length === 0) {
+      return true;
+    }
+
+    try {
+      await Promise.resolve(this.#callbacks.persist());
+    } catch {
+      return false;
+    }
+
+    const retired = this.#closedSessionRetirements.splice(0, this.#closedSessionRetirements.length);
+    for (const wait of retired) {
+      this.#publish(wait.sessionId, this.#terminalCopy('session-closed'));
+      this.#audit('approval_wait.status', 'denied', this.#auditSummary(wait), wait.sessionId);
+    }
+    return true;
   }
 
   async closeSessionWait(sessionId: string): Promise<void> {
@@ -519,6 +560,7 @@ export class ApprovalCoordinator {
   }
 
   async #refreshWait(wait: ApprovalWaitRecord, session: RoadexSession): Promise<void> {
+    const sessionGeneration = this.#sessionGeneration.get(session.id) ?? 0;
     let status: NormalizedApprovalStatus | undefined;
     let shouldDispatch = false;
     try {
@@ -532,12 +574,11 @@ export class ApprovalCoordinator {
     }
 
     await this.#withSessionLock(wait.sessionId, async () => {
-      const sessionGeneration = this.#sessionGeneration.get(session.id) ?? 0;
       const sessionBefore = this.snapshotSession(session);
       const waitBefore = this.snapshotWait(wait);
       const now = this.#clock.now();
 
-      if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['pending', 'verification-delayed'])) {
+      if (!this.#isRefreshWaitCurrentAndCanonical(wait, session, sessionGeneration)) {
         return;
       }
 
@@ -1275,13 +1316,17 @@ export class ApprovalCoordinator {
       return false;
     }
 
-    const retryAtMs = Date.parse(value);
-    const nowMs = Date.parse(now);
-    if (!Number.isFinite(retryAtMs) || !Number.isFinite(nowMs)) {
+    const retryAtTime = new Date(value).getTime();
+    if (!Number.isFinite(retryAtTime) || new Date(retryAtTime).toISOString() !== value) {
       return false;
     }
 
-    const delayMs = retryAtMs - nowMs;
+    const nowMs = new Date(now).getTime();
+    if (!Number.isFinite(nowMs)) {
+      return false;
+    }
+
+    const delayMs = retryAtTime - nowMs;
     if (delayMs <= 0) {
       return false;
     }
@@ -1292,6 +1337,28 @@ export class ApprovalCoordinator {
   #isClosedDuringDispatch(session: RoadexSession, sessionGeneration: number): boolean {
     const currentGeneration = this.#sessionGeneration.get(session.id) ?? sessionGeneration;
     return currentGeneration > sessionGeneration;
+  }
+
+  #isRefreshWaitCurrentAndCanonical(wait: ApprovalWaitRecord, session: RoadexSession, sessionGeneration: number): boolean {
+    if (!this.#waits.includes(wait)) {
+      return false;
+    }
+    if ((this.#sessionGeneration.get(session.id) ?? 0) !== sessionGeneration) {
+      return false;
+    }
+    if (session.id !== wait.sessionId || session.userId !== wait.userId || session.workspace.id !== wait.workspaceId) {
+      return false;
+    }
+    if (!session.managedThreadId || session.managedThreadId !== wait.managedThreadId || session.codexThreadId !== session.managedThreadId) {
+      return false;
+    }
+    if (session.lifecycle !== 'paused') {
+      return false;
+    }
+    if (!this.#isCanonicalWaitingSummary(wait, session.waitingApproval)) {
+      return false;
+    }
+    return this.#isAllowedState(wait, ['pending', 'verification-delayed']);
   }
 
   #isCurrentWaitForSession(
