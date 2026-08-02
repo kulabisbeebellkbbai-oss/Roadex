@@ -463,7 +463,11 @@ export class ApprovalCoordinator {
       return;
     }
 
-    wait.decisionVersion = status.decisionVersion;
+    const shouldAdvanceDecisionVersion = status.decision === 'approved' || NON_APPROVED_DECISIONS.has(status.decision);
+    if (shouldAdvanceDecisionVersion) {
+      wait.decisionVersion = status.decisionVersion;
+      wait.continuationId = deriveContinuationId(wait.sessionId, wait.approvalRef, status.decisionVersion);
+    }
     wait.subject = status.subject;
     wait.updatedAt = now;
 
@@ -486,7 +490,6 @@ export class ApprovalCoordinator {
 
     if (status.decision === 'approved') {
       wait.state = 'approved-resume-queued';
-      wait.continuationId = deriveContinuationId(wait.sessionId, wait.approvalRef, status.decisionVersion);
       wait.decisionObservedAt = now;
       wait.nextCheckAt = now;
 
@@ -707,6 +710,7 @@ export class ApprovalCoordinator {
       waitBefore,
       () => {
         this.projectSessionForWait(session);
+        this.#publish(wait.sessionId, this.#terminalCopy(wait.state));
         const action = parsed.reason === 'session-closed'
           ? 'approval_wait.reconciliation_required'
           : 'approval_wait.security_failure';
@@ -750,10 +754,6 @@ export class ApprovalCoordinator {
     transition: () => void | Promise<void>,
     publish: () => void | Promise<void> = () => {},
   ): Promise<boolean> {
-    if (!this.#isAllowedState(wait, WAIT_STATES_BLOCKING)) {
-      return true;
-    }
-
     try {
       await Promise.resolve(transition());
       await Promise.resolve(this.#callbacks.persist());
@@ -844,7 +844,6 @@ export class ApprovalCoordinator {
         && status.workspaceId === wait.workspaceId
         && status.resourceRef === wait.resourceRef
         && status.authorityClass === wait.authorityClass
-        && status.decisionVersion === wait.decisionVersion
         && SHA256_PATTERN.test(status.decisionVersion)
         && status.provider === 'overseer';
     }

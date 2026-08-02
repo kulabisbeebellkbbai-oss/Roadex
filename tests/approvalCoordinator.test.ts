@@ -498,12 +498,219 @@ describe('ApprovalCoordinator', () => {
     await coordinator.tick();
     expect(waits[0].state).toBe('changes-requested');
     expect(waits[0].updatedAt).toBe(clock.now());
-    expect(sessions[0].lifecycle).toBe('paused');
-    expect(sessions[0].waitingApproval).toMatchObject({ state: 'pending', waitId: waits[0].id });
-    expect(sessions[0]).toMatchObject({
-      lifecycle: 'paused',
-    });
+    expect(sessions[0].lifecycle).toBe('ready');
+    expect(sessions[0].waitingApproval).toBeUndefined();
     expect(cb.events).toHaveLength(0);
+  });
+
+  it('persists, projects, publishes, and audits non-approval terminal transitions', async () => {
+    const terminalDecisions: Array<NormalizedApprovalStatus['decision']> = [
+      'changes-requested',
+      'rejected',
+      'expired',
+      'revoked',
+    ];
+
+    for (const decision of terminalDecisions) {
+      const clock = clockWithState();
+      const session = fixtureSession({ id: `session-${decision}` });
+      const wait = fixtureWait({
+        id: `wait-${decision}`,
+        sessionId: `session-${decision}`,
+        state: 'pending',
+        nextCheckAt: clock.now(),
+        checkAttempt: 0,
+      });
+      const waits = [wait];
+      const sessions = [session];
+      const persisted: Array<{ session: Pick<RoadexSession, 'lifecycle' | 'waitingApproval'>; wait: ApprovalWaitRecord }> = [];
+      const published: string[] = [];
+      const audits: AuditEvent[] = [];
+      const statusVersion = `sha256:${'b'.repeat(64)}`;
+
+      const coordinator = new ApprovalCoordinator(
+        waits,
+        sessions,
+        statusSequenceProvider([
+          fixtureStatus({ decision, decisionVersion: statusVersion, subject: `Terminal action ${decision}` }),
+        ]),
+        {
+          ...callbacksBuilder().callbacks,
+          persist: async () => {
+            persisted.push({
+              session: {
+                lifecycle: session.lifecycle,
+              },
+              wait: { ...wait },
+            });
+          },
+          publish: (_sessionId, message) => {
+            published.push(message);
+          },
+          audit: (action, outcome, summary, resource) => {
+            audits.push({
+              id: `audit-${audits.length + 1}`,
+              at: clock.now(),
+              actorId: 'actor-1',
+              action,
+              outcome,
+              summary,
+              resource,
+            });
+          },
+        },
+        { clock },
+      );
+
+      await coordinator.tick();
+
+      expect(wait.state).toBe(decision);
+      expect(wait.decisionVersion).toBe(statusVersion);
+      expect(wait.continuationId).toBe(deriveContinuationId(wait.sessionId, wait.approvalRef, statusVersion));
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0].session.lifecycle).toBe('ready');
+      expect(session.lifecycle).toBe('ready');
+      expect(session.waitingApproval).toBeUndefined();
+      expect(published).toContain(`Roadex human approval result: ${decision}`);
+      expect(audits).toHaveLength(1);
+    }
+  });
+
+  it('persists, projects, publishes, and audits session-closed denials from dispatch', async () => {
+    const clock = clockWithState();
+    const session = fixtureSession({ id: 'session-session-closed' });
+    const wait = fixtureWait({
+      state: 'approved-resume-queued',
+      sessionId: 'session-session-closed',
+      nextCheckAt: clock.now(),
+      checkAttempt: 0,
+    });
+    const waits = [wait];
+    const sessions = [session];
+    const persisted: Array<{
+      session: Pick<RoadexSession, 'lifecycle' | 'waitingApproval'>;
+      wait: ApprovalWaitRecord;
+    }> = [];
+    const published: string[] = [];
+    const audits: AuditEvent[] = [];
+    const queueContinuation = vi.fn(async () => ({ status: 'denied', reason: 'session-closed' } satisfies ApprovalContinuationDispatchResult));
+
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      sessions,
+      statusSequenceProvider([fixtureStatus({ decision: 'approved', decisionVersion: `sha256:${'b'.repeat(64)}` })]),
+      {
+        ...callbacksBuilder().callbacks,
+        persist: async () => {
+          persisted.push({
+            session: {
+              lifecycle: session.lifecycle,
+            },
+            wait: { ...wait },
+          });
+        },
+        publish: (_sessionId, message) => {
+          published.push(message);
+        },
+        audit: (action, outcome, summary, resource) => {
+          audits.push({
+            id: `audit-${audits.length + 1}`,
+            at: clock.now(),
+            actorId: 'actor-1',
+            action,
+            outcome,
+            summary,
+            resource,
+          });
+        },
+        queueContinuation,
+      },
+      { clock },
+    );
+
+    await coordinator.tick();
+
+    expect(wait.state).toBe('session-closed');
+    expect(queueContinuation).toHaveBeenCalledTimes(1);
+    expect(queueContinuation).toHaveBeenCalledWith(wait, buildApprovalContinuation(wait));
+    expect(persisted.length).toBeGreaterThanOrEqual(2);
+    expect(persisted[persisted.length - 1].session.lifecycle).toBe('ready');
+    expect(session.waitingApproval).toBeUndefined();
+    expect(published).toContain('Roadex human approval result: session-closed');
+    expect(audits).toHaveLength(1);
+  });
+
+  it('preserves decision metadata for trusted pending version drift, but advances on terminal versions', async () => {
+    const clock = clockWithState();
+    const baseVersion = `sha256:${'a'.repeat(64)}`;
+    const driftVersion = `sha256:${'b'.repeat(64)}`;
+
+    const pendingSession = fixtureSession({ id: 'session-version-pending' });
+    const pendingWait = fixtureWait({
+      sessionId: 'session-version-pending',
+      decisionVersion: baseVersion,
+      continuationId: deriveContinuationId('session-version-pending', 'admin.roadex.test', baseVersion),
+      state: 'pending',
+      nextCheckAt: clock.now(),
+      checkAttempt: 0,
+    });
+    const pendingPersisted: Array<{ wait: ApprovalWaitRecord }> = [];
+
+    await new ApprovalCoordinator(
+      [pendingWait],
+      [pendingSession],
+      statusSequenceProvider([
+        fixtureStatus({
+          decision: 'pending',
+          decisionVersion: driftVersion,
+          subject: 'Drifting pending subject',
+        }),
+      ]),
+      {
+        ...callbacksBuilder().callbacks,
+        persist: async () => {
+          pendingPersisted.push({ wait: { ...pendingWait } });
+        },
+      },
+      { clock },
+    ).tick();
+
+    expect(pendingWait.decisionVersion).toBe(baseVersion);
+    expect(pendingWait.continuationId).toBe(deriveContinuationId('session-version-pending', 'admin.roadex.test', baseVersion));
+    expect(pendingPersisted).toHaveLength(1);
+    expect(pendingPersisted[0].wait.subject).toBe('Drifting pending subject');
+    expect(pendingPersisted[0].wait.state).toBe('pending');
+
+    const approvedSession = fixtureSession({ id: 'session-version-approved' });
+    const approvedWait = fixtureWait({
+      sessionId: 'session-version-approved',
+      decisionVersion: baseVersion,
+      continuationId: deriveContinuationId('session-version-approved', 'admin.roadex.test', baseVersion),
+      state: 'pending',
+      nextCheckAt: clock.now(),
+      checkAttempt: 0,
+    });
+    const approvedPersisted: Array<{ wait: ApprovalWaitRecord }> = [];
+    const queueContinuation = vi.fn(async () => ({ status: 'started', runnerRunId: 'runner-1' } satisfies ApprovalContinuationDispatchResult));
+
+    await new ApprovalCoordinator(
+      [approvedWait],
+      [approvedSession],
+      statusSequenceProvider([fixtureStatus({ decision: 'approved', decisionVersion: driftVersion, subject: 'Approved updated subject' })]),
+      {
+        ...callbacksBuilder().callbacks,
+        persist: async () => {
+          approvedPersisted.push({ wait: { ...approvedWait } });
+        },
+        queueContinuation,
+      },
+      { clock },
+    ).tick();
+
+    expect(approvedWait.decisionVersion).toBe(driftVersion);
+    expect(approvedWait.continuationId).toBe(deriveContinuationId('session-version-approved', 'admin.roadex.test', driftVersion));
+    expect(queueContinuation).toHaveBeenCalledTimes(1);
+    expect(approvedPersisted[approvedPersisted.length - 1].wait.decisionVersion).toBe(driftVersion);
   });
 
   it('uses bounded exponential backoff and caps jitter within nominal delay', () => {
