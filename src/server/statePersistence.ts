@@ -738,7 +738,7 @@ function validCanonicalOpaqueString(value: unknown, maxLength: number): boolean 
   if (value.trim() !== value) return false;
   for (let index = 0; index < value.length; index += 1) {
     const codePoint = value.charCodeAt(index);
-    if (codePoint <= 0x1f || codePoint === 0x7f) return false;
+    if (codePoint <= 0x1f || (0x7f <= codePoint && codePoint <= 0x9f)) return false;
   }
   return true;
 }

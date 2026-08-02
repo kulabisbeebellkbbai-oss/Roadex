@@ -465,8 +465,14 @@ describe('state persistence', () => {
       id: 'nul-collision',
       managedThreadId: `${base.managedThreadId}\u0000`,
     } as unknown as ApprovalWaitRecord;
+    const c1Collision = {
+      ...base,
+      id: `c1-collision-${'\u0085'}`,
+    } as unknown as ApprovalWaitRecord;
 
-    const state = serializeState({ approvalWaits: [whitespaceCollision, newlineCollision, nulCollision, base, preserved] });
+    const state = serializeState({
+      approvalWaits: [whitespaceCollision, newlineCollision, nulCollision, c1Collision, base, preserved],
+    });
     expect(state.approvalWaits.map((record) => record.id).sort()).toEqual([
       'canonical',
       'preserved',
