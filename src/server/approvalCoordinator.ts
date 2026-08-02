@@ -67,7 +67,9 @@ const OPAQUE_TOKEN_PATTERN = /^[A-Za-z0-9._-]+$/;
 const MAX_FIELD_LENGTH = 256;
 const MAX_WAIT_ID_LENGTH = 64;
 const MAX_WAIT_ID_GENERATION_ATTEMPTS = 8;
+const MAX_RUNNER_RUN_ID_LENGTH = 64;
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const RETRY_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 const PUBLISHED_WAIT_STATES = new Set<PublicWaitState>([
   'pending',
@@ -113,6 +115,7 @@ export class ApprovalCoordinator {
   readonly #clock: ApprovalCoordinatorStateClock;
   readonly #idSource: { generateWaitId: () => string };
   readonly #backoffJitter: (attempt: number) => number;
+  readonly #sessionGeneration: Map<string, number>;
 
   #tickInProgress = false;
 
@@ -130,6 +133,7 @@ export class ApprovalCoordinator {
     this.#clock = options.clock ?? { now: () => new Date().toISOString() };
     this.#idSource = options.idSource ?? { generateWaitId: deterministicWaitId };
     this.#backoffJitter = options.backoffJitter ?? (() => 0);
+    this.#sessionGeneration = new Map();
 
     this.#sessions.forEach((session) => {
       this.projectSessionForWait(session);
@@ -332,6 +336,10 @@ export class ApprovalCoordinator {
       return;
     }
 
+    const priorGeneration = this.#sessionGeneration.get(sessionId) ?? 0;
+    const nextGeneration = priorGeneration + 1;
+    this.#sessionGeneration.set(sessionId, nextGeneration);
+
     const now = this.#clock.now();
     const sessionBefore = this.snapshotSession(session);
     const waitSnapshots = active.map((wait) => ({ wait, snapshot: this.snapshotWait(wait) }));
@@ -349,6 +357,7 @@ export class ApprovalCoordinator {
       await Promise.resolve(this.#callbacks.persist());
       return;
     } catch {
+      this.#sessionGeneration.set(sessionId, priorGeneration);
       this.restoreSession(session, sessionBefore);
       for (const item of waitSnapshots) {
         this.restoreWait(item.wait, item.snapshot);
@@ -382,11 +391,12 @@ export class ApprovalCoordinator {
   }
 
   async #refreshWait(wait: ApprovalWaitRecord, session: RoadexSession): Promise<void> {
+    const sessionGeneration = this.#sessionGeneration.get(session.id) ?? 0;
     const sessionBefore = this.snapshotSession(session);
     const waitBefore = this.snapshotWait(wait);
     const now = this.#clock.now();
 
-    if (!this.#isAllowedState(wait, ['pending', 'verification-delayed'])) {
+    if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['pending', 'verification-delayed'])) {
       return;
     }
 
@@ -400,7 +410,7 @@ export class ApprovalCoordinator {
         resourceRef: wait.resourceRef,
       });
     } catch {
-      if (!this.#isAllowedState(wait, ['pending', 'verification-delayed'])) {
+      if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['pending', 'verification-delayed'])) {
         return;
       }
 
@@ -421,7 +431,7 @@ export class ApprovalCoordinator {
       return;
     }
 
-    if (!this.#isAllowedState(wait, ['pending', 'verification-delayed'])) {
+    if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['pending', 'verification-delayed'])) {
       return;
     }
 
@@ -449,7 +459,7 @@ export class ApprovalCoordinator {
       return;
     }
 
-    if (!this.#isAllowedState(wait, ['pending', 'verification-delayed'])) {
+    if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['pending', 'verification-delayed'])) {
       return;
     }
 
@@ -546,11 +556,12 @@ export class ApprovalCoordinator {
   }
 
   async #dispatchApprovedWait(wait: ApprovalWaitRecord, session: RoadexSession): Promise<void> {
+    const sessionGeneration = this.#sessionGeneration.get(session.id) ?? 0;
     const sessionBefore = this.snapshotSession(session);
     const waitBefore = this.snapshotWait(wait);
     const now = this.#clock.now();
 
-    if (!this.#isAllowedState(wait, ['approved-resume-queued', 'resume-dispatching'])) {
+    if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['approved-resume-queued', 'resume-dispatching'])) {
       return;
     }
 
@@ -576,7 +587,7 @@ export class ApprovalCoordinator {
       return;
     }
 
-    if (!this.#isAllowedState(wait, ['resume-dispatching'])) {
+    if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['resume-dispatching'])) {
       return;
     }
 
@@ -587,15 +598,20 @@ export class ApprovalCoordinator {
       result = { status: 'ambiguous' };
     }
 
-    await this.#applyDispatchResult(wait, session, result);
+    if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['resume-dispatching'])) {
+      return;
+    }
+
+    await this.#applyDispatchResult(wait, session, result, sessionGeneration);
   }
 
   async #applyDispatchResult(
     wait: ApprovalWaitRecord,
     session: RoadexSession,
     result: ApprovalContinuationDispatchResult | unknown,
+    sessionGeneration: number,
   ): Promise<void> {
-    if (!this.#isAllowedState(wait, ['resume-dispatching'])) {
+    if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['resume-dispatching'])) {
       return;
     }
 
@@ -734,7 +750,12 @@ export class ApprovalCoordinator {
     transition: () => void | Promise<void>,
     publish: () => void | Promise<void> = () => {},
   ): Promise<boolean> {
+    if (!this.#isAllowedState(wait, WAIT_STATES_BLOCKING)) {
+      return true;
+    }
+
     try {
+      await Promise.resolve(transition());
       await Promise.resolve(this.#callbacks.persist());
     } catch {
       this.restoreSession(session, sessionBefore);
@@ -742,12 +763,7 @@ export class ApprovalCoordinator {
       return false;
     }
 
-    if (!this.#isAllowedState(wait, WAIT_STATES_BLOCKING)) {
-      return true;
-    }
-
     try {
-      await Promise.resolve(transition());
       await Promise.resolve(publish());
     } catch {
       // Persisted state is canonical; callback exceptions must not roll back memory.
@@ -761,35 +777,28 @@ export class ApprovalCoordinator {
   }
 
   #parseDispatchResult(value: unknown): ApprovalContinuationDispatchResult | null {
-    if (value === null || typeof value !== 'object') {
+    if (value === null || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) {
       return null;
     }
 
     const candidate = value as Record<string, unknown>;
-    const keys = Object.keys(candidate);
-
-    if (keys.length === 0) {
-      return null;
-    }
-
     const status = candidate.status;
+
     if (status === 'started') {
-      if (keys.length !== 2) {
+      if (!this.#isExactObject(candidate, ['status', 'runnerRunId'])) {
         return null;
       }
-      if (typeof candidate.runnerRunId !== 'string'
-        || !this.#isFieldValid(candidate.runnerRunId, MAX_WAIT_ID_LENGTH)
-        || keys.sort().join(',') !== ['runnerRunId', 'status'].sort().join(',')) {
+      if (typeof candidate.runnerRunId !== 'string' || !this.#isOpaqueToken(candidate.runnerRunId, MAX_RUNNER_RUN_ID_LENGTH)) {
         return null;
       }
       return { status: 'started', runnerRunId: candidate.runnerRunId as string };
     }
 
     if (status === 'capacity') {
-      if (keys.length !== 2) {
+      if (!this.#isExactObject(candidate, ['status', 'retryAt'])) {
         return null;
       }
-      if (typeof candidate.retryAt !== 'string' || keys.sort().join(',') !== ['retryAt', 'status'].sort().join(',')) {
+      if (typeof candidate.retryAt !== 'string') {
         return null;
       }
       if (!this.#isRetryAt(candidate.retryAt, this.#clock.now())) {
@@ -799,21 +808,18 @@ export class ApprovalCoordinator {
     }
 
     if (status === 'ambiguous') {
-      if (keys.length !== 1) {
+      if (!this.#isExactObject(candidate, ['status'])) {
         return null;
       }
       return { status: 'ambiguous' };
     }
 
     if (status === 'denied') {
-      if (keys.length !== 2) {
+      if (!this.#isExactObject(candidate, ['status', 'reason'])) {
         return null;
       }
       const reason = candidate.reason;
       if (reason !== 'session-closed' && reason !== 'thread-mismatch' && reason !== 'scope-mismatch') {
-        return null;
-      }
-      if (keys.sort().join(',') !== ['reason', 'status'].sort().join(',')) {
         return null;
       }
       return { status: 'denied', reason };
@@ -838,6 +844,7 @@ export class ApprovalCoordinator {
         && status.workspaceId === wait.workspaceId
         && status.resourceRef === wait.resourceRef
         && status.authorityClass === wait.authorityClass
+        && status.decisionVersion === wait.decisionVersion
         && SHA256_PATTERN.test(status.decisionVersion)
         && status.provider === 'overseer';
     }
@@ -854,11 +861,15 @@ export class ApprovalCoordinator {
     }
     for (let i = 0; i < value.length; i++) {
       const codePoint = value.charCodeAt(i);
-      if (codePoint < 0x20 || codePoint === 0x7f) {
+      if (codePoint <= 0x1f || codePoint === 0x7f || (codePoint >= 0x80 && codePoint <= 0x9f)) {
         return false;
       }
     }
     return true;
+  }
+
+  #isOpaqueToken(value: string, maxLength = MAX_WAIT_ID_LENGTH): boolean {
+    return this.#isFieldValid(value, maxLength) && OPAQUE_TOKEN_PATTERN.test(value);
   }
 
   #isExactObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
@@ -896,6 +907,10 @@ export class ApprovalCoordinator {
   }
 
   #isRetryAt(value: string, now: string): boolean {
+    if (!RETRY_AT_PATTERN.test(value)) {
+      return false;
+    }
+
     const retryAtMs = Date.parse(value);
     const nowMs = Date.parse(now);
     if (!Number.isFinite(retryAtMs) || !Number.isFinite(nowMs)) {
@@ -910,6 +925,24 @@ export class ApprovalCoordinator {
     return delayMs <= WAIT_BASE_DELAYS_MS[WAIT_BASE_DELAYS_MS.length - 1];
   }
 
+  #isCurrentWaitForSession(
+    wait: ApprovalWaitRecord,
+    session: RoadexSession,
+    sessionGeneration: number,
+    states?: ReadonlySet<ApprovalWaitState> | ReadonlyArray<ApprovalWaitState>,
+  ): boolean {
+    if ((this.#sessionGeneration.get(session.id) ?? 0) !== sessionGeneration) {
+      return false;
+    }
+    if (session.id !== wait.sessionId || session.userId !== wait.userId || session.workspace.id !== wait.workspaceId) {
+      return false;
+    }
+    if (!session.managedThreadId || session.managedThreadId !== wait.managedThreadId || session.codexThreadId !== session.managedThreadId) {
+      return false;
+    }
+    return states === undefined || this.#isAllowedState(wait, states);
+  }
+
   #nextWaitId(): string {
     for (let index = 0; index < MAX_WAIT_ID_GENERATION_ATTEMPTS; index += 1) {
       let nextId: string;
@@ -919,10 +952,7 @@ export class ApprovalCoordinator {
         break;
       }
 
-      if (!this.#isFieldValid(nextId, MAX_WAIT_ID_LENGTH)) {
-        continue;
-      }
-      if (!OPAQUE_TOKEN_PATTERN.test(nextId)) {
+      if (!this.#isOpaqueToken(nextId, MAX_WAIT_ID_LENGTH)) {
         continue;
       }
       if (this.#waits.some((wait) => wait.id === nextId)) {

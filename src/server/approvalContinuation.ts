@@ -13,10 +13,7 @@ function isSafeSingleLineOpaque(value: string): boolean {
 
   for (let i = 0; i < value.length; i += 1) {
     const codePoint = value.charCodeAt(i);
-    if (codePoint < 0x20 || codePoint === 0x7f) {
-      return false;
-    }
-    if (codePoint >= 0x80 && codePoint <= 0x9f) {
+    if (codePoint <= 0x1f || codePoint === 0x7f || (codePoint >= 0x80 && codePoint <= 0x9f)) {
       return false;
     }
   }

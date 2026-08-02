@@ -232,6 +232,50 @@ describe('ApprovalCoordinator', () => {
     });
   });
 
+  it('returns exact waiting summary and rejects register payload extras/inherited fields', async () => {
+    const coordinator = new ApprovalCoordinator(
+      [],
+      [fixtureSession()],
+      statusSequenceProvider([fixtureStatus()]),
+      callbacksBuilder().callbacks,
+      { clock: clockWithState(), idSource: { generateWaitId: () => 'wait-fixed' } },
+    );
+
+    const result = await coordinator.register(
+      fixtureCapability(),
+      {
+      provider: 'overseer',
+      approvalRef: 'admin.roadex.test',
+      extra: 'x',
+      } as RegisterApprovalWaitInput,
+    );
+
+    expect(result).toMatchObject({ ok: false, code: 'scope-mismatch' });
+
+    const inherited = Object.create({ provider: 'overseer', approvalRef: 'admin.roadex.test' }) as RegisterApprovalWaitInput;
+    const inheritedResult = await coordinator.register(fixtureCapability(), inherited);
+    expect(inheritedResult).toMatchObject({ ok: false, code: 'scope-mismatch' });
+
+    const validResult = await coordinator.register(fixtureCapability(), {
+      provider: 'overseer',
+      approvalRef: 'admin.roadex.test',
+    });
+    expect(validResult).toMatchObject({ ok: true });
+    if (!validResult.ok) {
+      return;
+    }
+    expect(Object.keys(validResult.wait).sort()).toEqual([
+      'approvalRef',
+      'consolePath',
+      'consoleSurface',
+      'state',
+      'subject',
+      'updatedAt',
+      'waitId',
+    ]);
+    expect((validResult.wait as Partial<WaitingApprovalSummary>).consolePath).toBeUndefined();
+  });
+
   it('maps project-workflow approvals to overview console and publishes fixed routing copy', async () => {
     const sessions = [fixtureSession()];
     const waits: ApprovalWaitRecord[] = [];
@@ -359,6 +403,22 @@ describe('ApprovalCoordinator', () => {
     );
 
     expect(resultInvalidId).toMatchObject({ ok: false, code: 'scope-mismatch' });
+
+    const resultInvalidIdRunes = await new ApprovalCoordinator(
+      waits,
+      [fixtureSession({ id: 'session-3' })],
+      statusSequenceProvider([fixtureStatus({ approvalRef: 'admin.roadex.test' })]),
+      callbacksBuilder().callbacks,
+      {
+        clock: clockWithState(),
+        idSource: { generateWaitId: () => 'wait\rid' },
+      },
+    ).register(
+      fixtureCapability({ sessionId: 'session-3' }),
+      { provider: 'overseer', approvalRef: 'admin.roadex.test' },
+    );
+
+    expect(resultInvalidIdRunes).toMatchObject({ ok: false, code: 'scope-mismatch' });
   });
 
   it('keeps lifecycle and wait state on provider unavailable after persist failure rollback', async () => {
@@ -406,6 +466,43 @@ describe('ApprovalCoordinator', () => {
     expect(result).toMatchObject({ ok: true });
     expect(waits).toHaveLength(1);
     expect(sessions[0].lifecycle).toBe('paused');
+    expect(cb.events).toHaveLength(0);
+  });
+
+  it('keeps transition state when terminal publish/audit callbacks fail after persistence', async () => {
+    const clock = clockWithState();
+    const sessions = [fixtureSession()];
+    const waits: ApprovalWaitRecord[] = [
+      fixtureWait({
+        nextCheckAt: clock.now(),
+        sessionId: 'session-1',
+      }),
+    ];
+    const cb = callbacksBuilder({
+      publish: () => {
+        throw new Error('publish-failed');
+      },
+      audit: () => {
+        throw new Error('audit-failed');
+      },
+    });
+
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      sessions,
+      statusSequenceProvider([fixtureStatus({ decision: 'changes-requested' })]),
+      cb.callbacks,
+      { clock },
+    );
+
+    await coordinator.tick();
+    expect(waits[0].state).toBe('changes-requested');
+    expect(waits[0].updatedAt).toBe(clock.now());
+    expect(sessions[0].lifecycle).toBe('paused');
+    expect(sessions[0].waitingApproval).toMatchObject({ state: 'pending', waitId: waits[0].id });
+    expect(sessions[0]).toMatchObject({
+      lifecycle: 'paused',
+    });
     expect(cb.events).toHaveLength(0);
   });
 
@@ -469,6 +566,7 @@ describe('ApprovalCoordinator', () => {
   it('does not copy status fields from mismatching provider status', async () => {
     const sessions = [fixtureSession()];
     const waits = [fixtureWait({ decisionVersion: `sha256:${'b'.repeat(64)}`, subject: 'Safe subject', nextCheckAt: '2026-08-02T18:00:00.000Z' })];
+    const trustedContinuation = waits[0].continuationId;
 
     const coordinator = new ApprovalCoordinator(
       waits,
@@ -489,6 +587,7 @@ describe('ApprovalCoordinator', () => {
     expect(waits[0].state).toBe('security-failure');
     expect(waits[0].subject).toBe('Safe subject');
     expect(waits[0].decisionVersion).toBe(`sha256:${'b'.repeat(64)}`);
+    expect(waits[0].continuationId).toBe(trustedContinuation);
   });
 
   it('publishes fixed approval and terminal copy through session-aware publisher', async () => {
@@ -537,12 +636,40 @@ describe('ApprovalCoordinator', () => {
   it('maps dispatch results with strict shape validation', async () => {
     const clock = clockWithState();
 
+    const symbol = Symbol('status');
+    const nonEnumerable = {};
+    Object.defineProperty(nonEnumerable, 'status', {
+      value: 'started',
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(nonEnumerable, 'runnerRunId', {
+      value: 'runner-1',
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+
     const malformedTable: Array<{ result: unknown; expectedState: string; expectedAction?: 'security-failure' | 'session-closed' }> = [
       { result: { status: 'started' }, expectedState: 'resume-reconciliation-required' },
-      { result: { status: 'capacity', retryAt: new Date(clock.now()).toISOString() }, expectedState: 'resume-reconciliation-required' },
-      { result: { status: 'capacity', retryAt: '2026-08-02T19:00:00.000Z', extra: 'x' }, expectedState: 'resume-reconciliation-required' },
       { result: { status: 'started', runnerRunId: 'runner-1', extra: 'x' }, expectedState: 'resume-reconciliation-required' },
+      { result: { status: 'capacity', retryAt: new Date(clock.now()).toISOString() }, expectedState: 'resume-reconciliation-required' },
+      { result: { status: 'capacity', retryAt: '2026-08-02T19:00:00Z' }, expectedState: 'resume-reconciliation-required' },
+      { result: { status: 'capacity', retryAt: '2026-08-02T19:00:00.000Z', extra: 'x' }, expectedState: 'resume-reconciliation-required' },
+      { result: { status: 'started', runnerRunId: 'wait\\nrun' }, expectedState: 'resume-reconciliation-required' },
+      { result: { status: 'started', runnerRunId: 'runner/1' }, expectedState: 'resume-reconciliation-required' },
       { result: { status: 'denied', reason: 'bad' }, expectedState: 'resume-reconciliation-required' },
+      { result: Object.create({ status: 'started', runnerRunId: 'runner-1' }), expectedState: 'resume-reconciliation-required' },
+      { result: nonEnumerable as unknown, expectedState: 'resume-reconciliation-required' },
+      {
+        result: (() => {
+          const target = { status: 'started' } as Record<string, unknown> & { [symbol]: unknown };
+          Object.defineProperty(target, symbol, { value: 'bad', enumerable: true });
+          return target;
+        })(),
+        expectedState: 'resume-reconciliation-required',
+      },
     ];
 
     for (const entry of malformedTable) {
@@ -712,6 +839,18 @@ describe('ApprovalCoordinator', () => {
       ].join('\n'),
     );
     expect(() => buildApprovalContinuation(fixtureWait({ approvalRef: 'admin\nroadex.test' }))).toThrow(
+      /Invalid approval continuation input/,
+    );
+    expect(() => buildApprovalContinuation(fixtureWait({ approvalRef: 'admin\troadex.test' }))).toThrow(
+      /Invalid approval continuation input/,
+    );
+    expect(() => buildApprovalContinuation(fixtureWait({ approvalRef: 'admin\u0000roadex.test' }))).toThrow(
+      /Invalid approval continuation input/,
+    );
+    expect(() => buildApprovalContinuation(fixtureWait({ approvalRef: 'admin\u001broadex.test' }))).toThrow(
+      /Invalid approval continuation input/,
+    );
+    expect(() => buildApprovalContinuation(fixtureWait({ approvalRef: 'admin\u007froadex.test' }))).toThrow(
       /Invalid approval continuation input/,
     );
     expect(() => buildApprovalContinuation(fixtureWait({ approvalRef: 'admin\u0007roadex.test' }))).toThrow(
