@@ -237,6 +237,7 @@ async function defaultFetchJson(
       Authorization: `Bearer ${token}`,
     },
     cache: 'no-store',
+    redirect: 'error',
     signal,
   });
 

@@ -782,7 +782,22 @@ describe('createOverseerApprovalStatusProvider', () => {
       expect(url).toBe('http://127.0.0.1:8766/roadex/approval-status?approval_ref=admin.roadex.test');
       expect(init.method).toBe('GET');
       expect(init.cache).toBe('no-store');
+      expect(init.redirect).toBe('error');
       expect(init.headers).toMatchObject({ Authorization: `Bearer ${token}` });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('fails closed when default fetch encounters a redirect boundary', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('redirect to unknown host blocked'));
+
+    try {
+      const provider = createOverseerApprovalStatusProvider({
+        readToken: () => token,
+      });
+
+      await expectFailureCode(provider.getStatus(approvalRef, validScope), requestFailedCode);
     } finally {
       fetchSpy.mockRestore();
     }
