@@ -1238,6 +1238,7 @@ describe('ApprovalCoordinator', () => {
       { result: { status: 'capacity', retryAt: new Date(clock.now()).toISOString() }, expectedState: 'resume-reconciliation-required' },
       { result: { status: 'capacity', retryAt: '2026-08-02T19:00:00Z' }, expectedState: 'resume-reconciliation-required' },
       { result: { status: 'capacity', retryAt: '2026-08-02T19:00:00.000Z', extra: 'x' }, expectedState: 'resume-reconciliation-required' },
+      { result: { status: 'capacity', retryAt: '2026-02-29T00:00:00.000Z' }, expectedState: 'resume-reconciliation-required' },
       { result: { status: 'started', runnerRunId: 'wait\\nrun' }, expectedState: 'resume-reconciliation-required' },
       { result: { status: 'started', runnerRunId: 'runner/1' }, expectedState: 'resume-reconciliation-required' },
       { result: { status: 'denied', reason: 'bad' }, expectedState: 'resume-reconciliation-required' },
@@ -1329,6 +1330,65 @@ describe('ApprovalCoordinator', () => {
         expect(wait.state).toBe('session-closed');
       }
     }
+  });
+
+  it('does not apply refresh result when lifecycle changes during provider I/O', async () => {
+    const clock = clockWithState();
+    const status = deferred<NormalizedApprovalStatus>();
+    const waits = [fixtureWait({ state: 'pending', nextCheckAt: clock.now(), checkAttempt: 0 })];
+    const sessions = [fixtureSession()];
+    bindSessionToWait(sessions[0], waits[0]);
+    const persist = vi.fn();
+
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      sessions,
+      { getStatus: vi.fn(async () => status.promise) },
+      callbacksBuilder({ persist }).callbacks,
+      { clock },
+    );
+
+    const tickPromise = coordinator.tick();
+    await Promise.resolve();
+    sessions[0].lifecycle = 'blocked';
+    status.resolve(fixtureStatus({ decision: 'approved' }));
+    await tickPromise;
+
+    expect(waits[0].state).toBe('pending');
+    expect(waits[0].checkAttempt).toBe(0);
+    expect(waits[0].subject).toBe('Restart test service');
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('does not apply refresh result when canonical waiting summary drifts during provider I/O', async () => {
+    const clock = clockWithState();
+    const status = deferred<NormalizedApprovalStatus>();
+    const waits = [fixtureWait({ state: 'pending', nextCheckAt: clock.now(), checkAttempt: 0 })];
+    const sessions = [fixtureSession()];
+    bindSessionToWait(sessions[0], waits[0]);
+    const persist = vi.fn();
+
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      sessions,
+      { getStatus: vi.fn(async () => status.promise) },
+      callbacksBuilder({ persist }).callbacks,
+      { clock },
+    );
+
+    const tickPromise = coordinator.tick();
+    await Promise.resolve();
+    sessions[0].waitingApproval = {
+      ...(sessions[0].waitingApproval as WaitingApprovalSummary),
+      subject: 'tampered',
+    };
+    status.resolve(fixtureStatus({ decision: 'approved', subject: 'Approved test service' }));
+    await tickPromise;
+
+    expect(waits[0].state).toBe('pending');
+    expect(waits[0].checkAttempt).toBe(0);
+    expect(waits[0].subject).toBe('Restart test service');
+    expect(persist).not.toHaveBeenCalled();
   });
 
   it('rejects accessor-backed dispatch results without executing getters', async () => {

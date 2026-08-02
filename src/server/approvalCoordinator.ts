@@ -519,6 +519,7 @@ export class ApprovalCoordinator {
   }
 
   async #refreshWait(wait: ApprovalWaitRecord, session: RoadexSession): Promise<void> {
+    const sessionGeneration = this.#sessionGeneration.get(session.id) ?? 0;
     let status: NormalizedApprovalStatus | undefined;
     let shouldDispatch = false;
     try {
@@ -532,12 +533,11 @@ export class ApprovalCoordinator {
     }
 
     await this.#withSessionLock(wait.sessionId, async () => {
-      const sessionGeneration = this.#sessionGeneration.get(session.id) ?? 0;
       const sessionBefore = this.snapshotSession(session);
       const waitBefore = this.snapshotWait(wait);
       const now = this.#clock.now();
 
-      if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['pending', 'verification-delayed'])) {
+      if (!this.#isRefreshWaitCurrentAndCanonical(wait, session, sessionGeneration)) {
         return;
       }
 
@@ -1275,13 +1275,17 @@ export class ApprovalCoordinator {
       return false;
     }
 
-    const retryAtMs = Date.parse(value);
-    const nowMs = Date.parse(now);
-    if (!Number.isFinite(retryAtMs) || !Number.isFinite(nowMs)) {
+    const retryAtTime = new Date(value).getTime();
+    if (!Number.isFinite(retryAtTime) || new Date(retryAtTime).toISOString() !== value) {
       return false;
     }
 
-    const delayMs = retryAtMs - nowMs;
+    const nowMs = new Date(now).getTime();
+    if (!Number.isFinite(nowMs)) {
+      return false;
+    }
+
+    const delayMs = retryAtTime - nowMs;
     if (delayMs <= 0) {
       return false;
     }
@@ -1292,6 +1296,28 @@ export class ApprovalCoordinator {
   #isClosedDuringDispatch(session: RoadexSession, sessionGeneration: number): boolean {
     const currentGeneration = this.#sessionGeneration.get(session.id) ?? sessionGeneration;
     return currentGeneration > sessionGeneration;
+  }
+
+  #isRefreshWaitCurrentAndCanonical(wait: ApprovalWaitRecord, session: RoadexSession, sessionGeneration: number): boolean {
+    if (!this.#waits.includes(wait)) {
+      return false;
+    }
+    if ((this.#sessionGeneration.get(session.id) ?? 0) !== sessionGeneration) {
+      return false;
+    }
+    if (session.id !== wait.sessionId || session.userId !== wait.userId || session.workspace.id !== wait.workspaceId) {
+      return false;
+    }
+    if (!session.managedThreadId || session.managedThreadId !== wait.managedThreadId || session.codexThreadId !== session.managedThreadId) {
+      return false;
+    }
+    if (session.lifecycle !== 'paused') {
+      return false;
+    }
+    if (!this.#isCanonicalWaitingSummary(wait, session.waitingApproval)) {
+      return false;
+    }
+    return this.#isAllowedState(wait, ['pending', 'verification-delayed']);
   }
 
   #isCurrentWaitForSession(
