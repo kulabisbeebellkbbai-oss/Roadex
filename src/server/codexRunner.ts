@@ -17,6 +17,8 @@ import { createStreamEvent } from './mockRunner.js';
 import {
   CONTROLLED_RUNNER_CONFIG_OVERRIDES,
   CONTROLLED_OPERATION_TOKEN_DIRECTORY,
+  APPROVAL_WORKFLOW_TOKEN_DIRECTORY,
+  approvalWorkflowConfigOverrides,
   controlledOperationConfigOverrides,
   resolveRunnerCapabilityProfile,
   type ControlledRunnerGrant,
@@ -31,6 +33,8 @@ export type RunnerPromptRequest = {
   signal?: AbortSignal;
   capabilityGrant?: ControlledRunnerGrant;
   controlledOperationToken?: string;
+  approvalWorkflowToken?: string;
+  runId?: string;
   onActivity?: () => void;
 };
 
@@ -109,7 +113,7 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
       };
     },
 
-    runPrompt({ session, prompt, onEvent, onActivity, signal, capabilityGrant, controlledOperationToken }) {
+    runPrompt({ session, prompt, onEvent, onActivity, signal, capabilityGrant, controlledOperationToken, approvalWorkflowToken, runId }) {
       let capabilityProfile: RunnerCapabilitySelection;
       try {
         capabilityProfile = resolveRunnerCapabilityProfile({
@@ -131,6 +135,8 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
       return runCodexPrompt({
         capabilityProfile,
         controlledOperationToken,
+        approvalWorkflowToken,
+        runId,
         executable,
         activityHeartbeatMs,
         onActivity,
@@ -148,6 +154,8 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
 type RunCodexPromptOptions = {
   capabilityProfile: RunnerCapabilitySelection;
   controlledOperationToken?: string;
+  approvalWorkflowToken?: string;
+  runId?: string;
   executable: string;
   activityHeartbeatMs: number;
   onActivity?: () => void;
@@ -174,6 +182,13 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
   )
     ? createControlledOperationTokenFile(options.controlledOperationToken)
     : undefined;
+  const approvalWorkflowTokenFile = (
+    options.capabilityProfile.mode === 'controlled-project-manager'
+    && options.approvalWorkflowToken
+    && options.runId
+  )
+    ? createApprovalWorkflowTokenFile(options.approvalWorkflowToken)
+    : undefined;
   let child;
   try {
     child = spawn(
@@ -184,6 +199,8 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
         options.codexThreadId,
         options.capabilityProfile,
         controlledOperationTokenFile,
+        approvalWorkflowTokenFile,
+        options.runId,
       ),
       {
         cwd: options.workspaceRoot,
@@ -193,6 +210,7 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
     );
   } catch (error) {
     removeControlledOperationTokenFile(controlledOperationTokenFile);
+    removeApprovalWorkflowTokenFile(approvalWorkflowTokenFile);
     throw error;
   }
 
@@ -232,6 +250,7 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
     clearInterval(activityHeartbeat);
     options.signal?.removeEventListener('abort', abort);
     removeControlledOperationTokenFile(controlledOperationTokenFile);
+    removeApprovalWorkflowTokenFile(approvalWorkflowTokenFile);
   });
 
   if (stdoutBuffer.trim()) {
@@ -275,8 +294,13 @@ export function buildCodexExecArgs(
   codexThreadId?: string,
   capabilityProfile: RunnerCapabilitySelection = { mode: 'restricted' },
   controlledOperationTokenFile?: string,
+  approvalWorkflowTokenFile?: string,
+  runId?: string,
 ): string[] {
   const operationOverrides = controlledOperationConfigOverrides(controlledOperationTokenFile);
+  const workflowOverrides = runId && approvalWorkflowTokenFile
+    ? approvalWorkflowConfigOverrides(approvalWorkflowTokenFile)
+    : [];
   const effectivePrompt = operationOverrides.length
     ? controlledOperationPrompt(prompt)
     : prompt;
@@ -286,10 +310,11 @@ export function buildCodexExecArgs(
     ...(capabilityProfile.mode === 'controlled-project-manager'
       ? [
           '--ignore-user-config',
-          '--ignore-rules',
+            '--ignore-rules',
           ...[
             ...CONTROLLED_RUNNER_CONFIG_OVERRIDES,
             ...operationOverrides,
+            ...workflowOverrides,
           ].flatMap((override) => ['--config', override]),
         ]
       : []),
@@ -341,7 +366,42 @@ export function createControlledOperationTokenFile(token: string): string {
   return path;
 }
 
+export function createApprovalWorkflowTokenFile(token: string): string {
+  if (!/^[A-Za-z0-9._-]{20,16000}$/.test(token)) throw new Error('approval_workflow_token_invalid');
+  mkdirSync(APPROVAL_WORKFLOW_TOKEN_DIRECTORY, { recursive: true, mode: 0o700 });
+  const directory = lstatSync(APPROVAL_WORKFLOW_TOKEN_DIRECTORY);
+  if (
+    !directory.isDirectory()
+    || directory.isSymbolicLink()
+    || directory.uid !== process.getuid?.()
+    || (directory.mode & 0o077) !== 0
+  ) throw new Error('approval_workflow_token_directory_invalid');
+  const path = join(APPROVAL_WORKFLOW_TOKEN_DIRECTORY, randomUUID());
+  const descriptor = openSync(
+    path,
+    fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    fchmodSync(descriptor, 0o600);
+    writeFileSync(descriptor, token, { encoding: 'utf8' });
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  return path;
+}
+
 function removeControlledOperationTokenFile(path: string | undefined): void {
+  if (!path) return;
+  try {
+    unlinkSync(path);
+  } catch {
+    // The MCP adapter normally removes the one-time file after reading it.
+  }
+}
+
+function removeApprovalWorkflowTokenFile(path: string | undefined): void {
   if (!path) return;
   try {
     unlinkSync(path);

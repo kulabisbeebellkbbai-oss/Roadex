@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   CONTROLLED_RUNNER_PROFILE,
+  APPROVAL_WORKFLOW_MCP,
+  APPROVAL_WORKFLOW_SOCKET,
+  APPROVAL_WORKFLOW_TOKEN_DIRECTORY,
+  approvalWorkflowConfigOverrides,
   resolveRunnerCapabilityProfile,
 } from '../src/server/runnerCapabilityProfile';
 
@@ -129,5 +133,21 @@ describe('resolveRunnerCapabilityProfile', () => {
         status: 'active',
       },
     })).toEqual({ mode: 'restricted' });
+  });
+
+  it('injects only the workflow MCP override when token file is valid', () => {
+    const tokenFile = `${APPROVAL_WORKFLOW_TOKEN_DIRECTORY}/12345678-1234-1234-1234-123456789abc`;
+    expect(approvalWorkflowConfigOverrides(tokenFile)).toEqual([
+      'mcp_servers.roadex-workflow.command="node"',
+      `mcp_servers.roadex-workflow.args=["${APPROVAL_WORKFLOW_MCP}"]`,
+      `mcp_servers.roadex-workflow.env={ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE="${tokenFile}",ROADEX_APPROVAL_WORKFLOW_SOCKET="${APPROVAL_WORKFLOW_SOCKET}"}`,
+      'mcp_servers.roadex-workflow.required=true',
+      'mcp_servers.roadex-workflow.enabled_tools=["await_human_approval"]',
+      'mcp_servers.roadex-workflow.default_tools_approval_mode="approve"',
+    ]);
+  });
+
+  it('skips malformed workflow token files', () => {
+    expect(approvalWorkflowConfigOverrides('/tmp/invalid-token')).toEqual([]);
   });
 });
