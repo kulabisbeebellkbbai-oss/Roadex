@@ -124,6 +124,84 @@ Console navigation uses a deployment-owned enum-to-relative-path allowlist.
 Provider data and MCP input cannot supply a URL. If no safe path is configured,
 Roadex displays the correct console name without rendering a link.
 
+## Overseer Exact Scope Projection
+
+The approved source-only Overseer compatibility contract adds an immutable
+scope binding when an existing approval producer stages a new Roadex-owned
+approval. This binding is metadata within the producer's existing transaction;
+it is not an approval and grants no authority.
+
+```ts
+type RoadexApprovalBinding = {
+  approvalRef: string;
+  sourceKind: 'admin-plan' | 'roadex-human-decision';
+  sourceId: string;
+  projectId: string;
+  workspaceId: string;
+  resourceRef: string;
+  authorityClass: ApprovalAuthorityClass;
+  subject: string;
+  scopeDigest: string;
+  createdAt: string;
+};
+```
+
+The binding is inserted in the same SQLite transaction as the source approval
+or plan. The canonical scope digest is included in the human review evidence.
+Replaying the same binding is idempotent; attempting to change any field for an
+existing approval reference fails. There is no API that attaches or rewrites a
+binding after staging. Existing unbound approvals remain valid for their
+original Overseer workflows but are ineligible for Roadex automatic
+continuation.
+
+`scopeDigest` is `sha256:` plus the SHA-256 digest of canonical JSON containing
+`approvalRef`, `sourceKind`, `sourceId`, `projectId`, `workspaceId`,
+`resourceRef`, `authorityClass`, `subject`, and `sourceEvidenceDigest`, with
+sorted keys and compact separators. `sourceEvidenceDigest` is the immutable
+plan digest for a Roadex human decision and the canonical immutable plan digest
+computed from the stored admin-plan payload for an admin plan. The status
+lookup recomputes this value from the binding plus the exact current source
+record and rejects a mismatch. It never trusts a digest supplied by Roadex.
+
+Overseer exposes one authenticated read-only exact lookup:
+
+```text
+GET /roadex/approval-status?approval_ref=<exact opaque reference>
+```
+
+The response is redacted and bounded:
+
+```ts
+type RoadexApprovalStatusProjection = {
+  approvalRef: string;
+  sourceKind: 'admin-plan' | 'roadex-human-decision';
+  projectId: string;
+  workspaceId: string;
+  resourceRef: string;
+  authorityClass: ApprovalAuthorityClass;
+  subject: string;
+  scopeDigest: string;
+  decision: ApprovalDecision;
+  decisionVersion: string;
+  updatedAt: string;
+};
+```
+
+The endpoint loads one exact immutable binding, loads the exact bound source
+record, verifies source identity and scope digest, and derives decision and
+decision version server-side. It never accepts scope fields, returns lists,
+mutates state, grants approval, executes a plan, or exposes raw paths,
+credentials, commands, reasons, or unrestricted URLs. Missing, legacy-unbound,
+conflicting, or malformed records fail closed.
+
+The initial source implementation adds the reusable binding store, exact
+status projection, and producer-facing transaction helper. A Roadex-owned
+approval producer is eligible only when it calls that helper inside the same
+transaction that first persists its source plan. Existing producers and stored
+records are not backfilled or rewritten. Adding a new producer integration is
+source work for that producer and does not authorize deployment, staging a live
+plan, or changing any existing approval.
+
 ## Persisted State
 
 Approval waits are stored separately from `RoadexSession` so lifecycle history
