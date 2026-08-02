@@ -388,6 +388,7 @@ describe('ApprovalCoordinator', () => {
     const gate = deferred<NormalizedApprovalStatus>();
     const session = fixtureSession();
     const waits: ApprovalWaitRecord[] = [];
+    let idSequence = 0;
     const coordinator = new ApprovalCoordinator(
       waits,
       [session],
@@ -398,7 +399,10 @@ describe('ApprovalCoordinator', () => {
         }),
       },
       callbacksBuilder().callbacks,
-      { clock: clockWithState(), idSource: { generateWaitId: () => 'wait-race' } },
+      {
+        clock: clockWithState(),
+        idSource: { generateWaitId: () => `wait-race-${++idSequence}` },
+      },
     );
 
     const first = coordinator.register(fixtureCapability({ sessionId: 'session-1' }), {
@@ -423,40 +427,92 @@ describe('ApprovalCoordinator', () => {
   });
 
   it('rechecks lifecycle and ownership after registration fetch before commit', async () => {
-    const gate = deferred<NormalizedApprovalStatus>();
-    const session = fixtureSession();
-    const coordinator = new ApprovalCoordinator(
-      [],
-      [session],
-      {
-        getStatus: vi.fn(async () => {
-          return gate.promise.then(() => fixtureStatus());
-        }),
-      },
-      callbacksBuilder().callbacks,
-      { clock: clockWithState(), idSource: { generateWaitId: () => 'wait-after-fetch' } },
-    );
-
-    const checks: Array<{ mutate: () => void; workspace?: string; lifecycle?: string; user?: string; thread?: string }> = [
-      { mutate: () => { session.lifecycle = 'blocked'; } },
-      { mutate: () => { session.userId = 'intruder'; } },
-      { mutate: () => { session.workspace.id = 'workspace-other'; } },
-      { mutate: () => { session.managedThreadId = 'thread-other'; } },
+    const checks: Array<{ label: string; mutate: (session: RoadexSession) => void }> = [
+      { label: 'lifecycle', mutate: (session) => { session.lifecycle = 'blocked'; } },
+      { label: 'user', mutate: (session) => { session.userId = 'intruder'; } },
+      { label: 'workspace', mutate: (session) => { session.workspace.id = 'workspace-other'; } },
+      { label: 'thread', mutate: (session) => { session.managedThreadId = 'thread-other'; } },
     ];
 
     for (const check of checks) {
-      const wait = Promise.resolve();
-      await Promise.all([]);
+      const gate = deferred<NormalizedApprovalStatus>();
+      const waits: ApprovalWaitRecord[] = [];
+      const session = fixtureSession();
+      const cb = callbacksBuilder({
+        persist: async () => {
+          throw new Error(`persist-should-not-run-${check.label}`);
+        },
+      });
+      const coordinator = new ApprovalCoordinator(
+        waits,
+        [session],
+        {
+          getStatus: vi.fn(async () => {
+            return gate.promise.then(() => fixtureStatus());
+          }),
+        },
+        {
+          ...cb.callbacks,
+          publish: cb.callbacks.publish,
+        },
+        { clock: clockWithState(), idSource: { generateWaitId: () => `wait-after-fetch-${check.label}` } },
+      );
+
       const resultPromise = coordinator.register(fixtureCapability(), { provider: 'overseer', approvalRef: 'admin.roadex.test' });
       await Promise.resolve();
-      check.mutate();
+
+      check.mutate(session);
       gate.resolve(fixtureStatus());
-      await resultPromise.then((result) => {
-        expect(result).toMatchObject({ ok: false, code: 'scope-mismatch' });
-      });
-      expect(gate.promise).toBeTruthy();
-      expect(wait).toBeDefined();
+
+      const result = await resultPromise;
+      expect(result).toMatchObject({ ok: false, code: 'scope-mismatch' });
+      expect(waits).toHaveLength(0);
+      expect(session.waitingApproval).toBeUndefined();
+      expect(cb.events).toHaveLength(0);
+      expect(cb.audits).toHaveLength(0);
     }
+  });
+
+  it('reserves wait IDs globally across concurrent registrations in different sessions', async () => {
+    const statuses = [fixtureStatus(), fixtureStatus()];
+    const waits: ApprovalWaitRecord[] = [];
+    const sessions = [
+      fixtureSession({ id: 'session-1' }),
+      fixtureSession({ id: 'session-2', managedThreadId: 'thread-2', codexThreadId: 'thread-2' }),
+    ];
+
+    let idCalls = 0;
+    const idSource = {
+      generateWaitId: () => {
+        const next = idCalls === 0 ? 'wait-dup' : idCalls === 1 ? 'wait-dup' : `wait-${idCalls}`;
+        idCalls += 1;
+        return next;
+      },
+    };
+
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      sessions,
+      statusSequenceProvider(statuses),
+      callbacksBuilder().callbacks,
+      { clock: clockWithState(), idSource },
+    );
+
+    const first = coordinator.register(fixtureCapability(), { provider: 'overseer', approvalRef: 'admin.roadex.test' });
+    const second = coordinator.register(
+      fixtureCapability({ sessionId: 'session-2', managedThreadId: 'thread-2' }),
+      { provider: 'overseer', approvalRef: 'admin.roadex.test' },
+    );
+
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(firstResult).toMatchObject({ ok: true });
+    expect(secondResult).toMatchObject({ ok: true });
+    if (!firstResult.ok || !secondResult.ok) {
+      return;
+    }
+    expect(firstResult.wait.waitId).not.toBe(secondResult.wait.waitId);
+    expect(waits).toHaveLength(2);
+    expect(new Set(waits.map((wait) => wait.id)).size).toBe(2);
   });
 
   it('rejects generated wait id collisions and invalid IDs without persistence', async () => {
@@ -1105,6 +1161,14 @@ describe('ApprovalCoordinator', () => {
       { result: Object.create({ status: 'started', runnerRunId: 'runner-1' }), expectedState: 'resume-reconciliation-required' },
       { result: nonEnumerable as unknown, expectedState: 'resume-reconciliation-required' },
       {
+        result: new Proxy({}, {
+          get: () => {
+            throw new Error('hostile-getter');
+          },
+        }) as unknown,
+        expectedState: 'resume-reconciliation-required',
+      },
+      {
         result: (() => {
           const target = { status: 'started' } as Record<string, unknown> & { [symbol]: unknown };
           Object.defineProperty(target, symbol, { value: 'bad', enumerable: true });
@@ -1265,11 +1329,108 @@ describe('ApprovalCoordinator', () => {
     const tickPromise = coordinator.tick();
     await Promise.resolve();
     await coordinator.closeSessionWait('session-1');
-    gate.resolve({ status: 'capacity', retryAt: clock.now() });
+    gate.resolve({ status: 'capacity', retryAt: '2026-08-02T18:00:30.000Z' });
     await tickPromise;
 
     expect(waits[0].state).toBe('session-closed');
     expect(waits[0].runnerRunId).toBeUndefined();
+  });
+
+  it('moves to reconciliation for close races with malformed and hostile proxy dispatch results', async () => {
+    const scenarios: Array<{ label: string; result: unknown }> = [
+      { label: 'malformed', result: { invalid: 'shape' } },
+      {
+        label: 'proxy',
+        result: new Proxy({}, {
+          get: () => {
+            throw new Error('hostile-getter');
+          },
+        }),
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const clock = clockWithState();
+      const waits = [fixtureWait({ state: 'approved-resume-queued', nextCheckAt: clock.now(), id: `wait-${scenario.label}` })];
+      const sessions = [fixtureSession()];
+      bindSessionToWait(sessions[0], waits[0]);
+      const queueStarted = deferred<void>();
+      const gate = deferred<unknown>();
+
+      const coordinator = new ApprovalCoordinator(
+        waits,
+        sessions,
+        statusSequenceProvider([fixtureStatus({ decision: 'approved' })]),
+        {
+          ...callbacksBuilder({}).callbacks,
+          queueContinuation: async () => {
+            queueStarted.resolve();
+            return gate.promise as Promise<ApprovalContinuationDispatchResult>;
+          },
+        },
+        { clock },
+      );
+
+      const tickPromise = coordinator.tick();
+      await Promise.resolve();
+      await queueStarted.promise;
+      await coordinator.closeSessionWait('session-1');
+      gate.resolve(scenario.result);
+      await tickPromise;
+
+      expect(waits[0].state).toBe('resume-reconciliation-required');
+      expect(waits[0].runnerRunId).toBeUndefined();
+    }
+  });
+
+  it('waits for in-flight registration persistence before allowing close', async () => {
+    const clock = clockWithState();
+    const waits: ApprovalWaitRecord[] = [];
+    const sessions = [fixtureSession()];
+    const order: string[] = [];
+    const persistGate = deferred<void>();
+    const persistStarted = deferred<void>();
+
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      sessions,
+      statusSequenceProvider([fixtureStatus()]),
+      {
+        ...callbacksBuilder().callbacks,
+        persist: async () => {
+          order.push('persist');
+          persistStarted.resolve();
+          if (order.length === 1) {
+            await persistGate.promise;
+          }
+        },
+      },
+      { clock },
+    );
+
+    const registerPromise = coordinator.register(fixtureCapability(), {
+      provider: 'overseer',
+      approvalRef: 'admin.roadex.test',
+    });
+    await persistStarted.promise;
+
+    let closeResolved = false;
+    const closePromise = coordinator.closeSessionWait('session-1').then(() => {
+      closeResolved = true;
+    });
+    await Promise.resolve();
+
+    expect(order).toEqual(['persist']);
+    expect(closeResolved).toBe(false);
+
+    persistGate.resolve();
+    await registerPromise;
+    await closePromise;
+
+    expect(order).toEqual(['persist', 'persist']);
+    expect(waits).toHaveLength(1);
+    expect(waits[0].state).toBe('session-closed');
+    expect(closeResolved).toBe(true);
   });
 
   it('handles pre-queue binding drift to security-failure without queueing continuation', async () => {
@@ -1299,6 +1460,107 @@ describe('ApprovalCoordinator', () => {
 
     expect(wait.state).toBe('security-failure');
     expect(queueContinuation).not.toHaveBeenCalled();
+  });
+
+  it('requires exact public waiting summary before dispatch, including per-field tamper and extra key', async () => {
+    const clock = clockWithState();
+    const tamperCases: Array<{ label: string; mutate: (summary: WaitingApprovalSummary & Record<string, unknown>) => void }> = [
+      { label: 'waitId', mutate: (summary) => { summary.waitId = 'tampered'; } },
+      { label: 'approvalRef', mutate: (summary) => { summary.approvalRef = 'tampered.approval'; } },
+      { label: 'subject', mutate: (summary) => { summary.subject = 'tampered subject'; } },
+      { label: 'consoleSurface', mutate: (summary) => { summary.consoleSurface = 'overview'; } },
+      { label: 'state', mutate: (summary) => { summary.state = 'pending'; } },
+      { label: 'updatedAt', mutate: (summary) => { summary.updatedAt = '2026-08-02T00:00:00.000Z'; } },
+      {
+        label: 'consolePath',
+        mutate: (summary) => {
+          summary.consolePath = `${summary.consoleSurface}/approvals/${summary.approvalRef}`;
+        },
+      },
+      {
+        label: 'extra-key',
+        mutate: (summary) => {
+          summary.extraneous = 'value';
+        },
+      },
+    ];
+
+    for (const tamper of tamperCases) {
+      const wait = fixtureWait({
+        state: 'approved-resume-queued',
+        id: `wait-${tamper.label}`,
+        nextCheckAt: clock.now(),
+      });
+      const session = fixtureSession({ id: `session-${tamper.label}` });
+      wait.sessionId = session.id;
+      bindSessionToWait(session, wait);
+      const queueContinuation = vi.fn(async () => ({ status: 'started', runnerRunId: 'runner-1' }));
+      const coordinator = new ApprovalCoordinator(
+        [wait],
+        [session],
+        statusSequenceProvider([fixtureStatus({ decision: 'approved' })]),
+        {
+          ...callbacksBuilder().callbacks,
+          queueContinuation,
+        },
+        { clock },
+      );
+
+      const original = session.waitingApproval as WaitingApprovalSummary & Record<string, unknown>;
+      const mutated = { ...original };
+      tamper.mutate(mutated);
+      session.waitingApproval = mutated;
+
+      await coordinator.tick();
+
+      expect(queueContinuation).not.toHaveBeenCalled();
+      expect(wait.state).toBe('security-failure');
+    }
+  });
+
+  it('persists pre-queue security-failure before redacted publish and audit', async () => {
+    const order: string[] = [];
+    const clock = clockWithState();
+    const wait = fixtureWait({
+      state: 'approved-resume-queued',
+      nextCheckAt: clock.now(),
+      sessionId: 'session-security-failure',
+    });
+    const session = fixtureSession({ id: 'session-security-failure' });
+    bindSessionToWait(session, wait);
+
+    const published: string[] = [];
+    const coordinator = new ApprovalCoordinator(
+      [wait],
+      [session],
+      statusSequenceProvider([fixtureStatus({ decision: 'approved' })]),
+      {
+        ...callbacksBuilder({
+          persist: async () => {
+            order.push('persist');
+          },
+          publish: (_sessionId, message) => {
+            order.push('publish');
+            published.push(message);
+          },
+          audit: () => {
+            order.push('audit');
+          },
+        }).callbacks,
+      },
+      { clock },
+    );
+
+    session.waitingApproval = {
+      ...session.waitingApproval,
+      approvalRef: 'tampered.approval',
+    };
+
+    await coordinator.tick();
+
+    expect(order).toEqual(['persist', 'publish', 'audit']);
+    expect(published).toEqual(['Roadex human approval result: security-failure']);
+    expect(wait.state).toBe('security-failure');
   });
 
   it('preserves safe runner id and reconciles when binding mutates during callback result', async () => {
