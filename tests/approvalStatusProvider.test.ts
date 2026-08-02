@@ -834,6 +834,41 @@ describe('createOverseerApprovalStatusProvider', () => {
     expect(message).toBe(requestFailedCode);
   });
 
+  it('does not trust genuine provider failures replayed across requests or providers', async () => {
+    const originatingProviders = [
+      createOverseerApprovalStatusProvider({
+        readToken: () => '',
+        fetchJson: async () => buildProjection(),
+      }),
+      createOverseerApprovalStatusProvider({
+        readToken: () => token,
+        fetchJson: async () => ({ ...buildProjection(), unexpected: 'field' }),
+      }),
+      createOverseerApprovalStatusProvider({
+        readToken: () => token,
+        fetchJson: async () => buildProjection({ projectId: 'project-neighbor' }),
+      }),
+    ];
+
+    for (const originatingProvider of originatingProviders) {
+      const captured = await originatingProvider.getStatus(approvalRef, validScope)
+        .then(() => undefined, (error) => error as Error & { code?: string });
+      expect(captured).toBeInstanceOf(Error);
+
+      captured.message = requestTimeoutCode;
+      captured.code = scopeMismatchCode;
+
+      const receivingProvider = createOverseerApprovalStatusProvider({
+        readToken: () => token,
+        fetchJson: async () => {
+          throw captured;
+        },
+      });
+
+      await expectFailureCode(receivingProvider.getStatus(approvalRef, validScope), requestFailedCode);
+    }
+  });
+
   it('normalizes injected stable public error codes to request_failed', async () => {
     const injectedCodes = [
       requestTimeoutCode,
