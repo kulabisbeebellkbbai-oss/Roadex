@@ -341,3 +341,42 @@ Status: deployed and locally verified; live DonutHole mutation not authorized
 - No grant has been consumed, no controlled audit event exists, and no
   DonutHole dependency install, lockfile creation, commit, or push occurred.
 - The next boundary is explicit approval for one live DonutHole operation.
+
+## Human-Approval Continuation Workflow
+
+Status: design and limited source expansion approved; implementation plan
+ready for execution selection
+
+- Approved design:
+  `docs/superpowers/specs/2026-08-02-human-approval-continuation-design.md`
+- B.A. owns the persisted approval-wait state machine, read-only Overseer
+  provider, session-bound MCP registration, coordinator, and internal
+  continuation dispatch.
+- Face owns the safe session projection, transcript waiting card, header
+  indicator, prompt gating, reconnect behavior, accessibility, and responsive
+  layouts.
+- Stockwell owns the authority-boundary, redaction, fail-closed, and security
+  review.
+- Murdock owns focused, restart, idempotency, responsive, integration, and
+  harmless managed-thread smoke verification.
+- Roadex may observe an exact authoritative approval but cannot create, alter,
+  infer, dispatch, or grant it.
+- Privileged operational approvals identify the Admin Console; project and
+  workflow approvals identify the Overview Console. The controlled thread
+  cannot choose the console target or a URL.
+- Only a verified `approved` decision queues automatic continuation in the same
+  managed thread. Rejection, revision, expiry, revocation, and ambiguous crash
+  recovery never fail open.
+- Existing app-publication worktree changes remain separate and must be
+  preserved during implementation.
+- Source implementation and local tests do not authorize a Roadex service
+  rebuild, restart, live approval mutation, provisioning action, gateway
+  change, firewall or IDS change, or protected live smoke.
+- The approved limited Overseer source expansion adds an immutable Roadex scope
+  binding inside a producer's original staging transaction and one
+  authenticated exact read-only status projection. Legacy unbound approvals
+  stay valid in Overseer but are ineligible for Roadex auto-resume. There is no
+  binding-rewrite, approval, execution, list, or live-data migration endpoint.
+- This approval covers source changes and local tests only. It does not cover
+  an Overseer or Roadex service rebuild/restart, deployment, live approval
+  mutation, provisioning, protected smoke, gateway, firewall, or IDS change.
