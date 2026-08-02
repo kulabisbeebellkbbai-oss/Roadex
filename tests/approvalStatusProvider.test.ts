@@ -386,7 +386,7 @@ describe('createOverseerApprovalStatusProvider', () => {
     const requiredProjectionFieldSet = new Set(requiredProjectionFields as readonly string[]);
     const propertyGetLog: Array<string | symbol> = [];
     const descriptorLog = new Map<string, PropertyDescriptor>();
-    const descriptorCallCount = new Map<string, number>();
+    const descriptorReadCount = new Map<string, number>();
 
     const proxyProjection = new Proxy(source, {
       get(_target, property) {
@@ -404,10 +404,19 @@ describe('createOverseerApprovalStatusProvider', () => {
       },
       getOwnPropertyDescriptor(_target, property) {
         if (typeof property === 'string' && requiredProjectionFieldSet.has(property)) {
-          descriptorCallCount.set(property, (descriptorCallCount.get(property) ?? 0) + 1);
+          const call = (descriptorReadCount.get(property) ?? 0) + 1;
+          descriptorReadCount.set(property, call);
           const descriptor = Reflect.getOwnPropertyDescriptor(_target as Record<string, unknown>, property);
           if (descriptor !== undefined) {
             descriptorLog.set(property, descriptor);
+          }
+          if (call > 1) {
+            return {
+              value: undefined,
+              enumerable: true,
+              configurable: false,
+              writable: false,
+            } as PropertyDescriptor;
           }
           return descriptor;
         }
@@ -428,10 +437,11 @@ describe('createOverseerApprovalStatusProvider', () => {
     });
 
     expect(propertyGetLog.includes('then')).toBe(true);
+    for (const field of requiredProjectionFields) {
+      expect(propertyGetLog.includes(field)).toBe(false);
+    }
 
-    const schemaGets = propertyGetLog.filter((property) =>
-      typeof property === 'string' && requiredProjectionFieldSet.has(property));
-    expect(schemaGets).toHaveLength(0);
+    expect(propertyGetLog.every((property) => property === 'then' || typeof property === 'symbol')).toBe(true);
 
     for (const field of requiredProjectionFields) {
       const descriptor = descriptorLog.get(field);
@@ -440,7 +450,7 @@ describe('createOverseerApprovalStatusProvider', () => {
       expect(Object.prototype.hasOwnProperty.call(descriptor, 'value')).toBe(true);
       expect(Object.prototype.hasOwnProperty.call(descriptor, 'get')).toBe(false);
       expect(Object.prototype.hasOwnProperty.call(descriptor, 'set')).toBe(false);
-      expect(descriptorCallCount.get(field)).toBe(1);
+      expect(descriptorReadCount.get(field)).toBe(1);
     }
   });
 
@@ -792,6 +802,36 @@ describe('createOverseerApprovalStatusProvider', () => {
     for (const secret of fakeSecrets) {
       expect(message).not.toContain(secret);
     }
+  });
+
+  it('does not trust mutated constructor-sourced provider errors from injected callbacks', async () => {
+    let capturedProviderError: unknown;
+    try {
+      createOverseerApprovalStatusProvider({
+        apiBase: 'https://example.invalid' as unknown as 'http://127.0.0.1:8766',
+        readToken: () => token,
+      });
+    } catch (error) {
+      capturedProviderError = error;
+    }
+
+    expect(capturedProviderError).toBeInstanceOf(Error);
+
+    const replayedError = capturedProviderError as { message: string; code?: string };
+    replayedError.message = scopeMismatchCode;
+    replayedError.code = requestTimeoutCode;
+
+    const provider = createOverseerApprovalStatusProvider({
+      readToken: () => token,
+      fetchJson: async () => {
+        throw replayedError;
+      },
+    });
+
+    const message = await expectFailureCode(provider.getStatus(approvalRef, validScope), requestFailedCode);
+    expect(message).not.toBe(scopeMismatchCode);
+    expect(message).not.toBe(requestTimeoutCode);
+    expect(message).toBe(requestFailedCode);
   });
 
   it('normalizes injected stable public error codes to request_failed', async () => {

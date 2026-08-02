@@ -71,14 +71,14 @@ const CONTENT_LENGTH_PATTERN = /^(?:0|[1-9]\d*)$/;
 export function createOverseerApprovalStatusProvider(options: OverseerProviderOptions): ApprovalStatusProvider {
   const apiBase = options.apiBase ?? OVERSEER_API_BASE;
   if (apiBase !== OVERSEER_API_BASE) {
-    throw providerError('approval_status:api_base_not_permitted');
+    throw providerError('approval_status:api_base_not_permitted', API_BASE_ERROR_MARKER);
   }
 
-  const fetchJson = options.fetchJson
-    ?? ((path: string, token: string, signal: AbortSignal) => defaultFetchJson(apiBase, path, token, signal));
+  const configuredFetchJson = options.fetchJson;
 
   return {
     getStatus: async (approvalRef, scope) => {
+      const requestMarker = {};
       const canonical = {
         approvalRef: validateCanonicalOpaque('approvalRef', approvalRef, MAX_APPROVAL_REF_LENGTH),
         projectId: validateCanonicalOpaque('projectId', scope.projectId, MAX_SCOPE_FIELD_LENGTH),
@@ -90,12 +90,12 @@ export function createOverseerApprovalStatusProvider(options: OverseerProviderOp
       try {
         token = options.readToken();
       } catch {
-        throw providerError('approval_status:token_read_failed');
+        throw providerError('approval_status:token_read_failed', requestMarker);
       }
       try {
         token = validateBearerToken(token);
       } catch {
-        throw providerError('approval_status:token_invalid');
+        throw providerError('approval_status:token_invalid', requestMarker);
       }
 
       const encodedRef = encodeURIComponent(canonical.approvalRef);
@@ -103,16 +103,21 @@ export function createOverseerApprovalStatusProvider(options: OverseerProviderOp
 
       let payload: unknown;
       try {
-        payload = await withTimeout((signal) => fetchJson(path, token, signal));
+        payload = await withTimeout((signal) => {
+          if (configuredFetchJson === undefined) {
+            return defaultFetchJson(apiBase, path, token, signal, requestMarker);
+          }
+          return configuredFetchJson(path, token, signal);
+        }, requestMarker);
       } catch (_error) {
-        throw normalizeReadError(_error);
+        throw normalizeReadError(_error, requestMarker);
       }
 
       let projection: RoadexApprovalStatusProjection;
       try {
         projection = parseRoadexApprovalStatusProjection(payload);
       } catch {
-        throw providerError('approval_status:invalid_payload');
+        throw providerError('approval_status:invalid_payload', requestMarker);
       }
 
       const scopeMatches = {
@@ -128,7 +133,7 @@ export function createOverseerApprovalStatusProvider(options: OverseerProviderOp
         || !scopeMatches.workspaceId
         || !scopeMatches.resourceRef
       ) {
-        throw providerError('approval_status:scope_mismatch');
+        throw providerError('approval_status:scope_mismatch', requestMarker);
       }
 
       return {
@@ -147,21 +152,21 @@ export function createOverseerApprovalStatusProvider(options: OverseerProviderOp
   };
 }
 
-function normalizeReadError(error: unknown): Error {
-  if (isApprovalStatusProviderError(error)) {
+function normalizeReadError(error: unknown, requestMarker: object): Error {
+  if (isApprovalStatusProviderError(error, requestMarker)) {
     return error;
   }
-  return providerError('approval_status:request_failed');
+  return providerError('approval_status:request_failed', requestMarker);
 }
 
-async function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+async function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>, requestMarker: object): Promise<T> {
   const controller = new AbortController();
   let operationSettled = false;
   let timeoutSettled = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
-  const timeoutError = providerError('approval_status:request_timeout');
-  const requestFailedError = providerError('approval_status:request_failed');
+  const timeoutError = providerError('approval_status:request_timeout', requestMarker);
+  const requestFailedError = providerError('approval_status:request_failed', requestMarker);
   type RaceResult = { kind: 'success'; value: T } | { kind: 'timeout' } | { kind: 'failure'; error: unknown };
 
   const wrappedOperation = Promise.resolve()
@@ -192,7 +197,7 @@ async function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>): P
 
     operationSettled = true;
     if (result.kind === 'failure') {
-      if (isApprovalStatusProviderError(result.error)) {
+      if (isApprovalStatusProviderError(result.error, requestMarker)) {
         throw result.error;
       }
       throw requestFailedError;
@@ -207,7 +212,7 @@ async function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>): P
     if (timeoutSettled) {
       throw timeoutError;
     }
-    if (isApprovalStatusProviderError(error)) {
+    if (isApprovalStatusProviderError(error, requestMarker)) {
       throw error;
     }
     throw requestFailedError;
@@ -219,7 +224,13 @@ async function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>): P
   }
 }
 
-async function defaultFetchJson(apiBase: string, path: string, token: string, signal: AbortSignal): Promise<unknown> {
+async function defaultFetchJson(
+  apiBase: string,
+  path: string,
+  token: string,
+  signal: AbortSignal,
+  requestMarker: object,
+): Promise<unknown> {
   const response = await fetch(`${apiBase}${path}`, {
     method: 'GET',
     headers: {
@@ -230,13 +241,13 @@ async function defaultFetchJson(apiBase: string, path: string, token: string, si
   });
 
   if (!response.ok) {
-    throw providerError('approval_status:request_failed');
+    throw providerError('approval_status:request_failed', requestMarker);
   }
 
-  const declaredLength = parseDeclaredLength(response.headers.get('content-length'));
+  const declaredLength = parseDeclaredLength(response.headers.get('content-length'), requestMarker);
 
   if (!response.body) {
-    throw providerError('approval_status:empty_response');
+    throw providerError('approval_status:empty_response', requestMarker);
   }
 
   const reader = response.body.getReader();
@@ -263,7 +274,7 @@ async function defaultFetchJson(apiBase: string, path: string, token: string, si
       } catch {
         // best-effort cancellation; size policy takes precedence.
       }
-      throw providerError('approval_status:response_oversized');
+      throw providerError('approval_status:response_oversized', requestMarker);
     }
 
     chunks.push(value);
@@ -271,10 +282,10 @@ async function defaultFetchJson(apiBase: string, path: string, token: string, si
 
   const body = concatUint8Arrays(chunks, totalBytes);
   if (body.byteLength === 0) {
-    throw providerError('approval_status:empty_response');
+    throw providerError('approval_status:empty_response', requestMarker);
   }
   if (declaredLength !== undefined && declaredLength !== body.byteLength) {
-    throw providerError('approval_status:invalid_content_length');
+    throw providerError('approval_status:invalid_content_length', requestMarker);
   }
 
   let text: string;
@@ -283,30 +294,30 @@ async function defaultFetchJson(apiBase: string, path: string, token: string, si
       fatal: true,
     }).decode(body);
   } catch {
-    throw providerError('approval_status:invalid_payload');
+    throw providerError('approval_status:invalid_payload', requestMarker);
   }
 
   try {
     return JSON.parse(text);
   } catch {
-    throw providerError('approval_status:invalid_payload');
+    throw providerError('approval_status:invalid_payload', requestMarker);
   }
 }
 
-function parseDeclaredLength(value: string | null): number | undefined {
+function parseDeclaredLength(value: string | null, requestMarker: object): number | undefined {
   if (value === null) {
     return undefined;
   }
   if (!CONTENT_LENGTH_PATTERN.test(value)) {
-    throw providerError('approval_status:invalid_content_length');
+    throw providerError('approval_status:invalid_content_length', requestMarker);
   }
 
   const declaredLength = Number(value);
   if (!Number.isSafeInteger(declaredLength) || declaredLength < 0) {
-    throw providerError('approval_status:invalid_content_length');
+    throw providerError('approval_status:invalid_content_length', requestMarker);
   }
   if (declaredLength > MAX_RESPONSE_BYTES) {
-    throw providerError('approval_status:response_oversized');
+    throw providerError('approval_status:response_oversized', requestMarker);
   }
 
   return declaredLength;
@@ -333,15 +344,21 @@ function parseRoadexApprovalStatusProjection(value: unknown): RoadexApprovalStat
   }
 
   const keys = Reflect.ownKeys(value);
-  if (keys.length !== APPROVAL_PROJECTION_REQUIRED_KEY_SET.size) {
+  if (keys.length !== APPROVAL_PROJECTION_REQUIRED_KEYS.length) {
     throw new Error('Approval status has unexpected shape.');
   }
 
-  const values = Object.create(null) as Record<string, unknown>;
   for (const key of keys) {
     if (typeof key !== 'string') {
       throw new Error('Approval status has non-string keys.');
     }
+    if (!APPROVAL_PROJECTION_REQUIRED_KEY_SET.has(key)) {
+      throw new Error('Approval status has unexpected field.');
+    }
+  }
+
+  const values = Object.create(null) as Record<string, unknown>;
+  for (const key of APPROVAL_PROJECTION_REQUIRED_KEYS) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (
       descriptor === undefined
@@ -351,9 +368,6 @@ function parseRoadexApprovalStatusProjection(value: unknown): RoadexApprovalStat
       || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
     ) {
       throw new Error('Approval status has non-enumerable field.');
-    }
-    if (!APPROVAL_PROJECTION_REQUIRED_KEY_SET.has(key)) {
-      throw new Error('Approval status has unexpected field.');
     }
     values[key] = descriptor.value;
   }
@@ -439,25 +453,22 @@ class ProviderFailure extends Error {
   }
 }
 
-const providerFailures = new WeakSet<object>();
+const API_BASE_ERROR_MARKER = Object.freeze({});
+const providerErrorMarkers = new WeakMap<object, object>();
 
 type ApprovalStatusProviderError = ProviderFailure;
 
-function isApprovalStatusProviderError(error: unknown): error is ApprovalStatusProviderError {
+function isApprovalStatusProviderError(error: unknown, requestMarker: object): error is ApprovalStatusProviderError {
   if (error === null || typeof error !== 'object') {
     return false;
   }
 
-  try {
-    return providerFailures.has(error);
-  } catch {
-    return false;
-  }
+  return providerErrorMarkers.get(error) === requestMarker;
 }
 
-function providerError(code: ProviderErrorCode): ApprovalStatusProviderError {
+function providerError(code: ProviderErrorCode, requestMarker: object): ApprovalStatusProviderError {
   const error = new ProviderFailure(code);
-  providerFailures.add(error);
+  providerErrorMarkers.set(error, requestMarker);
   return error;
 }
 
