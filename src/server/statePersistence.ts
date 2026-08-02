@@ -543,8 +543,15 @@ function sanitizeOperation(record: DeviceBridgeOperationRecord): DeviceBridgeOpe
 }
 
 function sanitizeApprovalWait(record: unknown): ApprovalWaitRecord | undefined {
-  if (record === null || typeof record !== 'object' || Object.prototype.hasOwnProperty.call(record, 'consolePath')) return undefined;
-  const candidate = record as Partial<ApprovalWaitRecord>;
+  if (record === null || typeof record !== 'object') return undefined;
+  const candidate = record as Record<string, unknown>;
+  const recordKeys = Object.keys(candidate);
+  for (const key of recordKeys) {
+    if (!APPROVAL_WAIT_ALLOWED_KEYS.has(key)) return undefined;
+  }
+  if (
+    !APPROVAL_WAIT_REQUIRED_KEY_LIST.every((key) => recordKeys.includes(key))
+  ) return undefined;
   if (!isApprovalAuthorityClass(candidate.authorityClass)) return undefined;
   const consoleSurface = consoleForAuthority(candidate.authorityClass);
   const checkAttempt = candidate.checkAttempt as number;
@@ -626,6 +633,38 @@ const APPROVAL_WAIT_STATES: ApprovalWaitState[] = [
   'session-closed',
 ];
 
+const APPROVAL_WAIT_REQUIRED_KEYS = new Set([
+  'id',
+  'sessionId',
+  'userId',
+  'projectId',
+  'workspaceId',
+  'managedThreadId',
+  'provider',
+  'approvalRef',
+  'resourceRef',
+  'authorityClass',
+  'consoleSurface',
+  'subject',
+  'state',
+  'decisionVersion',
+  'continuationId',
+  'checkAttempt',
+  'nextCheckAt',
+  'createdAt',
+  'updatedAt',
+]);
+
+const APPROVAL_WAIT_ALLOWED_KEYS = new Set([
+  ...APPROVAL_WAIT_REQUIRED_KEYS,
+  'decisionObservedAt',
+  'dispatchReservedAt',
+  'runnerRunId',
+  'resumedAt',
+]);
+
+const APPROVAL_WAIT_REQUIRED_KEY_LIST = [...APPROVAL_WAIT_REQUIRED_KEYS];
+
 const APPROVAL_AUTHORITY_CLASSES: ApprovalAuthorityClass[] = ['privileged-operation', 'project-workflow'];
 
 function isApprovalAuthorityClass(value: unknown): value is ApprovalAuthorityClass {
@@ -664,15 +703,20 @@ function validIsoDate(value: unknown): boolean {
   if (fraction < 0 || fraction > 999) return false;
   const expectedSeconds = Date.parse(value);
   if (Number.isNaN(expectedSeconds)) return false;
+  const offsetHours = match[8] === 'Z' ? 0 : Number(match[10]);
+  const offsetMinutes = match[8] === 'Z' ? 0 : Number(match[11]);
   const timezoneMinutes = match[8] === 'Z'
     ? 0
-    : ((Number(match[10]) * 60 + Number(match[11])) * (match[9] === '-' ? -1 : 1));
+    : ((offsetHours * 60 + offsetMinutes) * (match[9] === '-' ? -1 : 1));
   if (
     Number.isNaN(timezoneMinutes)
     || hour > 23
     || minute > 59
-    || Number(match[10]) > 23
-    || Number(match[11]) > 59
+    || Number.isNaN(offsetHours)
+    || Number.isNaN(offsetMinutes)
+    || offsetHours > 14
+    || offsetMinutes > 59
+    || (offsetHours === 14 && offsetMinutes !== 0)
   ) return false;
   const utcTime = Date.UTC(year, month - 1, day, hour, minute, second, fraction) - timezoneMinutes * 60000;
   const parsed = new Date(value);

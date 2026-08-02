@@ -194,6 +194,56 @@ describe('state persistence', () => {
     expect(state.approvalWaits.map((value) => value.id)).toEqual(['valid-wait']);
   });
 
+  it('rejects waits with extra own properties while preserving session and audit on in-memory sanitization', () => {
+    const now = new Date(0).toISOString();
+    const session = sessionFixture('session-1', 'ready', now);
+    const validWait = approvalWaitFixture({
+      id: 'valid-wait',
+      sessionId: session.id,
+      consoleSurface: 'admin',
+      authorityClass: 'privileged-operation',
+      approvalRef: 'approval-valid',
+      continuationId: 'cont-valid',
+    });
+    const extras = [
+      { key: 'consolePath', value: '/admin/approvals/approval-extra' },
+      { key: 'continuationText', value: 'unexpected' },
+      { key: 'credential', value: 'sneaky' },
+      { key: 'unexpected', value: 'still-bad' },
+    ] as const;
+
+    for (const extra of extras) {
+      const polluted = {
+        ...approvalWaitFixture({
+          id: `invalid-${extra.key}`,
+          sessionId: session.id,
+          consoleSurface: 'admin',
+          authorityClass: 'privileged-operation',
+          approvalRef: `approval-invalid-${extra.key}`,
+          continuationId: `cont-invalid-${extra.key}`,
+        }),
+        [extra.key]: extra.value,
+      } as unknown as ApprovalWaitRecord;
+      const state = serializeState({
+        sessions: [session],
+        approvalWaits: [polluted, validWait],
+        auditEvents: [{
+          id: 'audit-valid',
+          at: now,
+          actorId: 'user',
+          action: 'session.close',
+          resource: session.id,
+          outcome: 'allowed',
+          summary: 'kept',
+        }],
+      });
+
+      expect(state.sessions.map((value) => value.id)).toEqual([session.id]);
+      expect(state.auditEvents.map((value) => value.id)).toEqual(['audit-valid']);
+      expect(state.approvalWaits.map((value) => value.id)).toEqual(['valid-wait']);
+    }
+  });
+
   it('rejects mixed malformed approval waits in durable JSON load without dropping other state', () => {
     const dir = mkdtempSync(join(tmpdir(), 'roadex-state-'));
     const path = join(dir, 'state.json');
@@ -236,6 +286,59 @@ describe('state persistence', () => {
     expect(persistence.load().sessions.map((value) => value.id)).toEqual([session.id]);
     expect(persistence.load().auditEvents.map((value) => value.id)).toEqual(['audit-1']);
     expect(persistence.load().approvalWaits.map((value) => value.id)).toEqual(['json-valid']);
+  });
+
+  it('rejects waits with extra own properties in durable JSON load while preserving sibling state', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-state-'));
+    const path = join(dir, 'state.json');
+    const now = new Date(0).toISOString();
+    const session = sessionFixture('session-3', 'ready', now);
+    const validWait = approvalWaitFixture({
+      id: 'json-valid',
+      sessionId: session.id,
+      consoleSurface: 'admin',
+      authorityClass: 'privileged-operation',
+      approvalRef: 'approval-json-valid',
+      continuationId: 'cont-json-valid',
+    });
+    const extras = [
+      { key: 'consolePath', value: '/admin/approvals/approval-extra' },
+      { key: 'continuationText', value: 'unexpected' },
+      { key: 'credential', value: 'sneaky' },
+      { key: 'unexpected', value: 'still-bad' },
+    ] as const;
+
+    for (const extra of extras) {
+      const polluted = {
+        ...approvalWaitFixture({
+          id: `json-invalid-${extra.key}`,
+          sessionId: session.id,
+          consoleSurface: 'admin',
+          authorityClass: 'privileged-operation',
+          approvalRef: `approval-json-invalid-${extra.key}`,
+          continuationId: `cont-json-invalid-${extra.key}`,
+        }),
+        [extra.key]: extra.value,
+      } as unknown as ApprovalWaitRecord;
+      writeFileSync(path, JSON.stringify({
+        sessions: [session],
+        approvalWaits: [polluted, validWait],
+        auditEvents: [{
+          id: 'audit-1',
+          at: now,
+          actorId: 'user',
+          action: 'session.close',
+          resource: session.id,
+          outcome: 'allowed',
+          summary: 'persisted',
+        }],
+      }));
+      const persistence = createJsonFilePersistence(path);
+
+      expect(persistence.load().sessions.map((value) => value.id)).toEqual([session.id]);
+      expect(persistence.load().auditEvents.map((value) => value.id)).toEqual(['audit-1']);
+      expect(persistence.load().approvalWaits.map((value) => value.id)).toEqual(['json-valid']);
+    }
   });
 
   it('rejects malformed approval-wait timestamps and accepts timezone-aware ISO values', () => {
@@ -294,6 +397,10 @@ describe('state persistence', () => {
       '2026-08-02T18:00:00-5:30',
       '2026-08-02T18:00:00+24:00',
       '2026-08-02T18:00:00-05:60',
+      '2026-08-02T18:00:00+14:30',
+      '2026-08-02T18:00:00-14:30',
+      '2026-08-02T18:00:00+15:00',
+      '2026-08-02T18:00:00-15:00',
     ];
     for (const field of mutableFields) {
       for (const timestamp of malformedOffsets) {
@@ -437,6 +544,151 @@ describe('state persistence', () => {
       'active-middle',
       'active-newest',
     ]);
+  });
+
+  it('limits fresh terminal waits by ROADEX_MAX_APPROVAL_WAITS after retaining all active waits', () => {
+    const now = Date.UTC(2026, 7, 2);
+    const previousMax = process.env.ROADEX_MAX_APPROVAL_WAITS;
+    const previousRetention = process.env.ROADEX_APPROVAL_WAIT_RETENTION_MS;
+    process.env.ROADEX_MAX_APPROVAL_WAITS = '3';
+    process.env.ROADEX_APPROVAL_WAIT_RETENTION_MS = '10000';
+    try {
+      const state = serializeState({
+        approvalWaits: [
+          approvalWaitFixture({
+            id: 'active-newest',
+            sessionId: 'session',
+            consoleSurface: 'admin',
+            authorityClass: 'privileged-operation',
+            state: 'pending',
+            updatedAt: new Date(now - 100).toISOString(),
+            approvalRef: 'approval-active-newest',
+            continuationId: 'cont-active-newest',
+          }),
+          approvalWaitFixture({
+            id: 'active-older',
+            sessionId: 'session',
+            consoleSurface: 'admin',
+            authorityClass: 'privileged-operation',
+            state: 'approved-resume-queued',
+            updatedAt: new Date(now - 200).toISOString(),
+            approvalRef: 'approval-active-older',
+            continuationId: 'cont-active-older',
+          }),
+          approvalWaitFixture({
+            id: 'terminal-freshest',
+            sessionId: 'session',
+            consoleSurface: 'admin',
+            authorityClass: 'privileged-operation',
+            state: 'rejected',
+            updatedAt: new Date(now - 50).toISOString(),
+            approvalRef: 'approval-term-freshest',
+            continuationId: 'cont-term-freshest',
+          }),
+          approvalWaitFixture({
+            id: 'terminal-older',
+            sessionId: 'session',
+            consoleSurface: 'admin',
+            authorityClass: 'privileged-operation',
+            state: 'revoked',
+            updatedAt: new Date(now - 60).toISOString(),
+            approvalRef: 'approval-term-older',
+            continuationId: 'cont-term-older',
+          }),
+          approvalWaitFixture({
+            id: 'terminal-stale-similar',
+            sessionId: 'session',
+            consoleSurface: 'admin',
+            authorityClass: 'privileged-operation',
+            state: 'expired',
+            updatedAt: new Date(now - 120).toISOString(),
+            approvalRef: 'approval-term-similar',
+            continuationId: 'cont-term-similar',
+          }),
+        ],
+      }, { now });
+      expect(state.approvalWaits).toHaveLength(3);
+      expect(state.approvalWaits.map((record) => record.id).sort()).toEqual([
+        'active-newest',
+        'active-older',
+        'terminal-freshest',
+      ]);
+    } finally {
+      if (previousMax === undefined) {
+        delete process.env.ROADEX_MAX_APPROVAL_WAITS;
+      } else {
+        process.env.ROADEX_MAX_APPROVAL_WAITS = previousMax;
+      }
+      if (previousRetention === undefined) {
+        delete process.env.ROADEX_APPROVAL_WAIT_RETENTION_MS;
+      } else {
+        process.env.ROADEX_APPROVAL_WAIT_RETENTION_MS = previousRetention;
+      }
+    }
+  });
+
+  it('lets explicit maxApprovalWaits options override ROADEX_MAX_APPROVAL_WAITS', () => {
+    const now = Date.UTC(2026, 7, 2);
+    const previousMax = process.env.ROADEX_MAX_APPROVAL_WAITS;
+    process.env.ROADEX_MAX_APPROVAL_WAITS = '1';
+    try {
+      const state = serializeState({
+        approvalWaits: [
+          approvalWaitFixture({
+            id: 'active-single',
+            sessionId: 'session',
+            consoleSurface: 'admin',
+            authorityClass: 'privileged-operation',
+            state: 'pending',
+            updatedAt: new Date(now - 10).toISOString(),
+            approvalRef: 'approval-active-single',
+            continuationId: 'cont-active-single',
+          }),
+          approvalWaitFixture({
+            id: 'terminal-freshest',
+            sessionId: 'session',
+            consoleSurface: 'admin',
+            authorityClass: 'privileged-operation',
+            state: 'rejected',
+            updatedAt: new Date(now - 1).toISOString(),
+            approvalRef: 'approval-term-freshest',
+            continuationId: 'cont-term-freshest',
+          }),
+          approvalWaitFixture({
+            id: 'terminal-second',
+            sessionId: 'session',
+            consoleSurface: 'admin',
+            authorityClass: 'privileged-operation',
+            state: 'expired',
+            updatedAt: new Date(now - 2).toISOString(),
+            approvalRef: 'approval-term-second',
+            continuationId: 'cont-term-second',
+          }),
+          approvalWaitFixture({
+            id: 'terminal-third',
+            sessionId: 'session',
+            consoleSurface: 'admin',
+            authorityClass: 'privileged-operation',
+            state: 'revoked',
+            updatedAt: new Date(now - 3).toISOString(),
+            approvalRef: 'approval-term-third',
+            continuationId: 'cont-term-third',
+          }),
+        ],
+      }, { now, maxApprovalWaits: 3 });
+      expect(state.approvalWaits).toHaveLength(3);
+      expect(state.approvalWaits.map((record) => record.id).sort()).toEqual([
+        'active-single',
+        'terminal-freshest',
+        'terminal-second',
+      ]);
+    } finally {
+      if (previousMax === undefined) {
+        delete process.env.ROADEX_MAX_APPROVAL_WAITS;
+      } else {
+        process.env.ROADEX_MAX_APPROVAL_WAITS = previousMax;
+      }
+    }
   });
 
   it('expires stale terminal waits based on ROADEX_APPROVAL_WAIT_RETENTION_MS', () => {
