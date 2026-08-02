@@ -116,6 +116,18 @@ function fixtureWait(overrides: Partial<ApprovalWaitRecord> = {}): ApprovalWaitR
   };
 }
 
+function bindSessionToWait(session: RoadexSession, wait: ApprovalWaitRecord): void {
+  session.lifecycle = 'paused';
+  session.waitingApproval = {
+    waitId: wait.id,
+    approvalRef: wait.approvalRef,
+    subject: wait.subject,
+    consoleSurface: wait.consoleSurface,
+    state: wait.state,
+    updatedAt: wait.updatedAt,
+  };
+}
+
 function statusSequenceProvider(sequence: Array<NormalizedApprovalStatus>): ApprovalStatusProvider {
   const source = [...sequence];
   return {
@@ -587,6 +599,7 @@ describe('ApprovalCoordinator', () => {
     });
     const waits = [wait];
     const sessions = [session];
+    bindSessionToWait(session, wait);
     const persisted: Array<{
       session: Pick<RoadexSession, 'lifecycle' | 'waitingApproval'>;
       wait: ApprovalWaitRecord;
@@ -741,6 +754,45 @@ describe('ApprovalCoordinator', () => {
     expect(coordinator.nextCheckAt(clock.now(), 5)).toBe('2026-08-02T18:01:00.000Z');
   });
 
+  it('separates registration lookups from coordinator refresh checks', async () => {
+    const clock = clockWithState();
+    const waits: ApprovalWaitRecord[] = [];
+    const sessions = [fixtureSession()];
+    const provider = {
+      getStatus: vi.fn()
+        .mockResolvedValueOnce(fixtureStatus())
+        .mockResolvedValueOnce(fixtureStatus({ decision: 'pending' }))
+        .mockResolvedValueOnce(fixtureStatus({ decision: 'pending' })),
+    } satisfies ApprovalStatusProvider;
+
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      sessions,
+      provider,
+      callbacksBuilder().callbacks,
+      { clock },
+    );
+
+    const registerResult = await coordinator.register(fixtureCapability(), {
+      provider: 'overseer',
+      approvalRef: 'admin.roadex.test',
+    });
+    expect(registerResult).toMatchObject({ ok: true });
+    expect(provider.getStatus).toHaveBeenCalledTimes(1);
+
+    const wait = waits[0];
+    clock.set(BASE.getTime() + 2000);
+    await coordinator.tick();
+    expect(provider.getStatus).toHaveBeenCalledTimes(2);
+    expect(wait.checkAttempt).toBe(1);
+    expect(wait.nextCheckAt).toBe('2026-08-02T18:00:07.000Z');
+
+    clock.set(BASE.getTime() + 7000);
+    await coordinator.tick();
+    expect(provider.getStatus).toHaveBeenCalledTimes(3);
+    expect(wait.checkAttempt).toBe(2);
+  });
+
   it('moves from delay to pending after recovery and increments check attempts only on checks', async () => {
     const clock = clockWithState();
     const sessions = [fixtureSession()];
@@ -824,6 +876,7 @@ describe('ApprovalCoordinator', () => {
     const clock = clockWithState();
     const waits = [fixtureWait({ nextCheckAt: clock.now(), checkAttempt: 0 })];
     const sessions = [fixtureSession()];
+    bindSessionToWait(sessions[0], waits[0]);
 
     const coordinator = new ApprovalCoordinator(
       waits,
@@ -888,6 +941,7 @@ describe('ApprovalCoordinator', () => {
         nextCheckAt: clock.now(),
       });
       const sessions = [fixtureSession({ id: `session-${entry.expectedState}` })];
+      bindSessionToWait(sessions[0], wait);
       const coordinator = new ApprovalCoordinator(
         [wait],
         sessions,
@@ -920,9 +974,12 @@ describe('ApprovalCoordinator', () => {
         sessionId: `session-${scenario.result.status}`,
         nextCheckAt: clock.now(),
       });
+      const session = fixtureSession({ id: `session-${scenario.result.status}` });
+      bindSessionToWait(session, wait);
+
       const coordinator = new ApprovalCoordinator(
         [wait],
-        [fixtureSession({ id: `session-${scenario.result.status}` })],
+        [session],
         statusSequenceProvider([fixtureStatus({ decision: 'approved' })]),
         {
           ...callbacksBuilder().callbacks,
@@ -973,6 +1030,8 @@ describe('ApprovalCoordinator', () => {
     const clock = clockWithState();
     const waits = [fixtureWait({ state: 'approved-resume-queued', nextCheckAt: clock.now() })];
     const sessions = [fixtureSession()];
+    bindSessionToWait(sessions[0], waits[0]);
+    const queueStarted = deferred<void>();
     const gate = deferred<ApprovalContinuationDispatchResult>();
 
     const coordinator = new ApprovalCoordinator(
@@ -982,6 +1041,7 @@ describe('ApprovalCoordinator', () => {
       {
         ...callbacksBuilder({}).callbacks,
         queueContinuation: async () => {
+          queueStarted.resolve();
           return gate.promise;
         },
       },
@@ -989,12 +1049,45 @@ describe('ApprovalCoordinator', () => {
     );
 
     const tickPromise = coordinator.tick();
-    await Promise.resolve();
+    await queueStarted.promise;
     await coordinator.closeSessionWait('session-1');
     gate.resolve({ status: 'started', runnerRunId: 'runner-1' });
     await tickPromise;
 
     expect(waits[0].state).toBe('session-closed');
+    expect(waits[0].runnerRunId).toBeUndefined();
+  });
+
+  it('reconciles started dispatch result when binding drifts after reservation', async () => {
+    const clock = clockWithState();
+    const waits = [fixtureWait({ state: 'approved-resume-queued', nextCheckAt: clock.now() })];
+    const sessions = [fixtureSession()];
+    bindSessionToWait(sessions[0], waits[0]);
+    const queueStarted = deferred<void>();
+    const gate = deferred<ApprovalContinuationDispatchResult>();
+
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      sessions,
+      statusSequenceProvider([fixtureStatus({ decision: 'approved' })]),
+      {
+        ...callbacksBuilder({}).callbacks,
+        queueContinuation: async () => {
+          queueStarted.resolve();
+          return gate.promise;
+        },
+      },
+      { clock },
+    );
+
+    const tickPromise = coordinator.tick();
+    await queueStarted.promise;
+    sessions[0].lifecycle = 'ready';
+    delete sessions[0].waitingApproval;
+    gate.resolve({ status: 'started', runnerRunId: 'runner-1' });
+    await tickPromise;
+
+    expect(waits[0].state).toBe('resume-reconciliation-required');
     expect(waits[0].runnerRunId).toBeUndefined();
   });
 
@@ -1104,6 +1197,7 @@ describe('ApprovalCoordinator', () => {
     const clock = clockWithState();
     const waits = [fixtureWait({ state: 'approved-resume-queued', nextCheckAt: clock.now() })];
     const sessions = [fixtureSession()];
+    bindSessionToWait(sessions[0], waits[0]);
     const queue = vi.fn(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       return { status: 'started', runnerRunId: 'runner-1' } as const;
