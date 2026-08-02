@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createJsonFilePersistence, serializeState } from '../src/server/statePersistence';
+import type { ApprovalWaitRecord } from '../src/shared/approvalWorkflowContracts';
 import type { RoadexSession, StreamEvent } from '../src/shared/sessionContracts';
 import type {
   DeviceArtifactMetadata,
@@ -88,6 +89,64 @@ describe('state persistence', () => {
 
     expect(state.sessions.map((session) => session.id)).toEqual(['archived', 'fresh']);
     expect(state.streamEvents.map((event) => event.id)).toEqual(['archived-event', 'fresh-event']);
+  });
+
+  it('drops invalid approval waits and preserves an independent streaming session normalization', () => {
+    const now = new Date(0).toISOString();
+    const session = sessionFixture('streaming-session', 'streaming', now);
+    const approvalWaits: ApprovalWaitRecord[] = [{
+      id: 'valid-wait',
+      sessionId: session.id,
+      userId: 'user',
+      projectId: 'roadex',
+      workspaceId: 'workspace',
+      managedThreadId: '019f7337-df2e-75c1-b245-5e3588a6c5aa',
+      provider: 'overseer',
+      approvalRef: 'approval-valid',
+      resourceRef: 'resource-1',
+      authorityClass: 'privileged-operation',
+      consoleSurface: 'admin',
+      consolePath: 'admin/approvals/approval-valid',
+      subject: 'Reconcile change approval',
+      state: 'pending',
+      decisionVersion: 'v1',
+      continuationId: 'cont-1',
+      checkAttempt: 0,
+      nextCheckAt: now,
+      createdAt: now,
+      updatedAt: now,
+      decisionObservedAt: now,
+    }, {
+      ...{
+        id: 'invalid-wait',
+        sessionId: session.id,
+        userId: 'user',
+        projectId: 'roadex',
+        workspaceId: 'workspace',
+        managedThreadId: '019f7337-df2e-75c1-b245-5e3588a6c5aa',
+        provider: 'overseer',
+        approvalRef: 'approval-invalid',
+        resourceRef: 'resource-1',
+        authorityClass: 'privileged-operation',
+        consoleSurface: 'admin',
+        subject: 'Invalid path should be dropped',
+        state: 'pending',
+        decisionVersion: 'v1',
+        continuationId: 'cont-2',
+        checkAttempt: 0,
+        nextCheckAt: now,
+        createdAt: now,
+        updatedAt: now,
+      },
+      consolePath: 'https://untrusted.example.local/approvals',
+    }];
+    const state = serializeState({
+      sessions: [session],
+      approvalWaits,
+    });
+
+    expect(state.approvalWaits.map((record) => record.id)).toEqual(['valid-wait']);
+    expect(state.sessions[0].lifecycle).toBe('ready');
   });
 
   it('caps retained sessions, transcript events, and audit events', () => {

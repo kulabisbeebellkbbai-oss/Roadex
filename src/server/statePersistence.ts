@@ -1,6 +1,14 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AuditEvent, ManagedThreadClaim, RoadexSession, StreamEvent } from '../shared/sessionContracts.js';
+import {
+  type ApprovalAuthorityClass,
+  type ApprovalConsoleSurface,
+  type ApprovalWaitRecord,
+  isActiveApprovalWait,
+  type ApprovalWaitState,
+  consoleForAuthority,
+} from '../shared/approvalWorkflowContracts.js';
 import type {
   DeviceArtifactMetadata,
   DeviceBridgeApprovalRecord,
@@ -15,6 +23,7 @@ export type PersistedRoadexState = {
   streamEvents: StreamEvent[];
   auditEvents: AuditEvent[];
   managedThreadClaims: ManagedThreadClaim[];
+  approvalWaits: ApprovalWaitRecord[];
   deviceArtifacts: DeviceArtifactMetadata[];
   deviceBridgeRequests: DeviceBridgeRequestRecord[];
   deviceBridgeApprovals: DeviceBridgeApprovalRecord[];
@@ -39,6 +48,8 @@ export type RetentionOptions = {
   maxDeviceApprovals?: number;
   maxDeviceOperations?: number;
   deviceBridgeRetentionMs?: number;
+  maxApprovalWaits?: number;
+  approvalWaitRetentionMs?: number;
 };
 
 export function createMemoryPersistence(initial?: Partial<PersistedRoadexState>): StatePersistence {
@@ -47,6 +58,7 @@ export function createMemoryPersistence(initial?: Partial<PersistedRoadexState>)
     streamEvents: initial?.streamEvents ?? [],
     auditEvents: initial?.auditEvents ?? [],
     managedThreadClaims: initial?.managedThreadClaims ?? [],
+    approvalWaits: initial?.approvalWaits ?? [],
     deviceArtifacts: initial?.deviceArtifacts ?? [],
     deviceBridgeRequests: initial?.deviceBridgeRequests ?? [],
     deviceBridgeApprovals: initial?.deviceBridgeApprovals ?? [],
@@ -106,6 +118,7 @@ function sanitizeState(state: Partial<PersistedRoadexState>, now = Date.now()): 
       codexThreadId: cleanOptionalString(session.codexThreadId),
       managedThreadId: cleanOptionalString(session.managedThreadId),
     })),
+    approvalWaits: (state.approvalWaits ?? []).flatMap((record) => sanitizeApprovalWait(record) ?? []),
     streamEvents: state.streamEvents ?? [],
     auditEvents: state.auditEvents ?? [],
     managedThreadClaims: (state.managedThreadClaims ?? []).filter(
@@ -153,12 +166,18 @@ function applyRetention(state: PersistedRoadexState, options: RetentionOptions):
   const maxAuditEvents = options.maxAuditEvents ?? numberFromEnv('ROADEX_STATE_MAX_AUDIT_EVENTS', 500);
   const sessionRetentionMs = options.sessionRetentionMs ?? numberFromEnv('ROADEX_SESSION_RETENTION_MS', 2_592_000_000);
   const deviceBridgeRetentionMs = options.deviceBridgeRetentionMs ?? numberFromEnv('ROADEX_DEVICE_BRIDGE_RETENTION_MS', 2_592_000_000);
+  const maxApprovalWaits = options.maxApprovalWaits ?? numberFromEnv('ROADEX_MAX_APPROVAL_WAITS', 500);
+  const approvalWaitRetentionMs = options.approvalWaitRetentionMs ?? numberFromEnv(
+    'ROADEX_APPROVAL_WAIT_RETENTION_MS',
+    2_592_000_000,
+  );
   const maxDeviceArtifacts = options.maxDeviceArtifacts ?? numberFromEnv('ROADEX_MAX_DEVICE_ARTIFACTS', 100);
   const maxDeviceRequests = options.maxDeviceRequests ?? numberFromEnv('ROADEX_MAX_DEVICE_REQUESTS', 200);
   const maxDeviceApprovals = options.maxDeviceApprovals ?? numberFromEnv('ROADEX_MAX_DEVICE_APPROVALS', 200);
   const maxDeviceOperations = options.maxDeviceOperations ?? numberFromEnv('ROADEX_MAX_DEVICE_OPERATIONS', 200);
   const cutoff = now - sessionRetentionMs;
   const deviceCutoff = now - deviceBridgeRetentionMs;
+  const approvalCutoff = now - approvalWaitRetentionMs;
   const retainedSessionIds = new Set(
     state.sessions
       .filter((session) => {
@@ -202,6 +221,18 @@ function applyRetention(state: PersistedRoadexState, options: RetentionOptions):
     .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
     .slice(0, unreferencedArtifactSlots);
   const deviceArtifacts = [...referencedArtifacts, ...unreferencedArtifacts];
+  const activeApprovalWaits = state.approvalWaits.filter((record) => isActiveApprovalWait(record.state));
+  const activeById = new Map(activeApprovalWaits.map((record) => [record.id, record]));
+  const terminalWaitLimit = Math.max(0, maxApprovalWaits - activeById.size);
+  const terminalApprovalWaits = state.approvalWaits
+    .filter((record) => !isActiveApprovalWait(record.state))
+    .filter((record) => approvalWaitTimestamp(record) >= approvalCutoff)
+    .sort((left, right) => approvalWaitTimestamp(right) - approvalWaitTimestamp(left))
+    .slice(0, terminalWaitLimit);
+  const approvalWaits = [
+    ...activeById.values(),
+    ...terminalApprovalWaits,
+  ];
 
   return {
     sessions: state.sessions.filter((session) => retainedSessionIds.has(session.id)),
@@ -210,6 +241,7 @@ function applyRetention(state: PersistedRoadexState, options: RetentionOptions):
       .slice(-maxStreamEvents),
     auditEvents: state.auditEvents.slice(-maxAuditEvents),
     managedThreadClaims: state.managedThreadClaims,
+    approvalWaits,
     deviceArtifacts,
     deviceBridgeRequests,
     deviceBridgeApprovals,
@@ -245,6 +277,7 @@ function emptyState(): PersistedRoadexState {
     streamEvents: [],
     auditEvents: [],
     managedThreadClaims: [],
+    approvalWaits: [],
     deviceArtifacts: [],
     deviceBridgeRequests: [],
     deviceBridgeApprovals: [],
@@ -476,6 +509,122 @@ function sanitizeOperation(record: DeviceBridgeOperationRecord): DeviceBridgeOpe
   };
 }
 
+function sanitizeApprovalWait(record: ApprovalWaitRecord): ApprovalWaitRecord | undefined {
+  const sanitizedPath = sanitizeApprovalWaitConsolePath(cleanOptionalString(record.consolePath));
+  if (!(
+    validBoundedString(record.id, 128) &&
+    validBoundedString(record.sessionId, 128) &&
+    validBoundedString(record.userId, 128) &&
+    validBoundedString(record.projectId, 128) &&
+    validBoundedString(record.workspaceId, 128) &&
+    validBoundedString(record.managedThreadId, 128) &&
+    record.provider === 'overseer' &&
+    validBoundedString(record.approvalRef, 256) &&
+    validBoundedString(record.resourceRef, 256) &&
+    isApprovalAuthorityClass(record.authorityClass) &&
+    record.consoleSurface === consoleForAuthority(record.authorityClass) &&
+    (record.consolePath === undefined || sanitizedPath !== undefined) &&
+    validBoundedString(record.subject, 256) &&
+    isApprovalWaitState(record.state) &&
+    validBoundedString(record.decisionVersion, 128) &&
+    validBoundedString(record.continuationId, 256) &&
+    Number.isSafeInteger(record.checkAttempt) &&
+    record.checkAttempt >= 0 &&
+    validIsoDate(record.nextCheckAt) &&
+    validIsoDate(record.createdAt) &&
+    validIsoDate(record.updatedAt) &&
+    validOptionalIsoDate(record.decisionObservedAt) &&
+    validOptionalIsoDate(record.dispatchReservedAt) &&
+    validOptionalBoundedString(record.runnerRunId, 256) &&
+    validOptionalIsoDate(record.resumedAt)
+  )) return undefined;
+  return {
+    id: record.id.trim(),
+    sessionId: record.sessionId.trim(),
+    userId: record.userId.trim(),
+    projectId: record.projectId.trim(),
+    workspaceId: record.workspaceId.trim(),
+    managedThreadId: record.managedThreadId.trim(),
+    provider: 'overseer',
+    approvalRef: record.approvalRef.trim(),
+    resourceRef: record.resourceRef.trim(),
+    authorityClass: record.authorityClass,
+    consoleSurface: consoleForAuthority(record.authorityClass),
+    ...(sanitizedPath ? { consolePath: sanitizedPath } : {}),
+    subject: record.subject.trim(),
+    state: record.state,
+    decisionVersion: record.decisionVersion.trim(),
+    continuationId: record.continuationId.trim(),
+    checkAttempt: record.checkAttempt,
+    nextCheckAt: new Date(record.nextCheckAt).toISOString(),
+    createdAt: new Date(record.createdAt).toISOString(),
+    updatedAt: new Date(record.updatedAt).toISOString(),
+    ...(record.decisionObservedAt ? { decisionObservedAt: new Date(record.decisionObservedAt).toISOString() } : {}),
+    ...(record.dispatchReservedAt ? { dispatchReservedAt: new Date(record.dispatchReservedAt).toISOString() } : {}),
+    ...(record.runnerRunId ? { runnerRunId: record.runnerRunId.trim() } : {}),
+    ...(record.resumedAt ? { resumedAt: new Date(record.resumedAt).toISOString() } : {}),
+  };
+}
+
+const APPROVAL_CONSOLE_PATH_ALLOWLIST: Record<ApprovalConsoleSurface, string[]> = {
+  admin: ['admin/approvals'],
+  overview: ['overview/approvals'],
+};
+
+const APPROVAL_WAIT_STATES: ApprovalWaitState[] = [
+  'pending',
+  'verification-delayed',
+  'security-failure',
+  'changes-requested',
+  'rejected',
+  'expired',
+  'revoked',
+  'approved-resume-queued',
+  'resume-dispatching',
+  'resume-reconciliation-required',
+  'resumed',
+  'session-closed',
+];
+
+const APPROVAL_AUTHORITY_CLASSES: ApprovalAuthorityClass[] = ['privileged-operation', 'project-workflow'];
+
+function isApprovalAuthorityClass(value: string): value is ApprovalAuthorityClass {
+  return APPROVAL_AUTHORITY_CLASSES.includes(value as ApprovalAuthorityClass);
+}
+
+function isApprovalWaitState(value: string): value is ApprovalWaitState {
+  return APPROVAL_WAIT_STATES.includes(value as ApprovalWaitState);
+}
+
+function sanitizeApprovalWaitConsolePath(consolePath: string | undefined): string | undefined {
+  const trimmed = cleanOptionalString(consolePath);
+  if (trimmed === undefined) return undefined;
+  if (
+    !validRelativeConsolePath(trimmed)
+    || !isAllowedApprovalWaitConsolePath(trimmed)
+  ) return undefined;
+  return trimmed;
+}
+
+function validRelativeConsolePath(value: string): boolean {
+  return !(
+    value.startsWith('/')
+    || value.includes('\\')
+    || value.includes(':')
+    || value.includes('..')
+    || value.includes('?')
+    || value.includes('#')
+  );
+}
+
+function isAllowedApprovalWaitConsolePath(value: string): boolean {
+  const [surface] = value.split('/');
+  return APPROVAL_CONSOLE_PATH_ALLOWLIST[surface as ApprovalConsoleSurface] !== undefined
+    && APPROVAL_CONSOLE_PATH_ALLOWLIST[surface as ApprovalConsoleSurface].some(
+      (allowed) => value === allowed || value.startsWith(`${allowed}/`),
+    );
+}
+
 function validIsoDate(value: string): boolean {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value));
 }
@@ -507,6 +656,11 @@ function retainByTimestamp<T>(
     .filter((record) => Date.parse(timestamp(record)) >= cutoff)
     .sort((left, right) => Date.parse(timestamp(right)) - Date.parse(timestamp(left)))
     .slice(0, maximum);
+}
+
+function approvalWaitTimestamp(record: ApprovalWaitRecord): number {
+  const parsed = Date.parse(record.updatedAt || record.createdAt);
+  return Number.isNaN(parsed) ? 0 : parsed;
 }
 
 function cloneState(state: PersistedRoadexState): PersistedRoadexState {
