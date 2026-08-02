@@ -1231,6 +1231,153 @@ describe('ApprovalCoordinator', () => {
     }
   });
 
+  it('linearizes restart retirement persistence with concurrent successor registration', async () => {
+    for (const order of ['retirement-first', 'successor-first'] as const) {
+      const clock = clockWithState();
+      const oldWait = fixtureWait({
+        id: `wait-old-${order}`,
+        state: 'approved-resume-queued',
+        nextCheckAt: clock.now(),
+      });
+      const oldContinuationId = oldWait.continuationId;
+      const waits = [oldWait];
+      const session = fixtureSession({ lifecycle: 'closed' });
+      bindSessionToWait(session, oldWait);
+      session.lifecycle = 'closed';
+      const persistGates = [deferred<void>(), deferred<void>()];
+      const persistStarts = [deferred<void>(), deferred<void>()];
+      let persistCall = 0;
+      let durable: {
+        lifecycle: RoadexSession['lifecycle'];
+        waitingApproval?: WaitingApprovalSummary;
+        waits: ApprovalWaitRecord[];
+      } | undefined;
+      const persistedOrder: string[] = [];
+      const queueContinuation = vi.fn(async () => ({ status: 'started', runnerRunId: 'runner-stale' } as const));
+      const coordinator = new ApprovalCoordinator(
+        waits,
+        [session],
+        statusSequenceProvider([
+          fixtureStatus({ decisionVersion: `sha256:${'b'.repeat(64)}` }),
+        ]),
+        {
+          ...callbacksBuilder().callbacks,
+          persist: async () => {
+            const index = persistCall;
+            persistCall += 1;
+            const snapshot = {
+              lifecycle: session.lifecycle,
+              waitingApproval: session.waitingApproval ? { ...session.waitingApproval } : undefined,
+              waits: waits.map((wait) => ({ ...wait })),
+            };
+            persistedOrder.push(snapshot.waitingApproval?.waitId ?? 'retirement-only');
+            persistStarts[index].resolve();
+            await persistGates[index].promise;
+            durable = snapshot;
+          },
+          queueContinuation,
+        },
+        {
+          clock,
+          idSource: { generateWaitId: () => `wait-successor-${order}` },
+        },
+      );
+      session.lifecycle = 'ready';
+
+      let tickPromise: Promise<void>;
+      let registerPromise: Promise<RegisterApprovalWaitResult>;
+      if (order === 'retirement-first') {
+        tickPromise = coordinator.tick();
+        await persistStarts[0].promise;
+        registerPromise = coordinator.register(
+          fixtureCapability(),
+          { provider: 'overseer', approvalRef: 'admin.roadex.test' },
+        );
+      } else {
+        registerPromise = coordinator.register(
+          fixtureCapability(),
+          { provider: 'overseer', approvalRef: 'admin.roadex.test' },
+        );
+        await persistStarts[0].promise;
+        tickPromise = coordinator.tick();
+      }
+
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(persistCall, order).toBe(1);
+
+      persistGates[0].resolve();
+      await persistStarts[1].promise;
+      persistGates[1].resolve();
+      const registerResult = await registerPromise;
+      await tickPromise;
+
+      expect(registerResult, order).toMatchObject({ ok: true });
+      expect(persistedOrder, order).toEqual(order === 'retirement-first'
+        ? ['retirement-only', `wait-successor-${order}`]
+        : [`wait-successor-${order}`, `wait-successor-${order}`]);
+      expect(durable?.lifecycle, order).toBe('paused');
+      expect(durable?.waitingApproval?.waitId, order).toBe(`wait-successor-${order}`);
+      expect(durable?.waits.find((wait) => wait.id === oldWait.id)?.state, order).toBe('session-closed');
+      expect(durable?.waits.find((wait) => wait.id === `wait-successor-${order}`)?.state, order).toBe('pending');
+      expect(session.waitingApproval?.waitId, order).toBe(`wait-successor-${order}`);
+      expect(oldWait.state, order).toBe('session-closed');
+      expect(registerResult.ok && registerResult.wait.waitId, order).toBe(`wait-successor-${order}`);
+      expect(waits.find((wait) => wait.id === `wait-successor-${order}`)?.continuationId, order).not.toBe(oldContinuationId);
+      expect(queueContinuation, order).not.toHaveBeenCalled();
+    }
+  });
+
+  it('retries failed retirement per session without blocking or duplicating other closed sessions', async () => {
+    const clock = clockWithState();
+    const waits = [
+      fixtureWait({ id: 'wait-retire-1', sessionId: 'session-1', state: 'pending', nextCheckAt: clock.now() }),
+      fixtureWait({
+        id: 'wait-retire-2',
+        sessionId: 'session-2',
+        state: 'approved-resume-queued',
+        nextCheckAt: clock.now(),
+        continuationId: deriveContinuationId('session-2', 'admin.roadex.test', `sha256:${'a'.repeat(64)}`),
+      }),
+    ];
+    const sessions = [
+      fixtureSession({ id: 'session-1', lifecycle: 'closed' }),
+      fixtureSession({ id: 'session-2', lifecycle: 'closed' }),
+    ];
+    bindSessionToWait(sessions[0], waits[0]);
+    bindSessionToWait(sessions[1], waits[1]);
+    sessions.forEach((session) => { session.lifecycle = 'closed'; });
+    let persistAttempt = 0;
+    const publish = vi.fn();
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      sessions,
+      statusSequenceProvider([]),
+      callbacksBuilder({
+        persist: async () => {
+          persistAttempt += 1;
+          if (persistAttempt === 1) {
+            throw new Error('first-session-retirement-failed');
+          }
+        },
+        publish,
+      }).callbacks,
+      { clock },
+    );
+
+    await coordinator.tick();
+
+    expect(persistAttempt).toBe(2);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(publish).toHaveBeenCalledWith('session-2', 'Roadex human approval result: session-closed');
+
+    await coordinator.tick();
+
+    expect(persistAttempt).toBe(3);
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(publish).toHaveBeenCalledWith('session-1', 'Roadex human approval result: session-closed');
+    expect(waits.every((wait) => wait.state === 'session-closed')).toBe(true);
+  });
+
   it('maps dispatch results with strict shape validation', async () => {
     const clock = clockWithState();
 

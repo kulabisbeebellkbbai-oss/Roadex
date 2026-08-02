@@ -484,18 +484,40 @@ export class ApprovalCoordinator {
       return true;
     }
 
-    try {
-      await Promise.resolve(this.#callbacks.persist());
-    } catch {
-      return false;
+    const sessionIds = [...new Set(this.#closedSessionRetirements.map((wait) => wait.sessionId))];
+    let allPersisted = true;
+
+    for (const sessionId of sessionIds) {
+      const persisted = await this.#withSessionLock(sessionId, async () => {
+        const retired = this.#closedSessionRetirements.filter((wait) => wait.sessionId === sessionId);
+        if (retired.length === 0) {
+          return true;
+        }
+
+        try {
+          await Promise.resolve(this.#callbacks.persist());
+        } catch {
+          return false;
+        }
+
+        const retiredSet = new Set(retired);
+        for (let index = this.#closedSessionRetirements.length - 1; index >= 0; index -= 1) {
+          if (retiredSet.has(this.#closedSessionRetirements[index])) {
+            this.#closedSessionRetirements.splice(index, 1);
+          }
+        }
+        for (const wait of retired) {
+          this.#publish(wait.sessionId, this.#terminalCopy('session-closed'));
+          this.#audit('approval_wait.status', 'denied', this.#auditSummary(wait), wait.sessionId);
+        }
+        return true;
+      });
+      if (!persisted) {
+        allPersisted = false;
+      }
     }
 
-    const retired = this.#closedSessionRetirements.splice(0, this.#closedSessionRetirements.length);
-    for (const wait of retired) {
-      this.#publish(wait.sessionId, this.#terminalCopy('session-closed'));
-      this.#audit('approval_wait.status', 'denied', this.#auditSummary(wait), wait.sessionId);
-    }
-    return true;
+    return allPersisted;
   }
 
   async closeSessionWait(sessionId: string): Promise<void> {
