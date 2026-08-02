@@ -359,6 +359,45 @@ describe('state persistence', () => {
     }
   });
 
+  it('does not inherit optional approval-wait fields from object prototypes', () => {
+    const now = new Date(0).toISOString();
+    const base = {
+      ...approvalWaitFixture({
+        id: 'prototype-optional',
+        sessionId: 'session',
+        consoleSurface: 'admin',
+        authorityClass: 'privileged-operation',
+        approvalRef: 'approval-prototype-optional',
+        continuationId: 'cont-prototype-optional',
+      }),
+      nextCheckAt: now,
+      updatedAt: now,
+      subject: 'Prototype optional inheritance',
+    } as Record<string, unknown>;
+    delete base.decisionObservedAt;
+    delete base.dispatchReservedAt;
+    delete base.runnerRunId;
+    delete base.resumedAt;
+    const optionalFieldsWithPrototypeValues = [
+      { field: 'decisionObservedAt', value: now },
+      { field: 'dispatchReservedAt', value: now },
+      { field: 'runnerRunId', value: 'proto-runner' },
+      { field: 'resumedAt', value: now },
+    ] as const;
+    for (const optional of optionalFieldsWithPrototypeValues) {
+      const wait = Object.create({
+        [optional.field]: optional.value,
+      });
+      Object.assign(wait, base);
+      const state = serializeState({ approvalWaits: [wait as unknown as ApprovalWaitRecord] });
+      expect(state.approvalWaits).toHaveLength(1);
+      const sanitized = state.approvalWaits[0] as Record<string, unknown>;
+      expect(sanitized.id).toBe('prototype-optional');
+      expect(optional.field in sanitized).toBe(false);
+      expect(sanitized[optional.field]).toBeUndefined();
+    }
+  });
+
   it('rejects malformed approval-wait timestamps and accepts timezone-aware ISO values', () => {
     const base = approvalWaitFixture({
       sessionId: 'session',

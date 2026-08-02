@@ -556,6 +556,18 @@ function sanitizeApprovalWait(record: unknown): ApprovalWaitRecord | undefined {
   ) return undefined;
   if (!isApprovalAuthorityClass(candidate.authorityClass)) return undefined;
   const consoleSurface = consoleForAuthority(candidate.authorityClass);
+  const decisionObservedAt = Object.hasOwn(candidate, 'decisionObservedAt')
+    ? candidate.decisionObservedAt
+    : undefined;
+  const dispatchReservedAt = Object.hasOwn(candidate, 'dispatchReservedAt')
+    ? candidate.dispatchReservedAt
+    : undefined;
+  const runnerRunId = Object.hasOwn(candidate, 'runnerRunId')
+    ? candidate.runnerRunId
+    : undefined;
+  const resumedAt = Object.hasOwn(candidate, 'resumedAt')
+    ? candidate.resumedAt
+    : undefined;
   const checkAttempt = candidate.checkAttempt as number;
   const id = cleanCanonicalOpaqueString(candidate.id, 128);
   const sessionId = cleanCanonicalOpaqueString(candidate.sessionId, 128);
@@ -588,10 +600,10 @@ function sanitizeApprovalWait(record: unknown): ApprovalWaitRecord | undefined {
     validIsoDate(candidate.nextCheckAt) &&
     validIsoDate(candidate.createdAt) &&
     validIsoDate(candidate.updatedAt) &&
-    validOptionalIsoDate(candidate.decisionObservedAt) &&
-    validOptionalIsoDate(candidate.dispatchReservedAt) &&
-    validOptionalBoundedString(candidate.runnerRunId, 256) &&
-    validOptionalIsoDate(candidate.resumedAt)
+    validOptionalIsoDate(decisionObservedAt) &&
+    validOptionalIsoDate(dispatchReservedAt) &&
+    validOptionalBoundedString(runnerRunId, 256) &&
+    validOptionalIsoDate(resumedAt)
   )) return undefined;
   return {
     id,
@@ -613,10 +625,18 @@ function sanitizeApprovalWait(record: unknown): ApprovalWaitRecord | undefined {
     nextCheckAt: cleanOptionalIsoDate(candidate.nextCheckAt)!,
     createdAt: cleanOptionalIsoDate(candidate.createdAt)!,
     updatedAt: cleanOptionalIsoDate(candidate.updatedAt)!,
-    ...(candidate.decisionObservedAt ? { decisionObservedAt: cleanOptionalIsoDate(candidate.decisionObservedAt) } : {}),
-    ...(candidate.dispatchReservedAt ? { dispatchReservedAt: cleanOptionalIsoDate(candidate.dispatchReservedAt) } : {}),
-    ...(candidate.runnerRunId ? { runnerRunId: cleanOptionalString(candidate.runnerRunId)! } : {}),
-    ...(candidate.resumedAt ? { resumedAt: cleanOptionalIsoDate(candidate.resumedAt) } : {}),
+    ...(Object.hasOwn(candidate, 'decisionObservedAt') && decisionObservedAt
+      ? { decisionObservedAt: cleanOptionalIsoDate(decisionObservedAt) }
+      : {}),
+    ...(Object.hasOwn(candidate, 'dispatchReservedAt') && dispatchReservedAt
+      ? { dispatchReservedAt: cleanOptionalIsoDate(dispatchReservedAt) }
+      : {}),
+    ...(Object.hasOwn(candidate, 'runnerRunId') && runnerRunId
+      ? { runnerRunId: cleanOptionalString(runnerRunId)! }
+      : {}),
+    ...(Object.hasOwn(candidate, 'resumedAt') && resumedAt
+      ? { resumedAt: cleanOptionalIsoDate(resumedAt) }
+      : {}),
   };
 }
 
