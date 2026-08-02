@@ -3,7 +3,6 @@ import { dirname } from 'node:path';
 import type { AuditEvent, ManagedThreadClaim, RoadexSession, StreamEvent } from '../shared/sessionContracts.js';
 import {
   type ApprovalAuthorityClass,
-  type ApprovalConsoleSurface,
   type ApprovalWaitRecord,
   isActiveApprovalWait,
   type ApprovalWaitState,
@@ -82,7 +81,7 @@ export function createJsonFilePersistence(
   return {
     load() {
       try {
-        return serializeState(JSON.parse(readFileSync(path, 'utf8')) as PersistedRoadexState);
+        return serializeState(JSON.parse(readFileSync(path, 'utf8')) as Partial<PersistedRoadexState>);
       } catch {
         return emptyState();
       }
@@ -100,36 +99,69 @@ export function serializeState(state: Partial<PersistedRoadexState>, options: Re
   return applyRetention(sanitizeState(state, options.now), options);
 }
 
-function sanitizeState(state: Partial<PersistedRoadexState>, now = Date.now()): PersistedRoadexState {
+function sanitizeState(state: Partial<PersistedRoadexState> | unknown, now = Date.now()): PersistedRoadexState {
   const timestamp = new Date(now).toISOString();
-  const legacyTimeoutSessions = legacyTimeoutBlockedSessionIds(state.streamEvents ?? []);
+  const safeState = typeof state === 'object' && state !== null ? (state as Record<string, unknown>) : {};
+  const safeSessions = Array.isArray(safeState.sessions) ? safeState.sessions as unknown[] : [];
+  const safeApprovalWaits = Array.isArray(safeState.approvalWaits) ? safeState.approvalWaits as unknown[] : [];
+  const safeStreamEvents = Array.isArray(safeState.streamEvents) ? safeState.streamEvents as unknown[] : [];
+  const safeAuditEvents = Array.isArray(safeState.auditEvents) ? safeState.auditEvents as unknown[] : [];
+  const safeManagedThreadClaims = Array.isArray(safeState.managedThreadClaims) ? safeState.managedThreadClaims as unknown[] : [];
+  const safeDeviceArtifacts = Array.isArray(safeState.deviceArtifacts) ? safeState.deviceArtifacts as unknown[] : [];
+  const safeDeviceBridgeRequests = Array.isArray(safeState.deviceBridgeRequests)
+    ? safeState.deviceBridgeRequests as unknown[]
+    : [];
+  const safeDeviceBridgeApprovals = Array.isArray(safeState.deviceBridgeApprovals)
+    ? safeState.deviceBridgeApprovals as unknown[]
+    : [];
+  const safeDeviceBridgeOperations = Array.isArray(safeState.deviceBridgeOperations)
+    ? safeState.deviceBridgeOperations as unknown[]
+    : [];
+  const safeDeviceInventoryBindings = Array.isArray(safeState.deviceInventoryBindings)
+    ? safeState.deviceInventoryBindings as unknown[]
+    : [];
+  const safeDeviceDescriptorObservations = Array.isArray(safeState.deviceDescriptorObservations)
+    ? safeState.deviceDescriptorObservations as unknown[]
+    : [];
+  const legacyTimeoutSessions = legacyTimeoutBlockedSessionIds(safeStreamEvents as StreamEvent[]);
   return {
-    sessions: (state.sessions ?? []).map((session) => ({
-      ...session,
-      lifecycle: session.lifecycle === 'streaming'
-        || session.lifecycle === 'pending'
-        || (session.lifecycle === 'blocked' && legacyTimeoutSessions.has(session.id))
-        ? 'ready'
-        : session.lifecycle,
-      runActivity: undefined,
-      deviceBridge: 'disabled',
-      createdAt: session.createdAt ?? timestamp,
-      updatedAt: session.updatedAt ?? session.createdAt ?? timestamp,
-      codexThreadId: cleanOptionalString(session.codexThreadId),
-      managedThreadId: cleanOptionalString(session.managedThreadId),
-    })),
-    approvalWaits: (state.approvalWaits ?? []).flatMap((record) => sanitizeApprovalWait(record) ?? []),
-    streamEvents: state.streamEvents ?? [],
-    auditEvents: state.auditEvents ?? [],
-    managedThreadClaims: (state.managedThreadClaims ?? []).filter(
-      (claim) => Boolean(cleanOptionalString(claim.threadId) && cleanOptionalString(claim.userId)),
-    ),
-    deviceArtifacts: (state.deviceArtifacts ?? []).flatMap((record) => sanitizeArtifact(record) ?? []),
-    deviceBridgeRequests: (state.deviceBridgeRequests ?? []).flatMap((record) => sanitizeRequest(record) ?? []),
-    deviceBridgeApprovals: (state.deviceBridgeApprovals ?? []).flatMap((record) => sanitizeApproval(record) ?? []),
-    deviceBridgeOperations: (state.deviceBridgeOperations ?? []).flatMap((record) => sanitizeOperation(record) ?? []),
-    deviceInventoryBindings: (state.deviceInventoryBindings ?? []).flatMap((record) => sanitizeInventoryBinding(record) ?? []),
-    deviceDescriptorObservations: (state.deviceDescriptorObservations ?? []).flatMap((record) => sanitizeDescriptorObservation(record) ?? []),
+    sessions: safeSessions.map((session: unknown) => {
+      const safeSession = session as Partial<RoadexSession>;
+  return {
+    ...(safeSession as RoadexSession),
+    lifecycle: safeSession.lifecycle === 'streaming'
+      || safeSession.lifecycle === 'pending'
+      || (safeSession.lifecycle === 'blocked'
+        && safeSession.id !== undefined
+        && legacyTimeoutSessions.has(safeSession.id))
+      ? 'ready'
+      : safeSession.lifecycle,
+    runActivity: undefined,
+    deviceBridge: 'disabled',
+    createdAt: safeSession.createdAt ?? timestamp,
+    updatedAt: safeSession.updatedAt ?? safeSession.createdAt ?? timestamp,
+    codexThreadId: cleanOptionalString(safeSession.codexThreadId),
+    managedThreadId: cleanOptionalString(safeSession.managedThreadId),
+  } as RoadexSession;
+    }),
+    approvalWaits: safeApprovalWaits.flatMap((record) => sanitizeApprovalWait(record) ?? []),
+    streamEvents: safeStreamEvents as StreamEvent[],
+    auditEvents: safeAuditEvents as AuditEvent[],
+    managedThreadClaims: safeManagedThreadClaims.flatMap((claim) => {
+      if (claim === null || typeof claim !== 'object') return [];
+      const safeClaim = claim as Partial<ManagedThreadClaim>;
+      const threadId = cleanOptionalString(safeClaim.threadId);
+      const userId = cleanOptionalString(safeClaim.userId);
+      const claimedAt = cleanOptionalString(safeClaim.claimedAt);
+      if (threadId === undefined || userId === undefined || claimedAt === undefined) return [];
+      return [{ threadId, userId, claimedAt }];
+    }),
+    deviceArtifacts: safeDeviceArtifacts.flatMap((record) => sanitizeArtifact(record as DeviceArtifactMetadata) ?? []),
+    deviceBridgeRequests: safeDeviceBridgeRequests.flatMap((record) => sanitizeRequest(record as DeviceBridgeRequestRecord) ?? []),
+    deviceBridgeApprovals: safeDeviceBridgeApprovals.flatMap((record) => sanitizeApproval(record as DeviceBridgeApprovalRecord) ?? []),
+    deviceBridgeOperations: safeDeviceBridgeOperations.flatMap((record) => sanitizeOperation(record as DeviceBridgeOperationRecord) ?? []),
+    deviceInventoryBindings: safeDeviceInventoryBindings.flatMap((record) => sanitizeInventoryBinding(record as DeviceInventoryBindingRecord) ?? []),
+    deviceDescriptorObservations: safeDeviceDescriptorObservations.flatMap((record) => sanitizeDescriptorObservation(record as DeviceDescriptorObservationRecord) ?? []),
   };
 }
 
@@ -266,8 +298,9 @@ function numberFromEnv(key: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-function cleanOptionalString(value: string | undefined): string | undefined {
-  const cleaned = value?.trim();
+function cleanOptionalString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const cleaned = value.trim();
   return cleaned ? cleaned : undefined;
 }
 
@@ -509,67 +542,64 @@ function sanitizeOperation(record: DeviceBridgeOperationRecord): DeviceBridgeOpe
   };
 }
 
-function sanitizeApprovalWait(record: ApprovalWaitRecord): ApprovalWaitRecord | undefined {
-  const sanitizedPath = sanitizeApprovalWaitConsolePath(cleanOptionalString(record.consolePath));
+function sanitizeApprovalWait(record: unknown): ApprovalWaitRecord | undefined {
+  if (record === null || typeof record !== 'object' || Object.prototype.hasOwnProperty.call(record, 'consolePath')) return undefined;
+  const candidate = record as Partial<ApprovalWaitRecord>;
+  if (!isApprovalAuthorityClass(candidate.authorityClass)) return undefined;
+  const consoleSurface = consoleForAuthority(candidate.authorityClass);
+  const checkAttempt = candidate.checkAttempt as number;
   if (!(
-    validBoundedString(record.id, 128) &&
-    validBoundedString(record.sessionId, 128) &&
-    validBoundedString(record.userId, 128) &&
-    validBoundedString(record.projectId, 128) &&
-    validBoundedString(record.workspaceId, 128) &&
-    validBoundedString(record.managedThreadId, 128) &&
-    record.provider === 'overseer' &&
-    validBoundedString(record.approvalRef, 256) &&
-    validBoundedString(record.resourceRef, 256) &&
-    isApprovalAuthorityClass(record.authorityClass) &&
-    record.consoleSurface === consoleForAuthority(record.authorityClass) &&
-    (record.consolePath === undefined || sanitizedPath !== undefined) &&
-    validBoundedString(record.subject, 256) &&
-    isApprovalWaitState(record.state) &&
-    validBoundedString(record.decisionVersion, 128) &&
-    validBoundedString(record.continuationId, 256) &&
-    Number.isSafeInteger(record.checkAttempt) &&
-    record.checkAttempt >= 0 &&
-    validIsoDate(record.nextCheckAt) &&
-    validIsoDate(record.createdAt) &&
-    validIsoDate(record.updatedAt) &&
-    validOptionalIsoDate(record.decisionObservedAt) &&
-    validOptionalIsoDate(record.dispatchReservedAt) &&
-    validOptionalBoundedString(record.runnerRunId, 256) &&
-    validOptionalIsoDate(record.resumedAt)
+    validBoundedString(candidate.id, 128) &&
+    validBoundedString(candidate.sessionId, 128) &&
+    validBoundedString(candidate.userId, 128) &&
+    validBoundedString(candidate.projectId, 128) &&
+    validBoundedString(candidate.workspaceId, 128) &&
+    validBoundedString(candidate.managedThreadId, 128) &&
+    validBoundedString(candidate.consoleSurface, 16) &&
+    candidate.consoleSurface === consoleSurface &&
+    candidate.provider === 'overseer' &&
+    validBoundedString(candidate.approvalRef, 256) &&
+    validBoundedString(candidate.resourceRef, 256) &&
+    validBoundedString(candidate.subject, 256) &&
+    isApprovalWaitState(candidate.state) &&
+    validBoundedString(candidate.decisionVersion, 128) &&
+    validBoundedString(candidate.continuationId, 256) &&
+    Number.isSafeInteger(checkAttempt) &&
+    checkAttempt >= 0 &&
+    validIsoDate(candidate.nextCheckAt) &&
+    validIsoDate(candidate.createdAt) &&
+    validIsoDate(candidate.updatedAt) &&
+    validOptionalIsoDate(candidate.decisionObservedAt) &&
+    validOptionalIsoDate(candidate.dispatchReservedAt) &&
+    validOptionalBoundedString(candidate.runnerRunId, 256) &&
+    validOptionalIsoDate(candidate.resumedAt)
   )) return undefined;
   return {
-    id: record.id.trim(),
-    sessionId: record.sessionId.trim(),
-    userId: record.userId.trim(),
-    projectId: record.projectId.trim(),
-    workspaceId: record.workspaceId.trim(),
-    managedThreadId: record.managedThreadId.trim(),
+    id: cleanOptionalString(candidate.id)!,
+    sessionId: cleanOptionalString(candidate.sessionId)!,
+    userId: cleanOptionalString(candidate.userId)!,
+    projectId: cleanOptionalString(candidate.projectId)!,
+    workspaceId: cleanOptionalString(candidate.workspaceId)!,
+    managedThreadId: cleanOptionalString(candidate.managedThreadId)!,
     provider: 'overseer',
-    approvalRef: record.approvalRef.trim(),
-    resourceRef: record.resourceRef.trim(),
-    authorityClass: record.authorityClass,
-    consoleSurface: consoleForAuthority(record.authorityClass),
-    ...(sanitizedPath ? { consolePath: sanitizedPath } : {}),
-    subject: record.subject.trim(),
-    state: record.state,
-    decisionVersion: record.decisionVersion.trim(),
-    continuationId: record.continuationId.trim(),
-    checkAttempt: record.checkAttempt,
-    nextCheckAt: new Date(record.nextCheckAt).toISOString(),
-    createdAt: new Date(record.createdAt).toISOString(),
-    updatedAt: new Date(record.updatedAt).toISOString(),
-    ...(record.decisionObservedAt ? { decisionObservedAt: new Date(record.decisionObservedAt).toISOString() } : {}),
-    ...(record.dispatchReservedAt ? { dispatchReservedAt: new Date(record.dispatchReservedAt).toISOString() } : {}),
-    ...(record.runnerRunId ? { runnerRunId: record.runnerRunId.trim() } : {}),
-    ...(record.resumedAt ? { resumedAt: new Date(record.resumedAt).toISOString() } : {}),
+    approvalRef: cleanOptionalString(candidate.approvalRef)!,
+    resourceRef: cleanOptionalString(candidate.resourceRef)!,
+    authorityClass: candidate.authorityClass,
+    consoleSurface,
+    subject: cleanOptionalString(candidate.subject)!,
+    state: candidate.state,
+    decisionVersion: cleanOptionalString(candidate.decisionVersion)!,
+    continuationId: cleanOptionalString(candidate.continuationId)!,
+    checkAttempt,
+    nextCheckAt: cleanOptionalIsoDate(candidate.nextCheckAt)!,
+    createdAt: cleanOptionalIsoDate(candidate.createdAt)!,
+    updatedAt: cleanOptionalIsoDate(candidate.updatedAt)!,
+    ...(candidate.decisionObservedAt ? { decisionObservedAt: cleanOptionalIsoDate(candidate.decisionObservedAt) } : {}),
+    ...(candidate.dispatchReservedAt ? { dispatchReservedAt: cleanOptionalIsoDate(candidate.dispatchReservedAt) } : {}),
+    ...(candidate.runnerRunId ? { runnerRunId: cleanOptionalString(candidate.runnerRunId)! } : {}),
+    ...(candidate.resumedAt ? { resumedAt: cleanOptionalIsoDate(candidate.resumedAt) } : {}),
   };
 }
-
-const APPROVAL_CONSOLE_PATH_ALLOWLIST: Record<ApprovalConsoleSurface, string[]> = {
-  admin: ['admin/approvals'],
-  overview: ['overview/approvals'],
-};
 
 const APPROVAL_WAIT_STATES: ApprovalWaitState[] = [
   'pending',
@@ -588,62 +618,73 @@ const APPROVAL_WAIT_STATES: ApprovalWaitState[] = [
 
 const APPROVAL_AUTHORITY_CLASSES: ApprovalAuthorityClass[] = ['privileged-operation', 'project-workflow'];
 
-function isApprovalAuthorityClass(value: string): value is ApprovalAuthorityClass {
+function isApprovalAuthorityClass(value: unknown): value is ApprovalAuthorityClass {
   return APPROVAL_AUTHORITY_CLASSES.includes(value as ApprovalAuthorityClass);
 }
 
-function isApprovalWaitState(value: string): value is ApprovalWaitState {
+function isApprovalWaitState(value: unknown): value is ApprovalWaitState {
   return APPROVAL_WAIT_STATES.includes(value as ApprovalWaitState);
 }
 
-function sanitizeApprovalWaitConsolePath(consolePath: string | undefined): string | undefined {
-  const trimmed = cleanOptionalString(consolePath);
-  if (trimmed === undefined) return undefined;
+const APPROVAL_WAIT_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|([+-])(\d{2}):(\d{2}))$/;
+
+function validIsoDate(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const match = value.match(APPROVAL_WAIT_DATE_RE);
+  if (match === null) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = Number((match[7] ?? '').padEnd(3, '0'));
   if (
-    !validRelativeConsolePath(trimmed)
-    || !isAllowedApprovalWaitConsolePath(trimmed)
-  ) return undefined;
-  return trimmed;
+    Number.isNaN(year) || Number.isNaN(month) || Number.isNaN(day)
+    || Number.isNaN(hour) || Number.isNaN(minute) || Number.isNaN(second) || Number.isNaN(fraction)
+  ) return false;
+  if (
+    month < 1 || month > 12
+    || day < 1
+    || day > new Date(Date.UTC(year, month, 0)).getUTCDate()
+    || hour > 23
+    || minute > 59
+    || second > 59
+  ) return false;
+  if (fraction < 0 || fraction > 999) return false;
+  const expectedSeconds = Date.parse(value);
+  if (Number.isNaN(expectedSeconds)) return false;
+  const timezoneMinutes = match[8] === 'Z'
+    ? 0
+    : (Number(match[9]) * 60 + Number(match[10])) * (match[8] === '-' ? -1 : 1);
+  if (
+    Number.isNaN(timezoneMinutes)
+    || hour > 23
+    || minute > 59
+    || Number(match[9]) > 23
+    || Number(match[10]) > 59
+  ) return false;
+  const utcTime = Date.UTC(year, month - 1, day, hour, minute, second, fraction) - timezoneMinutes * 60000;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return false;
+  return utcTime === parsed.getTime();
 }
 
-function validRelativeConsolePath(value: string): boolean {
-  return !(
-    value.startsWith('/')
-    || value.includes('\\')
-    || value.includes(':')
-    || value.includes('..')
-    || value.includes('?')
-    || value.includes('#')
-  );
-}
-
-function isAllowedApprovalWaitConsolePath(value: string): boolean {
-  const [surface] = value.split('/');
-  return APPROVAL_CONSOLE_PATH_ALLOWLIST[surface as ApprovalConsoleSurface] !== undefined
-    && APPROVAL_CONSOLE_PATH_ALLOWLIST[surface as ApprovalConsoleSurface].some(
-      (allowed) => value === allowed || value.startsWith(`${allowed}/`),
-    );
-}
-
-function validIsoDate(value: string): boolean {
-  return typeof value === 'string' && !Number.isNaN(Date.parse(value));
-}
-
-function validOptionalIsoDate(value: string | undefined): boolean {
+function validOptionalIsoDate(value: unknown): boolean {
   return value === undefined || validIsoDate(value);
 }
 
-function validBoundedString(value: string, maxLength: number): boolean {
+function validBoundedString(value: unknown, maxLength: number): boolean {
   const cleaned = cleanOptionalString(value);
   return Boolean(cleaned && cleaned.length <= maxLength);
 }
 
-function validOptionalBoundedString(value: string | undefined, maxLength: number): boolean {
+function validOptionalBoundedString(value: unknown, maxLength: number): boolean {
   return value === undefined || validBoundedString(value, maxLength);
 }
 
-function cleanOptionalIsoDate(value: string | undefined): string | undefined {
-  return value === undefined ? undefined : new Date(value).toISOString();
+function cleanOptionalIsoDate(value: unknown): string | undefined {
+  return typeof value === 'string' ? new Date(value).toISOString() : undefined;
 }
 
 function retainByTimestamp<T>(

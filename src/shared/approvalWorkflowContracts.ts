@@ -59,7 +59,6 @@ export type ApprovalWaitRecord = {
   resourceRef: string;
   authorityClass: ApprovalAuthorityClass;
   consoleSurface: ApprovalConsoleSurface;
-  consolePath?: string;
   subject: string;
   state: ApprovalWaitState;
   decisionVersion: string;

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -94,52 +94,53 @@ describe('state persistence', () => {
   it('drops invalid approval waits and preserves an independent streaming session normalization', () => {
     const now = new Date(0).toISOString();
     const session = sessionFixture('streaming-session', 'streaming', now);
-    const approvalWaits: ApprovalWaitRecord[] = [{
-      id: 'valid-wait',
-      sessionId: session.id,
-      userId: 'user',
-      projectId: 'roadex',
-      workspaceId: 'workspace',
-      managedThreadId: '019f7337-df2e-75c1-b245-5e3588a6c5aa',
-      provider: 'overseer',
-      approvalRef: 'approval-valid',
-      resourceRef: 'resource-1',
-      authorityClass: 'privileged-operation',
-      consoleSurface: 'admin',
-      consolePath: 'admin/approvals/approval-valid',
-      subject: 'Reconcile change approval',
-      state: 'pending',
-      decisionVersion: 'v1',
-      continuationId: 'cont-1',
-      checkAttempt: 0,
-      nextCheckAt: now,
-      createdAt: now,
-      updatedAt: now,
-      decisionObservedAt: now,
-    }, {
-      ...{
-        id: 'invalid-wait',
+    const approvalWaits: Array<ApprovalWaitRecord | (ApprovalWaitRecord & { consolePath: string })> = [
+      approvalWaitFixture({
+        id: 'valid-wait',
         sessionId: session.id,
-        userId: 'user',
-        projectId: 'roadex',
-        workspaceId: 'workspace',
-        managedThreadId: '019f7337-df2e-75c1-b245-5e3588a6c5aa',
-        provider: 'overseer',
-        approvalRef: 'approval-invalid',
-        resourceRef: 'resource-1',
-        authorityClass: 'privileged-operation',
         consoleSurface: 'admin',
-        subject: 'Invalid path should be dropped',
-        state: 'pending',
-        decisionVersion: 'v1',
-        continuationId: 'cont-2',
-        checkAttempt: 0,
-        nextCheckAt: now,
-        createdAt: now,
-        updatedAt: now,
+        authorityClass: 'privileged-operation',
+        subject: 'Reconcile change approval',
+        approvalRef: 'approval-valid',
+        continuationId: 'cont-1',
+      }),
+      {
+        ...approvalWaitFixture({
+          id: 'invalid-absolute-path',
+          sessionId: session.id,
+          consoleSurface: 'admin',
+          authorityClass: 'privileged-operation',
+          subject: 'Absolute path should be dropped',
+          approvalRef: 'approval-abs',
+          continuationId: 'cont-2',
+        }),
+        consolePath: '/admin/approvals/approval-abs',
       },
-      consolePath: 'https://untrusted.example.local/approvals',
-    }];
+      {
+        ...approvalWaitFixture({
+          id: 'invalid-relative-path',
+          sessionId: session.id,
+          consoleSurface: 'admin',
+          authorityClass: 'privileged-operation',
+          subject: 'Relative path should be dropped',
+          approvalRef: 'approval-rel',
+          continuationId: 'cont-3',
+        }),
+        consolePath: 'overview/approvals/approval-rel',
+      },
+      {
+        ...approvalWaitFixture({
+          id: 'invalid-mismatched-surface',
+          sessionId: session.id,
+          consoleSurface: 'admin',
+          authorityClass: 'privileged-operation',
+          subject: 'Surface mismatch should be dropped',
+          approvalRef: 'approval-mismatch',
+          continuationId: 'cont-4',
+        }),
+        consolePath: 'admin/approvals/approval-mismatch',
+      },
+    ];
     const state = serializeState({
       sessions: [session],
       approvalWaits,
@@ -147,6 +148,259 @@ describe('state persistence', () => {
 
     expect(state.approvalWaits.map((record) => record.id)).toEqual(['valid-wait']);
     expect(state.sessions[0].lifecycle).toBe('ready');
+  });
+
+  it('preserves valid sessions and audits while dropping malformed waits during in-memory serialization', () => {
+    const now = new Date(0).toISOString();
+    const session = sessionFixture('session-1', 'ready', now);
+    const validWait = approvalWaitFixture({
+      id: 'valid-wait',
+      sessionId: session.id,
+      consoleSurface: 'admin',
+      authorityClass: 'privileged-operation',
+      approvalRef: 'approval-valid',
+      continuationId: 'cont-valid',
+    });
+    const invalidWait = {
+      ...approvalWaitFixture({
+        id: 'invalid-wait',
+        sessionId: session.id,
+        consoleSurface: 'admin',
+        authorityClass: 'privileged-operation',
+        approvalRef: 'approval-bad-id',
+        continuationId: 'cont-invalid',
+      }),
+      id: 2,
+      checkAttempt: 0.5,
+    } as unknown as ApprovalWaitRecord;
+    const state = serializeState({
+      sessions: [session],
+      approvalWaits: [validWait, invalidWait],
+      auditEvents: [
+        {
+          id: 'audit-1',
+          at: now,
+          actorId: 'user',
+          action: 'session.close',
+          resource: session.id,
+          outcome: 'allowed',
+          summary: 'kept',
+        },
+      ],
+    });
+
+    expect(state.sessions.map((value) => value.id)).toEqual([session.id]);
+    expect(state.auditEvents.map((value) => value.id)).toEqual(['audit-1']);
+    expect(state.approvalWaits.map((value) => value.id)).toEqual(['valid-wait']);
+  });
+
+  it('rejects mixed malformed approval waits in durable JSON load without dropping other state', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-state-'));
+    const path = join(dir, 'state.json');
+    const now = new Date(0).toISOString();
+    const session = sessionFixture('session-2', 'ready', now);
+    const validWait = approvalWaitFixture({
+      id: 'json-valid',
+      sessionId: session.id,
+      consoleSurface: 'admin',
+      authorityClass: 'privileged-operation',
+      approvalRef: 'approval-valid',
+      continuationId: 'cont-json-valid',
+    });
+    const invalidWait = {
+      ...approvalWaitFixture({
+        id: 'json-invalid',
+        sessionId: session.id,
+        consoleSurface: 'admin',
+        authorityClass: 'privileged-operation',
+        approvalRef: 'approval-json-bad',
+        continuationId: 'cont-json-invalid',
+      }),
+      consolePath: '/admin/approvals/approval-json-bad',
+    } as unknown as ApprovalWaitRecord;
+    writeFileSync(path, JSON.stringify({
+      sessions: [session],
+      approvalWaits: [invalidWait, validWait],
+      auditEvents: [{
+        id: 'audit-1',
+        at: now,
+        actorId: 'user',
+        action: 'session.close',
+        resource: session.id,
+        outcome: 'allowed',
+        summary: 'persisted',
+      }],
+    }));
+    const persistence = createJsonFilePersistence(path);
+
+    expect(persistence.load().sessions.map((value) => value.id)).toEqual([session.id]);
+    expect(persistence.load().auditEvents.map((value) => value.id)).toEqual(['audit-1']);
+    expect(persistence.load().approvalWaits.map((value) => value.id)).toEqual(['json-valid']);
+  });
+
+  it('rejects malformed approval-wait timestamps and accepts timezone-aware ISO values', () => {
+    const now = new Date(0).toISOString();
+    const base = approvalWaitFixture({
+      sessionId: 'session',
+      consoleSurface: 'admin',
+      authorityClass: 'privileged-operation',
+      approvalRef: 'approval-time',
+      continuationId: 'cont-time',
+      checkAttempt: 0,
+    });
+    const mutableFields: Array<keyof ApprovalWaitRecord> = [
+      'nextCheckAt',
+      'createdAt',
+      'updatedAt',
+      'decisionObservedAt',
+      'dispatchReservedAt',
+      'resumedAt',
+    ];
+    for (const field of mutableFields) {
+      const wait = {
+        ...base,
+        [field]: 'August 2, 2026',
+      } as unknown as ApprovalWaitRecord;
+      expect(
+        serializeState({ approvalWaits: [wait] }).approvalWaits,
+      ).toEqual([]);
+
+      const impossible = {
+        ...base,
+        [field]: '2026-02-31T00:00:00Z',
+      } as unknown as ApprovalWaitRecord;
+      expect(
+        serializeState({ approvalWaits: [impossible] }).approvalWaits,
+      ).toEqual([]);
+    }
+
+    expect(
+      serializeState({ approvalWaits: [base] }).approvalWaits,
+    ).toEqual([{
+      ...base,
+      id: 'approval-wait-valid',
+      nextCheckAt: now,
+      decisionObservedAt: now,
+    }]);
+  });
+
+  it('rejects negative or fractional checkAttempt values', () => {
+    const wait = approvalWaitFixture({
+      sessionId: 'session',
+      consoleSurface: 'admin',
+      authorityClass: 'privileged-operation',
+      approvalRef: 'approval-attempt',
+      continuationId: 'cont-attempt',
+      checkAttempt: -1,
+    });
+    expect(serializeState({ approvalWaits: [wait] }).approvalWaits).toEqual([]);
+    const fractional = approvalWaitFixture({
+      sessionId: 'session',
+      consoleSurface: 'admin',
+      authorityClass: 'privileged-operation',
+      approvalRef: 'approval-attempt-fractional',
+      continuationId: 'cont-attempt-fractional',
+      checkAttempt: 1.5,
+    });
+    expect(serializeState({ approvalWaits: [fractional] }).approvalWaits).toEqual([]);
+  });
+
+  it('retains all active waits and newest terminal waits under bound, including retention bounds env override', () => {
+    const now = Date.UTC(2026, 7, 2);
+    const state = serializeState({
+      approvalWaits: [
+        approvalWaitFixture({
+          id: 'active-newest',
+          sessionId: 'session',
+          consoleSurface: 'admin',
+          authorityClass: 'privileged-operation',
+          state: 'pending',
+          updatedAt: new Date(now - 100).toISOString(),
+          approvalRef: 'approval-active-newest',
+          continuationId: 'cont-active-newest',
+        }),
+        approvalWaitFixture({
+          id: 'active-middle',
+          sessionId: 'session',
+          consoleSurface: 'admin',
+          authorityClass: 'privileged-operation',
+          state: 'verification-delayed',
+          updatedAt: new Date(now - 200).toISOString(),
+          approvalRef: 'approval-active-middle',
+          continuationId: 'cont-active-middle',
+        }),
+        approvalWaitFixture({
+          id: 'terminal-newest',
+          sessionId: 'session',
+          consoleSurface: 'admin',
+          authorityClass: 'privileged-operation',
+          state: 'rejected',
+          updatedAt: new Date(now - 50).toISOString(),
+          approvalRef: 'approval-term-newest',
+          continuationId: 'cont-term-newest',
+        }),
+        approvalWaitFixture({
+          id: 'terminal-middle',
+          sessionId: 'session',
+          consoleSurface: 'admin',
+          authorityClass: 'privileged-operation',
+          state: 'expired',
+          updatedAt: new Date(now - 300).toISOString(),
+          approvalRef: 'approval-term-middle',
+          continuationId: 'cont-term-middle',
+        }),
+        approvalWaitFixture({
+          id: 'terminal-oldest',
+          sessionId: 'session',
+          consoleSurface: 'admin',
+          authorityClass: 'privileged-operation',
+          state: 'revoked',
+          updatedAt: new Date(now - 500).toISOString(),
+          approvalRef: 'approval-term-oldest',
+          continuationId: 'cont-term-oldest',
+        }),
+      ],
+    }, {
+      now,
+      maxApprovalWaits: 4,
+    });
+    expect(state.approvalWaits).toHaveLength(4);
+    expect(state.approvalWaits.map((record) => record.id).sort()).toEqual([
+      'active-middle',
+      'active-newest',
+      'terminal-middle',
+      'terminal-newest',
+    ]);
+
+    const previousValue = process.env.ROADEX_MAX_APPROVAL_WAITS;
+    process.env.ROADEX_MAX_APPROVAL_WAITS = '2';
+    const envBound = serializeState({
+      approvalWaits: [
+        approvalWaitFixture({
+          id: 'env-active-1',
+          sessionId: 'session',
+          consoleSurface: 'admin',
+          authorityClass: 'privileged-operation',
+          state: 'pending',
+          approvalRef: 'approval-env-1',
+          continuationId: 'cont-env-1',
+        }),
+        approvalWaitFixture({
+          id: 'env-terminal',
+          sessionId: 'session',
+          consoleSurface: 'admin',
+          authorityClass: 'privileged-operation',
+          state: 'rejected',
+          approvalRef: 'approval-env-term',
+          continuationId: 'cont-env-term',
+        }),
+      ],
+      now,
+      maxApprovalWaits: 10,
+    });
+    process.env.ROADEX_MAX_APPROVAL_WAITS = previousValue;
+
+    expect(envBound.approvalWaits.map((record) => record.id)).toEqual(['env-active-1']);
   });
 
   it('caps retained sessions, transcript events, and audit events', () => {
@@ -457,5 +711,32 @@ function streamEvent(id: string, sessionId: string): StreamEvent {
     kind: 'system',
     message: id,
     at: new Date(0).toISOString(),
+  };
+}
+
+function approvalWaitFixture(overrides: Partial<ApprovalWaitRecord> = {}): ApprovalWaitRecord {
+  const now = new Date(0).toISOString();
+  return {
+    id: 'approval-wait-valid',
+    sessionId: 'session',
+    userId: 'user',
+    projectId: 'roadex',
+    workspaceId: 'workspace',
+    managedThreadId: '019f7337-df2e-75c1-b245-5e3588a6c5aa',
+    provider: 'overseer',
+    approvalRef: 'approval',
+    resourceRef: 'resource-1',
+    authorityClass: 'privileged-operation',
+    consoleSurface: 'admin',
+    subject: 'Reconcile change approval',
+    state: 'pending',
+    decisionVersion: 'v1',
+    continuationId: 'cont',
+    checkAttempt: 0,
+    nextCheckAt: now,
+    createdAt: now,
+    updatedAt: now,
+    decisionObservedAt: now,
+    ...overrides,
   };
 }
