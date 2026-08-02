@@ -18,8 +18,20 @@ export type ApprovalStatusProvider = {
 export type OverseerProviderOptions = {
   apiBase?: 'http://127.0.0.1:8766';
   readToken: () => string;
-  fetchJson?: (path: string, token: string) => Promise<unknown>;
+  fetchJson?: (path: string, token: string, signal: AbortSignal) => Promise<unknown>;
 };
+
+type ProviderErrorCode =
+  | 'approval_status:api_base_not_permitted'
+  | 'approval_status:token_read_failed'
+  | 'approval_status:token_invalid'
+  | 'approval_status:request_timeout'
+  | 'approval_status:request_failed'
+  | 'approval_status:invalid_content_length'
+  | 'approval_status:response_oversized'
+  | 'approval_status:empty_response'
+  | 'approval_status:invalid_payload'
+  | 'approval_status:scope_mismatch';
 
 const OVERSEER_API_BASE = 'http://127.0.0.1:8766' as const;
 const APPROVER_STATUS_PATH_PREFIX = '/roadex/approval-status?approval_ref=';
@@ -53,12 +65,30 @@ const APPROVAL_PROJECTION_REQUIRED_KEYS = [
 ];
 const APPROVAL_PROJECTION_REQUIRED_KEY_SET = new Set(APPROVAL_PROJECTION_REQUIRED_KEYS);
 const SHA256_HEX_PATTERN = /^sha256:[0-9a-f]{64}$/;
-const ISO8601_WITH_TZ_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|([+-])(\d{2}):?(\d{2}))$/;
-const CONTENT_LENGTH_PATTERN = /^\d+$/;
+const ISO8601_WITH_TZ_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|([+-])(\d{2}):(\d{2}))$/;
+const CONTENT_LENGTH_PATTERN = /^(?:0|[1-9]\d*)$/;
+const PROVIDER_ERROR_CODES = new Set<ProviderErrorCode>([
+  'approval_status:api_base_not_permitted',
+  'approval_status:token_read_failed',
+  'approval_status:token_invalid',
+  'approval_status:request_timeout',
+  'approval_status:request_failed',
+  'approval_status:invalid_content_length',
+  'approval_status:response_oversized',
+  'approval_status:empty_response',
+  'approval_status:invalid_payload',
+  'approval_status:scope_mismatch',
+]);
 
 export function createOverseerApprovalStatusProvider(options: OverseerProviderOptions): ApprovalStatusProvider {
   const apiBase = options.apiBase ?? OVERSEER_API_BASE;
-  const fetchJson = options.fetchJson ?? ((path: string, token: string, signal: AbortSignal) => defaultFetchJson(apiBase, path, token, signal));
+  if (apiBase !== OVERSEER_API_BASE) {
+    throw providerError('approval_status:api_base_not_permitted');
+  }
+
+  const fetchJson = options.fetchJson
+    ?? ((path: string, token: string, signal: AbortSignal) => defaultFetchJson(apiBase, path, token, signal));
 
   return {
     getStatus: async (approvalRef, scope) => {
@@ -73,16 +103,12 @@ export function createOverseerApprovalStatusProvider(options: OverseerProviderOp
       try {
         token = options.readToken();
       } catch {
-        throw providerError('Failed to read overseer token.');
+        throw providerError('approval_status:token_read_failed');
       }
       try {
         token = validateBearerToken(token);
       } catch {
-        throw providerError('Invalid overseer token.');
-      }
-
-      if (apiBase !== OVERSEER_API_BASE) {
-        throw providerError('Overseer API base is not permitted.');
+        throw providerError('approval_status:token_invalid');
       }
 
       const encodedRef = encodeURIComponent(canonical.approvalRef);
@@ -90,16 +116,16 @@ export function createOverseerApprovalStatusProvider(options: OverseerProviderOp
 
       let payload: unknown;
       try {
-        payload = await withTimeout((signal) => (options.fetchJson ? options.fetchJson(path, token) : fetchJson(path, token, signal)));
+        payload = await withTimeout((signal) => fetchJson(path, token, signal));
       } catch (_error) {
-        throw providerError(categorizeReadError(_error));
+        throw normalizeReadError(_error);
       }
 
       let projection: RoadexApprovalStatusProjection;
       try {
         projection = parseRoadexApprovalStatusProjection(payload);
       } catch {
-        throw providerError('Invalid approval status payload.');
+        throw providerError('approval_status:invalid_payload');
       }
 
       const scopeMatches = {
@@ -115,7 +141,7 @@ export function createOverseerApprovalStatusProvider(options: OverseerProviderOp
         || !scopeMatches.workspaceId
         || !scopeMatches.resourceRef
       ) {
-        throw providerError('Approval status does not match expected scope.');
+        throw providerError('approval_status:scope_mismatch');
       }
 
       return {
@@ -134,27 +160,76 @@ export function createOverseerApprovalStatusProvider(options: OverseerProviderOp
   };
 }
 
+function normalizeReadError(error: unknown): Error {
+  if (error instanceof Error && PROVIDER_ERROR_CODES.has(error.message as ProviderErrorCode)) {
+    return error;
+  }
+  return providerError('approval_status:request_failed');
+}
+
 async function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      controller.abort(new DOMException('Overseer approval status request timed out.', 'TimeoutError'));
-      reject(new Error('Overseer approval status request timed out.'));
-    }, DEFAULT_TIMEOUT_MS);
+  const controller = new AbortController();
+  let operationSettled = false;
+  let timeoutSettled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
 
-    const clear = () => clearTimeout(timer);
+  const timeoutError = providerError('approval_status:request_timeout');
+  const requestFailedError = providerError('approval_status:request_failed');
+  type RaceResult = { kind: 'success'; value: T } | { kind: 'timeout' } | { kind: 'failure'; error: unknown };
 
-    operation(controller.signal).then(
-      (result) => {
-        clear();
-        resolve(result);
-      },
-      (error) => {
-        clear();
-        reject(error);
-      },
+  const wrappedOperation = Promise.resolve()
+    .then(() => operation(controller.signal))
+    .then(
+      (value): RaceResult => ({ kind: 'success', value }),
+      (error): RaceResult => ({ kind: 'failure', error }),
     );
+
+  const timeoutPromise = new Promise<RaceResult>((resolve) => {
+    timer = setTimeout(() => {
+      if (operationSettled) {
+        return;
+      }
+      operationSettled = true;
+      timeoutSettled = true;
+      controller.abort(new DOMException('Overseer approval status request timed out.', 'TimeoutError'));
+      resolve({ kind: 'timeout' });
+    }, DEFAULT_TIMEOUT_MS);
   });
+
+  try {
+    const result = await Promise.race([wrappedOperation, timeoutPromise]);
+
+    if (result.kind === 'timeout') {
+      throw timeoutError;
+    }
+
+    operationSettled = true;
+    if (result.kind === 'failure') {
+      if (result.error instanceof Error && PROVIDER_ERROR_CODES.has(result.error.message as ProviderErrorCode)) {
+        throw result.error;
+      }
+      throw requestFailedError;
+    }
+
+    if (result.kind === 'success') {
+      return result.value;
+    }
+
+    throw requestFailedError;
+  } catch (error) {
+    if (timeoutSettled) {
+      throw timeoutError;
+    }
+    if (error instanceof Error && PROVIDER_ERROR_CODES.has(error.message as ProviderErrorCode)) {
+      throw error;
+    }
+    throw requestFailedError;
+  } finally {
+    operationSettled = true;
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 async function defaultFetchJson(apiBase: string, path: string, token: string, signal: AbortSignal): Promise<unknown> {
@@ -168,19 +243,13 @@ async function defaultFetchJson(apiBase: string, path: string, token: string, si
   });
 
   if (!response.ok) {
-    throw new Error(`Overseer approval status request failed with HTTP ${String(response.status)}`);
+    throw providerError('approval_status:request_failed');
   }
 
-  const declaredLengthHeader = response.headers.get('content-length');
-  const declaredLength = parseDeclaredLength(declaredLengthHeader);
-  if (declaredLength === undefined) {
-    // nothing to validate
-  } else if (declaredLength > MAX_RESPONSE_BYTES) {
-    throw new Error('Overseer approval status response is oversized.');
-  }
+  const declaredLength = parseDeclaredLength(response.headers.get('content-length'));
 
   if (!response.body) {
-    throw new Error('Overseer approval status response has no body.');
+    throw providerError('approval_status:empty_response');
   }
 
   const reader = response.body.getReader();
@@ -192,22 +261,45 @@ async function defaultFetchJson(apiBase: string, path: string, token: string, si
     if (done) {
       break;
     }
-    if (declaredLength !== undefined && totalBytes + value.byteLength > declaredLength) {
-      await reader.cancel();
-      throw new Error('Overseer approval status response is oversized.');
+    if (value === undefined) {
+      continue;
     }
+
+    if (value.byteLength === 0) {
+      continue;
+    }
+
     totalBytes += value.byteLength;
     if (totalBytes > MAX_RESPONSE_BYTES) {
       await reader.cancel();
-      throw new Error('Overseer approval status response is oversized.');
+      throw providerError('approval_status:response_oversized');
     }
+
     chunks.push(value);
   }
 
   const body = concatUint8Arrays(chunks, totalBytes);
-  const text = new TextDecoder().decode(body);
+  if (body.byteLength === 0) {
+    throw providerError('approval_status:empty_response');
+  }
+  if (declaredLength !== undefined && declaredLength !== body.byteLength) {
+    throw providerError('approval_status:invalid_content_length');
+  }
 
-  return JSON.parse(text);
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', {
+      fatal: true,
+    }).decode(body);
+  } catch {
+    throw providerError('approval_status:invalid_payload');
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw providerError('approval_status:invalid_payload');
+  }
 }
 
 function parseDeclaredLength(value: string | null): number | undefined {
@@ -215,10 +307,18 @@ function parseDeclaredLength(value: string | null): number | undefined {
     return undefined;
   }
   if (!CONTENT_LENGTH_PATTERN.test(value)) {
-    throw new Error('Invalid content-length.');
+    throw providerError('approval_status:invalid_content_length');
   }
 
-  return Number(value);
+  const declaredLength = Number(value);
+  if (!Number.isSafeInteger(declaredLength) || declaredLength < 0) {
+    throw providerError('approval_status:invalid_content_length');
+  }
+  if (declaredLength > MAX_RESPONSE_BYTES) {
+    throw providerError('approval_status:response_oversized');
+  }
+
+  return declaredLength;
 }
 
 function concatUint8Arrays(chunks: Uint8Array[], totalBytes: number): Uint8Array {
@@ -250,7 +350,12 @@ function parseRoadexApprovalStatusProjection(value: unknown): RoadexApprovalStat
       throw new Error('Approval status has non-string keys.');
     }
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (descriptor === undefined || !descriptor.enumerable) {
+    if (
+      descriptor === undefined
+      || descriptor.enumerable === false
+      || descriptor.get !== undefined
+      || descriptor.set !== undefined
+    ) {
       throw new Error('Approval status has non-enumerable field.');
     }
     if (!APPROVAL_PROJECTION_REQUIRED_KEY_SET.has(key)) {
@@ -295,6 +400,14 @@ function parseRoadexApprovalStatusProjection(value: unknown): RoadexApprovalStat
   } as RoadexApprovalStatusProjection;
 }
 
+function parseSha256Digest(value: unknown): string {
+  if (!isCanonicalOpaque(value, 64 + 'sha256:'.length) || !SHA256_HEX_PATTERN.test(value)) {
+    throw new Error('Approval status has invalid values.');
+  }
+
+  return value;
+}
+
 function parseSourceKind(value: unknown): RoadexApprovalStatusProjection['sourceKind'] {
   if (!isApprovalSourceKind(value)) {
     throw new Error('Approval status has unsupported source kind.');
@@ -319,30 +432,6 @@ function parseApprovalDecision(value: unknown): ApprovalDecision {
   return value;
 }
 
-function parseSha256Digest(value: unknown): string {
-  const digest = parseOpaqueString(value, 71);
-  if (!SHA256_HEX_PATTERN.test(digest)) {
-    throw new Error('Approval status has invalid values.');
-  }
-
-  return digest;
-}
-
-function isApprovalSourceKind(value: unknown): value is RoadexApprovalStatusProjection['sourceKind'] {
-  return value === 'admin-plan' || value === 'roadex-human-decision';
-}
-
-function isApprovalAuthorityClass(value: unknown): value is ApprovalAuthorityClass {
-  return value === 'privileged-operation' || value === 'project-workflow';
-}
-
-function isApprovalDecision(value: unknown): value is ApprovalDecision {
-  return (
-    typeof value === 'string'
-    && APPROVAL_DECISIONS.has(value as ApprovalDecision)
-  );
-}
-
 function parseOpaqueString(value: unknown, maxLength: number): string {
   if (!isCanonicalOpaque(value, maxLength)) {
     throw new Error('Approval status has invalid values.');
@@ -351,8 +440,8 @@ function parseOpaqueString(value: unknown, maxLength: number): string {
   return value;
 }
 
-function providerError(message: string): Error {
-  return new Error(message);
+function providerError(code: ProviderErrorCode): Error {
+  return new Error(code);
 }
 
 function parseValidation<T>(value: unknown, maxLength: number, field: string): T {
@@ -402,20 +491,33 @@ function isValidIso(value: string): boolean {
     return false;
   }
 
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  const second = Number(match[6]);
-  const fraction = match[7] ?? '';
-  const tzSign = match[9] === undefined ? 'Z' : match[9];
-  const tzHour = match[10] === undefined ? 0 : Number(match[10]);
-  const tzMinute = match[11] === undefined ? 0 : Number(match[11]);
+  const [
+    ,
+    yearText,
+    monthText,
+    dayText,
+    hourText,
+    minuteText,
+    secondText,
+    fractionText,
+    timeZoneText,
+    timeZoneSignText,
+    tzHourText,
+    tzMinuteText,
+  ] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const fraction = fractionText ?? '';
+  const tzSign = timeZoneText === 'Z' ? 'Z' : timeZoneSignText;
+  const tzHour = timeZoneText === 'Z' || tzSign === undefined ? 0 : Number(tzHourText);
+  const tzMinute = timeZoneText === 'Z' || tzSign === undefined ? 0 : Number(tzMinuteText);
 
   if (month < 1 || month > 12) return false;
   if (hour > 23 || minute > 59 || second > 59) return false;
-  if (tzSign === undefined && match[8] === undefined) return false;
 
   const maxDay = daysInMonth(year, month);
   if (day < 1 || day > maxDay) return false;
@@ -423,17 +525,15 @@ function isValidIso(value: string): boolean {
   const tzOffsetMinutes = tzSign === 'Z' ? 0 : parseOffsetMinutes(tzSign, tzHour, tzMinute);
   if (tzOffsetMinutes === null) return false;
 
-  const fractionValue = fraction.length === 0 ? 0 : Number(fraction.padEnd(6, '0').slice(0, 3));
+  const fractionValue = fraction.length === 0 ? 0 : Number(fraction.padEnd(6, '0').slice(0, 6));
   const utcMinutes = Date.UTC(year, month - 1, day, hour, minute, second, fractionValue) - tzOffsetMinutes * 60_000;
   return Number.isFinite(utcMinutes);
 }
 
 function parseOffsetMinutes(sign: string, hour: number, minute: number): number | null {
-  if (sign === 'Z') {
-    return 0;
-  }
-
-  if (hour > 23 || minute > 59) return null;
+  if (hour < 0 || hour > 14) return null;
+  if (minute < 0 || minute > 59) return null;
+  if (hour === 14 && minute !== 0) return null;
 
   const offsetMinutes = hour * 60 + minute;
   return sign === '+' ? offsetMinutes : -offsetMinutes;
@@ -475,19 +575,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function categorizeReadError(error: unknown): string {
-  const message = error instanceof Error ? error.message : '';
-  if (message === 'Invalid content-length.') {
-    return 'Invalid content-length.';
-  }
-  if (message.includes('timed out')) {
-    return message;
-  }
-  if (message === 'Overseer approval status response is oversized.') {
-    return 'Overseer approval status response is oversized.';
-  }
-  if (message === 'Overseer approval status response has no body.') {
-    return 'Overseer approval status response has no body.';
-  }
-  return 'Failed to read exact approval status.';
+function isApprovalSourceKind(value: unknown): value is RoadexApprovalStatusProjection['sourceKind'] {
+  return value === 'admin-plan' || value === 'roadex-human-decision';
+}
+
+function isApprovalAuthorityClass(value: unknown): value is ApprovalAuthorityClass {
+  return value === 'privileged-operation' || value === 'project-workflow';
+}
+
+function isApprovalDecision(value: unknown): value is ApprovalDecision {
+  return (
+    typeof value === 'string'
+    && APPROVAL_DECISIONS.has(value as ApprovalDecision)
+  );
 }

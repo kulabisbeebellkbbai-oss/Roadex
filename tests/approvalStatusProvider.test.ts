@@ -43,7 +43,7 @@ function buildProjection(overrides: Partial<Projection> = {}): Projection {
     scopeDigest: validSha256,
     decision: 'approved',
     decisionVersion: validSha256,
-    updatedAt: '2026-08-02T18:00:00.000Z',
+    updatedAt: '2026-08-02T18:00:00+00:00',
     ...overrides,
   };
 }
@@ -53,6 +53,29 @@ function buildProjectionUnknown(overrides: Record<string, unknown> = {}): unknow
     ...buildProjection(),
     ...overrides,
   };
+}
+
+const requestTimeoutCode = 'approval_status:request_timeout';
+const invalidPayloadCode = 'approval_status:invalid_payload';
+const tokenReadFailedCode = 'approval_status:token_read_failed';
+const tokenInvalidCode = 'approval_status:token_invalid';
+const apiBaseDeniedCode = 'approval_status:api_base_not_permitted';
+const requestFailedCode = 'approval_status:request_failed';
+const invalidContentLengthCode = 'approval_status:invalid_content_length';
+const responseOversizedCode = 'approval_status:response_oversized';
+const scopeMismatchCode = 'approval_status:scope_mismatch';
+
+const maxTimeoutMs = 5_100;
+
+async function expectFailureCode<T>(promise: Promise<T>, code: string): Promise<string> {
+  const error = await promise.then(
+    () => undefined as unknown,
+    (result) => result,
+  );
+
+  const message = error instanceof Error ? error.message : String(error);
+  expect(message).toBe(code);
+  return message;
 }
 
 describe('createOverseerApprovalStatusProvider', () => {
@@ -66,7 +89,7 @@ describe('createOverseerApprovalStatusProvider', () => {
 
     const status = await provider.getStatus(approvalRef, validScope);
 
-    expect(fetchJson).toHaveBeenCalledWith('/roadex/approval-status?approval_ref=admin.roadex.test', token);
+    expect(fetchJson).toHaveBeenCalledWith('/roadex/approval-status?approval_ref=admin.roadex.test', token, expect.any(AbortSignal));
     expect(status).toMatchObject({
       provider: 'overseer',
       approvalRef,
@@ -77,7 +100,7 @@ describe('createOverseerApprovalStatusProvider', () => {
       workspaceId: validScope.workspaceId,
       resourceRef: validScope.resourceRef,
       subject: 'Restart test service',
-      updatedAt: '2026-08-02T18:00:00.000Z',
+      updatedAt: '2026-08-02T18:00:00+00:00',
     });
   });
 
@@ -94,13 +117,13 @@ describe('createOverseerApprovalStatusProvider', () => {
     }
   });
 
-  it('accepts timezone-aware updatedAt timestamps from accepted producer payloads', async () => {
+  it('accepts strict timezone-aware producer ISO-8601 timestamps', async () => {
     const validUpdatedAt = [
       '2026-01-01T10:00:00+00:00',
       '2026-01-01T10:00:00.1+00:00',
       '2026-01-01T10:00:00.123456+00:00',
-      '2026-01-01T10:00:00+0000',
       '2026-01-01T10:00:00-05:30',
+      '2026-01-01T10:00:00.999999+09:00',
     ];
 
     for (const updatedAt of validUpdatedAt) {
@@ -119,8 +142,14 @@ describe('createOverseerApprovalStatusProvider', () => {
       '2026-13-01T10:00:00+00:00',
       '2026-02-29T10:00:00+00:00',
       '2026-01-01T10:60:00+00:00',
+      '2026-01-01T10:00:00+24:00',
+      '2026-01-01T10:00:00+00:60',
       '2026-01-01T10:00:00+0:00',
+      '2026-01-01T10:00:00-1:30',
       '2026-01-01T10:00:00.1234567+00:00',
+      '2026-01-01T10:00:00+0000',
+      '2026-01-01T10:00:00+14:30',
+      '2026-01-01T10:00:00-14:01',
     ];
 
     for (const updatedAt of invalidUpdatedAt) {
@@ -129,7 +158,7 @@ describe('createOverseerApprovalStatusProvider', () => {
         fetchJson: async () => buildProjection({ updatedAt }),
       });
 
-      await expect(provider.getStatus(approvalRef, validScope)).rejects.toThrow('Invalid approval status payload.');
+      await expectFailureCode(provider.getStatus(approvalRef, validScope), invalidPayloadCode);
     }
   });
 
@@ -146,6 +175,7 @@ describe('createOverseerApprovalStatusProvider', () => {
     expect(fetchJson).toHaveBeenCalledWith(
       '/roadex/approval-status?approval_ref=admin.roadex.test%2Fabc%3Fx%3D1',
       token,
+      expect.any(AbortSignal),
     );
   });
 
@@ -162,7 +192,7 @@ describe('createOverseerApprovalStatusProvider', () => {
         fetchJson: async () => buildProjection(),
       });
 
-      await expect(provider.getStatus(approvalRef, scoped)).rejects.toThrow('does not match expected scope');
+      await expectFailureCode(provider.getStatus(approvalRef, scoped), scopeMismatchCode);
     }
   });
 
@@ -172,7 +202,7 @@ describe('createOverseerApprovalStatusProvider', () => {
       fetchJson: async () => buildProjection({ approvalRef: 'admin.other.test' }),
     });
 
-    await expect(provider.getStatus(approvalRef, validScope)).rejects.toThrow('does not match expected scope');
+    await expectFailureCode(provider.getStatus(approvalRef, validScope), scopeMismatchCode);
   });
 
   it('rejects unsupported source kind and authority', async () => {
@@ -196,8 +226,8 @@ describe('createOverseerApprovalStatusProvider', () => {
       fetchJson: async () => unsupportedAuthority,
     });
 
-    await expect(unsupportedSourceProvider.getStatus(approvalRef, validScope)).rejects.toThrow();
-    await expect(unsupportedAuthorityProvider.getStatus(approvalRef, validScope)).rejects.toThrow();
+    await expectFailureCode(unsupportedSourceProvider.getStatus(approvalRef, validScope), invalidPayloadCode);
+    await expectFailureCode(unsupportedAuthorityProvider.getStatus(approvalRef, validScope), invalidPayloadCode);
   });
 
   it('rejects malformed source or authority values in projection', async () => {
@@ -215,41 +245,52 @@ describe('createOverseerApprovalStatusProvider', () => {
       }),
     });
 
-    await expect(malformedSourceProvider.getStatus(approvalRef, validScope)).rejects.toThrow();
-    await expect(malformedAuthorityProvider.getStatus(approvalRef, validScope)).rejects.toThrow();
+    await expectFailureCode(malformedSourceProvider.getStatus(approvalRef, validScope), invalidPayloadCode);
+    await expectFailureCode(malformedAuthorityProvider.getStatus(approvalRef, validScope), invalidPayloadCode);
   });
 
   it('rejects malformed sha256 digest and version fields', async () => {
-    const invalidDigestProvider = createOverseerApprovalStatusProvider({
-      readToken: () => token,
-      fetchJson: async () => buildProjectionUnknown({
-        scopeDigest: 'sha256:nothex',
-      }),
-    });
+    const invalidDigestValues = [
+      'SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      `sha256:${'a'.repeat(63)}`,
+      `sha256:${'z'.repeat(64)}`,
+    ];
 
-    const invalidVersionProvider = createOverseerApprovalStatusProvider({
-      readToken: () => token,
-      fetchJson: async () => buildProjectionUnknown({
-        decisionVersion: 'sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz',
-      }),
-    });
+    const invalidVersionValues = [
+      'sha256:nothex',
+      `sha256:${'a'.repeat(64).toUpperCase()}`,
+      `sha256:${'a'.repeat(65)}`,
+    ];
 
-    await expect(invalidDigestProvider.getStatus(approvalRef, validScope)).rejects.toThrow('Invalid approval status payload.');
-    await expect(invalidVersionProvider.getStatus(approvalRef, validScope)).rejects.toThrow('Invalid approval status payload.');
+    for (const scopeDigest of invalidDigestValues) {
+      const invalidDigestProvider = createOverseerApprovalStatusProvider({
+        readToken: () => token,
+        fetchJson: async () => buildProjectionUnknown({ scopeDigest }),
+      });
+      await expectFailureCode(invalidDigestProvider.getStatus(approvalRef, validScope), invalidPayloadCode);
+    }
+
+    for (const decisionVersion of invalidVersionValues) {
+      const invalidVersionProvider = createOverseerApprovalStatusProvider({
+        readToken: () => token,
+        fetchJson: async () => buildProjectionUnknown({ decisionVersion }),
+      });
+      await expectFailureCode(invalidVersionProvider.getStatus(approvalRef, validScope), invalidPayloadCode);
+    }
   });
 
-  it('rejects malformed JSON, missing fields, extra fields, inherited fields, and non-enumerable or symbol extras', async () => {
+  it('validates response shape exactly with own keys only', async () => {
     const malformed = createOverseerApprovalStatusProvider({
       readToken: () => token,
       fetchJson: async () => 'not-json',
     });
-    await expect(malformed.getStatus(approvalRef, validScope)).rejects.toThrow('Invalid approval status payload');
+    await expectFailureCode(malformed.getStatus(approvalRef, validScope), invalidPayloadCode);
 
     const missing = createOverseerApprovalStatusProvider({
       readToken: () => token,
       fetchJson: async () => ({ approvalRef }),
     });
-    await expect(missing.getStatus(approvalRef, validScope)).rejects.toThrow('Invalid approval status payload');
+    await expectFailureCode(missing.getStatus(approvalRef, validScope), invalidPayloadCode);
 
     const extra = createOverseerApprovalStatusProvider({
       readToken: () => token,
@@ -258,14 +299,14 @@ describe('createOverseerApprovalStatusProvider', () => {
         extraField: 'should-be-rejected',
       }),
     });
-    await expect(extra.getStatus(approvalRef, validScope)).rejects.toThrow('Invalid approval status payload');
+    await expectFailureCode(extra.getStatus(approvalRef, validScope), invalidPayloadCode);
 
     const inherited = Object.create(buildProjection());
     const inheritedProvider = createOverseerApprovalStatusProvider({
       readToken: () => token,
       fetchJson: async () => inherited,
     });
-    await expect(inheritedProvider.getStatus(approvalRef, validScope)).rejects.toThrow('Invalid approval status payload');
+    await expectFailureCode(inheritedProvider.getStatus(approvalRef, validScope), invalidPayloadCode);
 
     const nonEnumerable = buildProjectionUnknown();
     Object.defineProperty(nonEnumerable, 'extraField', {
@@ -277,7 +318,7 @@ describe('createOverseerApprovalStatusProvider', () => {
       readToken: () => token,
       fetchJson: async () => nonEnumerable,
     });
-    await expect(nonEnumerableProvider.getStatus(approvalRef, validScope)).rejects.toThrow('Invalid approval status payload');
+    await expectFailureCode(nonEnumerableProvider.getStatus(approvalRef, validScope), invalidPayloadCode);
 
     const symbolProjected: Record<string | symbol, unknown> = buildProjectionUnknown();
     symbolProjected[Symbol('x')] = 'secret';
@@ -285,196 +326,20 @@ describe('createOverseerApprovalStatusProvider', () => {
       readToken: () => token,
       fetchJson: async () => symbolProjected,
     });
-    await expect(symbolProvider.getStatus(approvalRef, validScope)).rejects.toThrow('Invalid approval status payload');
-  });
+    await expectFailureCode(symbolProvider.getStatus(approvalRef, validScope), invalidPayloadCode);
 
-  it('treats token-read, timeout, and fetch failures as closed scope', async () => {
-    const failRead = createOverseerApprovalStatusProvider({
-      readToken: () => {
-        throw new Error(`unable to read token ${token}`);
+    const accessorProjected = buildProjectionUnknown();
+    Object.defineProperty(accessorProjected, 'decision', {
+      get() {
+        return 'approved';
       },
+      enumerable: true,
     });
-
-    await expect(failRead.getStatus(approvalRef, validScope)).rejects.toThrow('Failed to read overseer token');
-
-    const timedOut = createOverseerApprovalStatusProvider({
+    const accessorProvider = createOverseerApprovalStatusProvider({
       readToken: () => token,
-      fetchJson: async () => new Promise<Projection>(() => {}),
+      fetchJson: async () => accessorProjected,
     });
-
-    vi.useFakeTimers();
-    const pending = timedOut.getStatus(approvalRef, validScope).then(
-      () => {
-        throw new Error('should not resolve');
-      },
-      (error) => error,
-    );
-    await vi.advanceTimersByTimeAsync(5100);
-    await expect(pending).resolves.toMatchObject({
-      message: expect.stringContaining('timed out'),
-    });
-    vi.useRealTimers();
-  });
-
-  it('enforces exact loopback API base before fetching', async () => {
-    const fetchJson = vi.fn(async () => buildProjection());
-    const provider = createOverseerApprovalStatusProvider({
-      apiBase: 'https://example.invalid' as unknown as 'http://127.0.0.1:8766',
-      readToken: () => token,
-      fetchJson,
-    });
-
-    await expect(provider.getStatus(approvalRef, validScope)).rejects.toThrow('Overseer API base is not permitted.');
-    expect(fetchJson).not.toHaveBeenCalled();
-  });
-
-  it('rejects invalid tokens before fetch', async () => {
-    const fetchJson = vi.fn(async () => buildProjection());
-    const invalidTokens: unknown[] = [
-      '',
-      '   ',
-      ' token',
-      `token\n`,
-      'x'.repeat(300),
-      123,
-    ];
-
-    for (const badToken of invalidTokens) {
-      const provider = createOverseerApprovalStatusProvider({
-        readToken: () => badToken as string,
-        fetchJson,
-      });
-
-      await expect(provider.getStatus(approvalRef, validScope)).rejects.toThrow('Invalid overseer token.');
-      expect(fetchJson).not.toHaveBeenCalled();
-    }
-  });
-
-  it('redacts provider error details from all failure categories', async () => {
-    const redactedToken = 'top-secret-token';
-    const provider = createOverseerApprovalStatusProvider({
-      readToken: () => redactedToken,
-      fetchJson: async () => {
-        throw new Error(`upstream failed using path /roadex/approval-status?approval_ref=${encodeURIComponent(approvalRef)} with token=${redactedToken}`);
-      },
-    });
-
-    const result = await provider.getStatus(approvalRef, validScope).then(
-      () => undefined,
-      (error) => error,
-    );
-    expect((result as Error).message).not.toContain(redactedToken);
-    expect((result as Error).message).not.toContain('/roadex/approval-status');
-  });
-
-  it('rejects invalid content-length headers', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('x', {
-        status: 200,
-        headers: {
-          'content-length': '-1',
-        },
-      }),
-    );
-
-    const provider = createOverseerApprovalStatusProvider({
-      readToken: () => token,
-    });
-
-    await expect(provider.getStatus(approvalRef, validScope)).rejects.toThrow('Invalid content-length');
-
-    fetchSpy.mockRestore();
-  });
-
-  it('rejects non-integral content-length headers', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('x', {
-        status: 200,
-        headers: {
-          'content-length': '12.7',
-        },
-      }),
-    );
-
-    const provider = createOverseerApprovalStatusProvider({
-      readToken: () => token,
-    });
-
-    await expect(provider.getStatus(approvalRef, validScope)).rejects.toThrow('Invalid content-length');
-
-    fetchSpy.mockRestore();
-  });
-
-  it('rejects oversized multibyte response bodies before parsing', async () => {
-    const payload = buildProjection({
-      subject: '你'.repeat(12000),
-      updatedAt: '2026-01-01T10:00:00+00:00',
-    });
-    const responseText = JSON.stringify(payload);
-
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(responseText, { status: 200 }));
-
-    const provider = createOverseerApprovalStatusProvider({
-      readToken: () => token,
-    });
-
-    await expect(provider.getStatus(approvalRef, validScope)).rejects.toThrow('response is oversized');
-
-    fetchSpy.mockRestore();
-  });
-
-  it('aborts default fetch on timeout', async () => {
-    let aborted = false;
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((_, init) => {
-      const signal = init?.signal;
-      return new Promise((_resolve, reject) => {
-        if (signal === undefined) {
-          reject(new Error('missing signal'));
-          return;
-        }
-        signal.addEventListener('abort', () => {
-          aborted = true;
-          reject(new Error('fetch aborted'));
-        });
-      });
-    });
-
-    const provider = createOverseerApprovalStatusProvider({
-      readToken: () => token,
-    });
-
-    vi.useFakeTimers();
-    const pending = provider.getStatus(approvalRef, validScope).then(() => undefined, (error) => error);
-    await vi.advanceTimersByTimeAsync(5_100);
-    await expect(pending).resolves.toMatchObject({
-      message: expect.stringContaining('timed out'),
-    });
-    expect(aborted).toBe(true);
-    vi.useRealTimers();
-
-    fetchSpy.mockRestore();
-  });
-
-  it('uses fixed base path and request shape', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify(buildProjection()), { status: 200 }),
-    );
-
-    const provider = createOverseerApprovalStatusProvider({
-      readToken: () => token,
-    });
-
-    expect(Object.keys(provider)).toEqual(['getStatus']);
-
-    await provider.getStatus(approvalRef, validScope);
-
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit & { headers?: Record<string, string> }];
-    expect(url).toBe('http://127.0.0.1:8766/roadex/approval-status?approval_ref=admin.roadex.test');
-    expect(init.method).toBe('GET');
-    expect(init.cache).toBe('no-store');
-    expect(init.headers).toMatchObject({ Authorization: `Bearer ${token}` });
-
-    fetchSpy.mockRestore();
+    await expectFailureCode(accessorProvider.getStatus(approvalRef, validScope), invalidPayloadCode);
   });
 
   it('reads token for each request', async () => {
@@ -498,6 +363,290 @@ describe('createOverseerApprovalStatusProvider', () => {
     await provider.getStatus(approvalRef, validScope);
 
     expect(fetchTokenLog).toEqual(tokens);
+  });
+
+  it('rejects malformed tokens before any request', async () => {
+    const fetchJson = vi.fn(async () => buildProjection());
+    const invalidTokens: unknown[] = [
+      '',
+      '   ',
+      ' token',
+      `token\n`,
+      'x'.repeat(300),
+      123,
+      'Bearer abc',
+    ];
+
+    for (const badToken of invalidTokens) {
+      const provider = createOverseerApprovalStatusProvider({
+        readToken: () => badToken as string,
+        fetchJson,
+      });
+
+      await expectFailureCode(provider.getStatus(approvalRef, validScope), tokenInvalidCode);
+      expect(fetchJson).not.toHaveBeenCalled();
+      fetchJson.mockClear();
+    }
+  });
+
+  it('rejects when token reader fails and does not leak related error text', async () => {
+    const sensitive = 'token-reader-secret-123';
+    const provider = createOverseerApprovalStatusProvider({
+      readToken: () => {
+        throw new Error(`unable to read token ${sensitive}`);
+      },
+      fetchJson: async () => buildProjection(),
+    });
+
+    const message = await expectFailureCode(provider.getStatus(approvalRef, validScope), tokenReadFailedCode);
+    expect(message).not.toContain(sensitive);
+  });
+
+  it('hard-fails invalid content-length headers', async () => {
+    const invalidHeaders = ['-1', '12.7', 'not-a-number'];
+    for (const header of invalidHeaders) {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('x', {
+        status: 200,
+        headers: {
+          'content-length': header,
+        },
+      }));
+      try {
+        const provider = createOverseerApprovalStatusProvider({
+          readToken: () => token,
+        });
+
+        await expectFailureCode(provider.getStatus(approvalRef, validScope), invalidContentLengthCode);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    }
+  });
+
+  it('requires declared content-length to match the exact response byte count', async () => {
+    const responsePayload = buildProjection({
+      updatedAt: '2026-01-01T10:00:00+00:00',
+    });
+    const body = JSON.stringify(responsePayload);
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(body, {
+      status: 200,
+      headers: {
+        'content-length': '1',
+      },
+    }));
+    try {
+      const provider = createOverseerApprovalStatusProvider({
+        readToken: () => token,
+      });
+
+      await expectFailureCode(provider.getStatus(approvalRef, validScope), invalidContentLengthCode);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('rejects oversized response headers and oversized multibyte payloads before parsing', async () => {
+    const oversizedHeaderResponse = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('x', {
+      status: 200,
+      headers: {
+        'content-length': String(33_000),
+      },
+    }));
+
+    try {
+      const provider = createOverseerApprovalStatusProvider({
+        readToken: () => token,
+      });
+
+      await expectFailureCode(provider.getStatus(approvalRef, validScope), responseOversizedCode);
+    } finally {
+      oversizedHeaderResponse.mockRestore();
+    }
+
+    const payload = buildProjection({
+      subject: '你'.repeat(12000),
+      updatedAt: '2026-01-01T10:00:00+00:00',
+    });
+    const responseText = JSON.stringify(payload);
+
+    const multibyteResponse = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(responseText, { status: 200 }));
+    try {
+      const provider = createOverseerApprovalStatusProvider({
+        readToken: () => token,
+      });
+
+      await expectFailureCode(provider.getStatus(approvalRef, validScope), responseOversizedCode);
+    } finally {
+      multibyteResponse.mockRestore();
+    }
+  });
+
+  it('maps malformed UTF-8 payload bytes to invalid-payload', async () => {
+    const malformedBody = new Uint8Array([0xff]);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(malformedBody, {
+      status: 200,
+    }));
+
+    try {
+      const provider = createOverseerApprovalStatusProvider({
+        readToken: () => token,
+      });
+      await expectFailureCode(provider.getStatus(approvalRef, validScope), invalidPayloadCode);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('times out default fetch and proves abort signal activation', { timeout: maxTimeoutMs + 1_000 }, async () => {
+    let abortReceived = false;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((_, init) => {
+      return new Promise((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal === undefined) {
+          reject(new Error('missing signal'));
+          return;
+        }
+        signal.addEventListener('abort', () => {
+          abortReceived = true;
+          reject(new Error('ignored-secret path=/roadex/approval-status?approval_ref=admin.roadex.test token=do-not-leak'));
+        });
+      });
+    });
+
+    const provider = createOverseerApprovalStatusProvider({
+      readToken: () => token,
+    });
+
+    try {
+      const timeoutResult = provider.getStatus(approvalRef, validScope).then(() => undefined, (result) => {
+        const message = result instanceof Error ? result.message : String(result);
+        return message;
+      });
+
+      const error = await timeoutResult;
+      expect(error).toBe(requestTimeoutCode);
+      expect(abortReceived).toBe(true);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('times out injected fetchJson using the same abort protocol', { timeout: maxTimeoutMs + 1_000 }, async () => {
+    const fetchJson = vi.fn((_path, _token, signal) => {
+      return new Promise<never>((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(new Error('injected timeout test payload'));
+        });
+      });
+    });
+
+    const provider = createOverseerApprovalStatusProvider({
+      readToken: () => token,
+      fetchJson,
+    });
+
+    try {
+      const timeoutResult = provider.getStatus(approvalRef, validScope).then(() => undefined, (result) => result as Error);
+      const error = await timeoutResult;
+      expect(error.message).toBe(requestTimeoutCode);
+      expect(fetchJson).toHaveBeenCalledWith(
+        '/roadex/approval-status?approval_ref=admin.roadex.test',
+        token,
+        expect.any(AbortSignal),
+      );
+    } finally {
+      // no cleanup required
+    }
+  });
+
+  it('bounds injected fetchJson by timeout and forwards abort signal', { timeout: maxTimeoutMs + 1_000 }, async () => {
+    let aborted = false;
+    const fetchJson = vi.fn((_path, _token, signal) => {
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          aborted = true;
+          reject(new Error('ignored secret: injector-secret-please-hide'));
+        });
+      });
+    });
+
+    const provider = createOverseerApprovalStatusProvider({
+      readToken: () => token,
+      fetchJson,
+    });
+
+    const error = await provider.getStatus(approvalRef, validScope).then(() => undefined, (result) => result as Error);
+
+    expect(error.message).toBe(requestTimeoutCode);
+    expect(aborted).toBe(true);
+    expect(fetchJson).toHaveBeenCalledWith(
+      '/roadex/approval-status?approval_ref=admin.roadex.test',
+      token,
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('rejects when API base is not exactly the fixed loopback and before token read', async () => {
+    const readToken = vi.fn(() => {
+      throw new Error('this must not run');
+    });
+
+    expect(() =>
+      createOverseerApprovalStatusProvider({
+        apiBase: 'https://example.invalid' as unknown as 'http://127.0.0.1:8766',
+        readToken,
+      }),
+    ).toThrow(apiBaseDeniedCode);
+
+    expect(readToken).not.toHaveBeenCalled();
+
+    expect(() =>
+      createOverseerApprovalStatusProvider({
+        apiBase: 'http://127.0.0.1:8767' as unknown as 'http://127.0.0.1:8766',
+        readToken: () => token,
+      }),
+    ).toThrow(apiBaseDeniedCode);
+  });
+
+  it('uses the fixed base path and request shape', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify(buildProjection()), { status: 200 }),
+    );
+
+    const provider = createOverseerApprovalStatusProvider({
+      readToken: () => token,
+    });
+
+    expect(Object.keys(provider)).toEqual(['getStatus']);
+
+    try {
+      await provider.getStatus(approvalRef, validScope);
+
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit & { headers?: Record<string, string> }];
+      expect(url).toBe('http://127.0.0.1:8766/roadex/approval-status?approval_ref=admin.roadex.test');
+      expect(init.method).toBe('GET');
+      expect(init.cache).toBe('no-store');
+      expect(init.headers).toMatchObject({ Authorization: `Bearer ${token}` });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('redacts arbitrary upstream error text across token/fetch/parser boundaries', async () => {
+    const fakeSecrets = ['top-secret-token', 'path=/roadex/approval-status?approval_ref=admin.roadex.test', 'Authorization: Bearer nope'];
+
+    const provider = createOverseerApprovalStatusProvider({
+      readToken: () => token,
+      fetchJson: async () => {
+        throw new Error(`upstream failed with ${fakeSecrets.join(' ')}`);
+      },
+    });
+
+    const message = await expectFailureCode(provider.getStatus(approvalRef, validScope), requestFailedCode);
+    for (const secret of fakeSecrets) {
+      expect(message).not.toContain(secret);
+    }
   });
 
   it('contains no approval mutation endpoints in source', () => {
