@@ -347,6 +347,10 @@ export class ApprovalCoordinator {
         },
       );
       if (!persisted) {
+        const inserted = this.#waits.indexOf(record);
+        if (inserted >= 0) {
+          this.#waits.splice(inserted, 1);
+        }
         return { ok: false, code: 'provider-unavailable' } as const;
       }
 
@@ -471,6 +475,7 @@ export class ApprovalCoordinator {
 
   async #refreshWait(wait: ApprovalWaitRecord, session: RoadexSession): Promise<void> {
     let status: NormalizedApprovalStatus | undefined;
+    let shouldDispatch = false;
     try {
       status = await this.#provider.getStatus(wait.approvalRef, {
         projectId: wait.projectId,
@@ -574,7 +579,7 @@ export class ApprovalCoordinator {
         if (!persisted) {
           return;
         }
-        await this.#dispatchApprovedWait(wait, session);
+        shouldDispatch = true;
         return;
       }
 
@@ -626,12 +631,17 @@ export class ApprovalCoordinator {
         },
       );
     });
+
+    if (shouldDispatch) {
+      await this.#dispatchApprovedWait(wait, session);
+    }
   }
 
   async #dispatchApprovedWait(wait: ApprovalWaitRecord, session: RoadexSession): Promise<void> {
     const sessionGeneration = this.#sessionGeneration.get(session.id) ?? 0;
     const shouldDispatch = await this.#withSessionLock(session.id, async () => {
-      if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['approved-resume-queued', 'resume-dispatching'], true)) {
+      if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['approved-resume-queued', 'resume-dispatching'])) {
+        await this.#handleDispatchBindingLossBeforeQueue(wait, session, sessionGeneration);
         return false;
       }
 
@@ -817,7 +827,10 @@ export class ApprovalCoordinator {
         this.projectSessionForWait(session);
       },
       () => {
-        if (parsed.reason !== 'session-closed') {
+        if (parsed.reason === 'session-closed') {
+          this.#publish(wait.sessionId, this.#terminalCopy('session-closed'));
+          this.#audit('approval_wait.status', 'denied', this.#auditSummary(wait), wait.sessionId);
+        } else {
           this.#publish(wait.sessionId, this.#terminalCopy(wait.state));
           this.#audit('approval_wait.security_failure', 'denied', this.#auditSummary(wait), wait.sessionId);
         }
@@ -921,6 +934,10 @@ export class ApprovalCoordinator {
     const waitBefore = this.snapshotWait(wait);
     const parsed = this.#safeParseDispatchResult(result);
     const closed = this.#isClosedDuringDispatch(session, sessionGeneration);
+
+    if (closed && parsed === null) {
+      return;
+    }
 
     if (closed && parsed !== null && parsed.status === 'capacity') {
       return;

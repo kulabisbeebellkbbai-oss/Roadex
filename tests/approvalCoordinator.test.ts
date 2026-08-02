@@ -710,6 +710,7 @@ describe('ApprovalCoordinator', () => {
     const wait = fixtureWait({
       state: 'approved-resume-queued',
       sessionId: 'session-session-closed',
+      continuationId: deriveContinuationId('session-session-closed', 'admin.roadex.test', `sha256:${'a'.repeat(64)}`),
       nextCheckAt: clock.now(),
       checkAttempt: 0,
     });
@@ -1114,14 +1115,16 @@ describe('ApprovalCoordinator', () => {
     ];
 
     for (const entry of malformedTable) {
+      const sessionId = `session-${entry.expectedState}`;
       const wait = fixtureWait({
         state: 'approved-resume-queued',
         id: `wait-${entry.expectedState}`,
-        sessionId: `session-${entry.expectedState}`,
+        sessionId,
+        continuationId: deriveContinuationId(sessionId, 'admin.roadex.test', `sha256:${'a'.repeat(64)}`),
         checkAttempt: 1,
         nextCheckAt: clock.now(),
       });
-      const session = fixtureSession({ id: `session-${entry.expectedState}` });
+      const session = fixtureSession({ id: sessionId });
       bindSessionToWait(session, wait);
       const coordinator = new ApprovalCoordinator(
         [wait],
@@ -1149,13 +1152,15 @@ describe('ApprovalCoordinator', () => {
     ];
 
     for (const scenario of validScenarios) {
+      const sessionId = `session-${scenario.result.status}`;
       const wait = fixtureWait({
         state: 'approved-resume-queued',
         id: `wait-${scenario.result.status}`,
-        sessionId: `session-${scenario.result.status}`,
+        sessionId,
+        continuationId: deriveContinuationId(sessionId, 'admin.roadex.test', `sha256:${'a'.repeat(64)}`),
         nextCheckAt: clock.now(),
       });
-      const session = fixtureSession({ id: `session-${scenario.result.status}` });
+      const session = fixtureSession({ id: sessionId });
       bindSessionToWait(session, wait);
       const coordinator = new ApprovalCoordinator(
         [wait],
