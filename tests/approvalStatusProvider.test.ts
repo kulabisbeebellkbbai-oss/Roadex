@@ -328,9 +328,11 @@ describe('createOverseerApprovalStatusProvider', () => {
     });
     await expectFailureCode(symbolProvider.getStatus(approvalRef, validScope), invalidPayloadCode);
 
+    let accessorAccessCount = 0;
     const accessorProjected = buildProjectionUnknown();
     Object.defineProperty(accessorProjected, 'decision', {
       get() {
+        accessorAccessCount += 1;
         return 'approved';
       },
       enumerable: true,
@@ -340,6 +342,7 @@ describe('createOverseerApprovalStatusProvider', () => {
       fetchJson: async () => accessorProjected,
     });
     await expectFailureCode(accessorProvider.getStatus(approvalRef, validScope), invalidPayloadCode);
+    expect(accessorAccessCount).toBe(0);
   });
 
   it('reads token for each request', async () => {
@@ -363,6 +366,82 @@ describe('createOverseerApprovalStatusProvider', () => {
     await provider.getStatus(approvalRef, validScope);
 
     expect(fetchTokenLog).toEqual(tokens);
+  });
+
+  it('uses a validated snapshot and does not read properties from hostile proxy projections', async () => {
+    const source = buildProjection();
+    const requiredProjectionFields = [
+      'approvalRef',
+      'sourceKind',
+      'projectId',
+      'workspaceId',
+      'resourceRef',
+      'authorityClass',
+      'subject',
+      'scopeDigest',
+      'decision',
+      'decisionVersion',
+      'updatedAt',
+    ] as const;
+    const requiredProjectionFieldSet = new Set(requiredProjectionFields as readonly string[]);
+    const propertyGetLog: Array<string | symbol> = [];
+    const descriptorLog = new Map<string, PropertyDescriptor>();
+    const descriptorCallCount = new Map<string, number>();
+
+    const proxyProjection = new Proxy(source, {
+      get(_target, property) {
+        propertyGetLog.push(property);
+        if (property === 'then') {
+          return undefined;
+        }
+        if (typeof property === 'string' && requiredProjectionFieldSet.has(property)) {
+          throw new Error('proxy-get-called');
+        }
+        return undefined;
+      },
+      ownKeys(_target) {
+        return Reflect.ownKeys(_target);
+      },
+      getOwnPropertyDescriptor(_target, property) {
+        if (typeof property === 'string' && requiredProjectionFieldSet.has(property)) {
+          descriptorCallCount.set(property, (descriptorCallCount.get(property) ?? 0) + 1);
+          const descriptor = Reflect.getOwnPropertyDescriptor(_target as Record<string, unknown>, property);
+          if (descriptor !== undefined) {
+            descriptorLog.set(property, descriptor);
+          }
+          return descriptor;
+        }
+        return Reflect.getOwnPropertyDescriptor(_target as Record<string, unknown>, property);
+      },
+    });
+
+    const provider = createOverseerApprovalStatusProvider({
+      readToken: () => token,
+      fetchJson: async () => proxyProjection,
+    });
+
+    const status = await provider.getStatus(approvalRef, validScope);
+    expect(status).toMatchObject({
+      approvalRef,
+      authorityClass: 'privileged-operation',
+      projectId: validScope.projectId,
+    });
+
+    expect(propertyGetLog.includes('then')).toBe(true);
+
+    const schemaGets = propertyGetLog.filter((property) =>
+      typeof property === 'string' && requiredProjectionFieldSet.has(property));
+    expect(schemaGets).toHaveLength(0);
+
+    for (const field of requiredProjectionFields) {
+      const descriptor = descriptorLog.get(field);
+      expect(descriptor).toEqual(Object.getOwnPropertyDescriptor(source, field));
+      expect(descriptor?.enumerable).toBe(true);
+      expect(Object.prototype.hasOwnProperty.call(descriptor, 'value')).toBe(true);
+      expect(Object.prototype.hasOwnProperty.call(descriptor, 'get')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(descriptor, 'set')).toBe(false);
+      expect(descriptorCallCount.get(field)).toBe(1);
+    }
   });
 
   it('rejects malformed tokens before any request', async () => {
@@ -446,6 +525,46 @@ describe('createOverseerApprovalStatusProvider', () => {
     }
   });
 
+  it('requires exact content-length for both shorter and longer payloads', async () => {
+    const responsePayload = buildProjection({
+      updatedAt: '2026-01-01T10:00:00+00:00',
+    });
+    const body = JSON.stringify(responsePayload);
+    const bodyLength = new TextEncoder().encode(body).length;
+
+    const tooShortSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(body, {
+      status: 200,
+      headers: {
+        'content-length': String(Math.max(0, bodyLength - 1)),
+      },
+    }));
+    try {
+      const provider = createOverseerApprovalStatusProvider({
+        readToken: () => token,
+      });
+
+      await expectFailureCode(provider.getStatus(approvalRef, validScope), invalidContentLengthCode);
+    } finally {
+      tooShortSpy.mockRestore();
+    }
+
+    const tooLongSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(body, {
+      status: 200,
+      headers: {
+        'content-length': String(bodyLength + 1),
+      },
+    }));
+    try {
+      const provider = createOverseerApprovalStatusProvider({
+        readToken: () => token,
+      });
+
+      await expectFailureCode(provider.getStatus(approvalRef, validScope), invalidContentLengthCode);
+    } finally {
+      tooLongSpy.mockRestore();
+    }
+  });
+
   it('rejects oversized response headers and oversized multibyte payloads before parsing', async () => {
     const oversizedHeaderResponse = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('x', {
       status: 200,
@@ -479,6 +598,32 @@ describe('createOverseerApprovalStatusProvider', () => {
       await expectFailureCode(provider.getStatus(approvalRef, validScope), responseOversizedCode);
     } finally {
       multibyteResponse.mockRestore();
+    }
+  });
+
+  it('forces approval_status:response_oversized when oversized body cancel rejects', async () => {
+    const oversizeBody = new TextEncoder().encode('x'.repeat(33_000));
+    let cancelCalled = 0;
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(oversizeBody);
+      },
+      cancel() {
+        cancelCalled += 1;
+        return Promise.reject(new Error('reader-cancel-rejection'));
+      },
+    });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(stream, { status: 200 }));
+
+    try {
+      const provider = createOverseerApprovalStatusProvider({
+        readToken: () => token,
+      });
+
+      await expectFailureCode(provider.getStatus(approvalRef, validScope), responseOversizedCode);
+      expect(cancelCalled).toBe(1);
+    } finally {
+      fetchSpy.mockRestore();
     }
   });
 
@@ -646,6 +791,29 @@ describe('createOverseerApprovalStatusProvider', () => {
     const message = await expectFailureCode(provider.getStatus(approvalRef, validScope), requestFailedCode);
     for (const secret of fakeSecrets) {
       expect(message).not.toContain(secret);
+    }
+  });
+
+  it('normalizes injected stable public error codes to request_failed', async () => {
+    const injectedCodes = [
+      requestTimeoutCode,
+      responseOversizedCode,
+      invalidContentLengthCode,
+      scopeMismatchCode,
+      'approval_status:token_read_failed',
+      'approval_status:invalid_payload',
+    ];
+
+    for (const injectedCode of injectedCodes) {
+      const provider = createOverseerApprovalStatusProvider({
+        readToken: () => token,
+        fetchJson: async () => {
+          throw new Error(injectedCode);
+        },
+      });
+
+      const message = await expectFailureCode(provider.getStatus(approvalRef, validScope), requestFailedCode);
+      expect(message).not.toBe(injectedCode);
     }
   });
 

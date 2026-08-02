@@ -68,19 +68,6 @@ const SHA256_HEX_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const ISO8601_WITH_TZ_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|([+-])(\d{2}):(\d{2}))$/;
 const CONTENT_LENGTH_PATTERN = /^(?:0|[1-9]\d*)$/;
-const PROVIDER_ERROR_CODES = new Set<ProviderErrorCode>([
-  'approval_status:api_base_not_permitted',
-  'approval_status:token_read_failed',
-  'approval_status:token_invalid',
-  'approval_status:request_timeout',
-  'approval_status:request_failed',
-  'approval_status:invalid_content_length',
-  'approval_status:response_oversized',
-  'approval_status:empty_response',
-  'approval_status:invalid_payload',
-  'approval_status:scope_mismatch',
-]);
-
 export function createOverseerApprovalStatusProvider(options: OverseerProviderOptions): ApprovalStatusProvider {
   const apiBase = options.apiBase ?? OVERSEER_API_BASE;
   if (apiBase !== OVERSEER_API_BASE) {
@@ -161,7 +148,7 @@ export function createOverseerApprovalStatusProvider(options: OverseerProviderOp
 }
 
 function normalizeReadError(error: unknown): Error {
-  if (error instanceof Error && PROVIDER_ERROR_CODES.has(error.message as ProviderErrorCode)) {
+  if (isApprovalStatusProviderError(error)) {
     return error;
   }
   return providerError('approval_status:request_failed');
@@ -205,7 +192,7 @@ async function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>): P
 
     operationSettled = true;
     if (result.kind === 'failure') {
-      if (result.error instanceof Error && PROVIDER_ERROR_CODES.has(result.error.message as ProviderErrorCode)) {
+      if (isApprovalStatusProviderError(result.error)) {
         throw result.error;
       }
       throw requestFailedError;
@@ -220,7 +207,7 @@ async function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>): P
     if (timeoutSettled) {
       throw timeoutError;
     }
-    if (error instanceof Error && PROVIDER_ERROR_CODES.has(error.message as ProviderErrorCode)) {
+    if (isApprovalStatusProviderError(error)) {
       throw error;
     }
     throw requestFailedError;
@@ -271,7 +258,11 @@ async function defaultFetchJson(apiBase: string, path: string, token: string, si
 
     totalBytes += value.byteLength;
     if (totalBytes > MAX_RESPONSE_BYTES) {
-      await reader.cancel();
+      try {
+        await reader.cancel();
+      } catch {
+        // best-effort cancellation; size policy takes precedence.
+      }
       throw providerError('approval_status:response_oversized');
     }
 
@@ -345,6 +336,8 @@ function parseRoadexApprovalStatusProjection(value: unknown): RoadexApprovalStat
   if (keys.length !== APPROVAL_PROJECTION_REQUIRED_KEY_SET.size) {
     throw new Error('Approval status has unexpected shape.');
   }
+
+  const values = Object.create(null) as Record<string, unknown>;
   for (const key of keys) {
     if (typeof key !== 'string') {
       throw new Error('Approval status has non-string keys.');
@@ -355,20 +348,17 @@ function parseRoadexApprovalStatusProjection(value: unknown): RoadexApprovalStat
       || descriptor.enumerable === false
       || descriptor.get !== undefined
       || descriptor.set !== undefined
+      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
     ) {
       throw new Error('Approval status has non-enumerable field.');
     }
     if (!APPROVAL_PROJECTION_REQUIRED_KEY_SET.has(key)) {
       throw new Error('Approval status has unexpected field.');
     }
-  }
-  for (const requiredKey of APPROVAL_PROJECTION_REQUIRED_KEYS) {
-    if (!Object.prototype.hasOwnProperty.call(value, requiredKey)) {
-      throw new Error('Approval status is missing required fields.');
-    }
+    values[key] = descriptor.value;
   }
 
-  const candidate = value as Record<string, unknown>;
+  const candidate = values;
   const sourceKind = parseSourceKind(candidate.sourceKind);
   const authorityClass = parseApprovalAuthorityClass(candidate.authorityClass);
   const decision = parseApprovalDecision(candidate.decision);
@@ -440,8 +430,35 @@ function parseOpaqueString(value: unknown, maxLength: number): string {
   return value;
 }
 
-function providerError(code: ProviderErrorCode): Error {
-  return new Error(code);
+class ProviderFailure extends Error {
+  readonly code: ProviderErrorCode;
+
+  constructor(code: ProviderErrorCode) {
+    super(code);
+    this.code = code;
+  }
+}
+
+const providerFailures = new WeakSet<object>();
+
+type ApprovalStatusProviderError = ProviderFailure;
+
+function isApprovalStatusProviderError(error: unknown): error is ApprovalStatusProviderError {
+  if (error === null || typeof error !== 'object') {
+    return false;
+  }
+
+  try {
+    return providerFailures.has(error);
+  } catch {
+    return false;
+  }
+}
+
+function providerError(code: ProviderErrorCode): ApprovalStatusProviderError {
+  const error = new ProviderFailure(code);
+  providerFailures.add(error);
+  return error;
 }
 
 function parseValidation<T>(value: unknown, maxLength: number, field: string): T {
