@@ -751,7 +751,7 @@ describe('ApprovalCoordinator', () => {
         waits,
         sessions,
         statusSequenceProvider([
-          fixtureStatus({ decision, decisionVersion: statusVersion, subject: `Terminal action ${decision}` }),
+          fixtureStatus({ decision, decisionVersion: statusVersion }),
         ]),
         {
           ...callbacksBuilder().callbacks,
@@ -884,7 +884,6 @@ describe('ApprovalCoordinator', () => {
         fixtureStatus({
           decision: 'pending',
           decisionVersion: driftVersion,
-          subject: 'Drifting pending subject',
         }),
       ]),
       {
@@ -899,7 +898,7 @@ describe('ApprovalCoordinator', () => {
     expect(pendingWait.decisionVersion).toBe(baseVersion);
     expect(pendingWait.continuationId).toBe(deriveContinuationId('session-version-pending', 'admin.roadex.test', baseVersion));
     expect(pendingPersisted).toHaveLength(1);
-    expect(pendingPersisted[0].wait.subject).toBe('Drifting pending subject');
+    expect(pendingPersisted[0].wait.subject).toBe('Restart test service');
     expect(pendingPersisted[0].wait.state).toBe('pending');
 
     const approvedSession = fixtureSession({ id: 'session-version-approved' });
@@ -918,7 +917,7 @@ describe('ApprovalCoordinator', () => {
     await new ApprovalCoordinator(
       [approvedWait],
       [approvedSession],
-      statusSequenceProvider([fixtureStatus({ decision: 'approved', decisionVersion: driftVersion, subject: 'Approved updated subject' })]),
+      statusSequenceProvider([fixtureStatus({ decision: 'approved', decisionVersion: driftVersion })]),
       {
         ...callbacksBuilder().callbacks,
         persist: async () => {
@@ -933,6 +932,35 @@ describe('ApprovalCoordinator', () => {
     expect(approvedWait.continuationId).toBe(deriveContinuationId('session-version-approved', 'admin.roadex.test', driftVersion));
     expect(queueContinuation).toHaveBeenCalledTimes(1);
     expect(approvedPersisted[approvedPersisted.length - 1].wait.decisionVersion).toBe(driftVersion);
+  });
+
+  it('requires subject to remain immutable for trusted refresh status', async () => {
+    const scenarios: Array<{ label: string; decision: 'pending' | 'approved' }> = [
+      { label: 'pending', decision: 'pending' },
+      { label: 'approved', decision: 'approved' },
+    ];
+
+    for (const scenario of scenarios) {
+      const clock = clockWithState();
+      const wait = fixtureWait({ state: 'pending', sessionId: `session-subject-${scenario.label}`, nextCheckAt: clock.now() });
+      const session = fixtureSession({ id: `session-subject-${scenario.label}` });
+      const queueContinuation = vi.fn(async () => ({ status: 'started', runnerRunId: 'runner-1' } as const));
+
+      await new ApprovalCoordinator(
+        [wait],
+        [session],
+        statusSequenceProvider([fixtureStatus({ decision: scenario.decision, subject: 'Drifting subject' })]),
+        {
+          ...callbacksBuilder().callbacks,
+          queueContinuation,
+        },
+        { clock },
+      ).tick();
+
+      expect(wait.state, scenario.label).toBe('security-failure');
+      expect(wait.subject, scenario.label).toBe('Restart test service');
+      expect(queueContinuation, scenario.label).not.toHaveBeenCalled();
+    }
   });
 
   it('uses bounded exponential backoff and caps jitter within nominal delay', () => {
@@ -1749,6 +1777,106 @@ describe('ApprovalCoordinator', () => {
       }
       expect(persistCalls, drift.label).toBe(drift.expectPersistCalls ?? 2);
     }
+  });
+
+  it('reconciles a started callback when immutable dispatch evidence drifts during callback I/O', async () => {
+    const clock = clockWithState();
+    const wait = fixtureWait({
+      state: 'approved-resume-queued',
+      sessionId: 'session-dispatch-drift',
+      nextCheckAt: clock.now(),
+      continuationId: deriveContinuationId('session-dispatch-drift', 'admin.roadex.test', `sha256:${'a'.repeat(64)}`),
+      projectId: 'project-1',
+      resourceRef: 'resource.one',
+    });
+    const session = fixtureSession({ id: 'session-dispatch-drift' });
+    bindSessionToWait(session, wait);
+    const queueStarted = deferred<void>();
+    const gate = deferred<ApprovalContinuationDispatchResult>();
+    const queueContinuation = vi.fn(async () => {
+      queueStarted.resolve();
+      return gate.promise;
+    });
+
+    const coordinator = new ApprovalCoordinator(
+      [wait],
+      [session],
+      statusSequenceProvider([fixtureStatus({ decision: 'approved' })]),
+      {
+        ...callbacksBuilder().callbacks,
+        queueContinuation,
+      },
+      { clock },
+    );
+
+    const tickPromise = coordinator.tick();
+    await Promise.resolve();
+    await queueStarted.promise;
+
+    const driftVersion = `sha256:${'b'.repeat(64)}`;
+    wait.projectId = 'project-drift';
+    wait.resourceRef = 'resource.drift';
+    wait.subject = 'Drifting dispatch subject';
+    wait.decisionVersion = driftVersion;
+    wait.continuationId = deriveContinuationId('session-dispatch-drift', 'admin.roadex.test', driftVersion);
+    if (session.waitingApproval) {
+      session.waitingApproval.subject = 'Drifting dispatch subject';
+      session.waitingApproval.state = wait.state;
+      session.waitingApproval.updatedAt = wait.updatedAt;
+    }
+
+    gate.resolve({ status: 'started', runnerRunId: 'runner-1' });
+    await tickPromise;
+
+    expect(queueContinuation).toHaveBeenCalledTimes(1);
+    expect(wait.state).toBe('resume-reconciliation-required');
+    expect(wait.runnerRunId).toBe('runner-1');
+    expect(wait.decisionVersion).toBe(driftVersion);
+    expect(wait.projectId).toBe('project-drift');
+    expect(wait.resourceRef).toBe('resource.drift');
+  });
+
+  it('reconciles a started callback when public waiting summary drifts during callback I/O', async () => {
+    const clock = clockWithState();
+    const wait = fixtureWait({ state: 'approved-resume-queued', nextCheckAt: clock.now() });
+    const session = fixtureSession();
+    bindSessionToWait(session, wait);
+    const queueStarted = deferred<void>();
+    const gate = deferred<ApprovalContinuationDispatchResult>();
+    const queueContinuation = vi.fn(async () => {
+      queueStarted.resolve();
+      return gate.promise;
+    });
+
+    const coordinator = new ApprovalCoordinator(
+      [wait],
+      [session],
+      statusSequenceProvider([fixtureStatus({ decision: 'approved' })]),
+      {
+        ...callbacksBuilder().callbacks,
+        queueContinuation,
+      },
+      { clock },
+    );
+
+    const tickPromise = coordinator.tick();
+    await Promise.resolve();
+    await queueStarted.promise;
+
+    if (session.waitingApproval) {
+      session.waitingApproval = {
+        ...session.waitingApproval,
+        subject: 'tampered summary subject',
+      };
+    }
+
+    gate.resolve({ status: 'started', runnerRunId: 'runner-1' });
+    await tickPromise;
+
+    expect(queueContinuation).toHaveBeenCalledTimes(1);
+    expect(wait.state).toBe('resume-reconciliation-required');
+    expect(wait.runnerRunId).toBe('runner-1');
+    expect(wait.subject).toBe('Restart test service');
   });
 
   it('requires exact public waiting summary before dispatch, including per-field tamper and extra key', async () => {

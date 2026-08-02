@@ -725,6 +725,8 @@ export class ApprovalCoordinator {
       return;
     }
 
+    const waitSnapshot = this.#snapshotWaitForDispatchBinding(wait);
+
     if (
       !this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['resume-dispatching'], true)
       || !this.#isDispatchEvidenceCanonical(wait, session)
@@ -748,7 +750,11 @@ export class ApprovalCoordinator {
     }
 
     await this.#withSessionLock(session.id, async () => {
-      if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['resume-dispatching'], true)) {
+      if (
+        !this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['resume-dispatching'], true)
+        || !this.#isDispatchEvidenceCanonical(wait, session)
+        || !this.#isWaitSnapshotForDispatchMatching(wait, waitSnapshot)
+      ) {
         await this.#applyDispatchResultWithBindingLoss(
           wait,
           session,
@@ -1207,6 +1213,7 @@ export class ApprovalCoordinator {
       return status.approvalRef === wait.approvalRef
         && status.projectId === wait.projectId
         && status.workspaceId === wait.workspaceId
+        && status.subject === wait.subject
         && status.resourceRef === wait.resourceRef
         && status.authorityClass === wait.authorityClass
         && SHA256_PATTERN.test(status.decisionVersion)
@@ -1291,6 +1298,54 @@ export class ApprovalCoordinator {
     }
 
     return delayMs <= WAIT_BASE_DELAYS_MS[WAIT_BASE_DELAYS_MS.length - 1];
+  }
+
+  #snapshotWaitForDispatchBinding(wait: ApprovalWaitRecord): Record<string, unknown> | null {
+    const properties = this.#readOwnEnumerableDataProperties(wait);
+    if (properties === null) {
+      return null;
+    }
+
+    const snapshot: Record<string, unknown> = {};
+    for (const [key, value] of properties) {
+      snapshot[key] = value;
+    }
+    return snapshot;
+  }
+
+  #isWaitSnapshotForDispatchMatching(wait: ApprovalWaitRecord, snapshot: Record<string, unknown> | null): boolean {
+    if (snapshot === null || Object.keys(snapshot).length === 0) {
+      return false;
+    }
+
+    const keys = Object.keys(snapshot);
+    if (!this.#isExactObject(wait, keys)) {
+      return false;
+    }
+
+    for (const key of keys) {
+      const beforeValue = snapshot[key];
+      const afterValue = (wait as Record<string, unknown>)[key];
+      if (!this.#isPrimitiveDispatchBindingValue(beforeValue) || !this.#isPrimitiveDispatchBindingValue(afterValue)) {
+        return false;
+      }
+      if (!Object.is(beforeValue, afterValue)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  #isPrimitiveDispatchBindingValue(value: unknown): value is string | number | boolean | null | undefined | bigint {
+    return (
+      value === null
+      || value === undefined
+      || typeof value === 'string'
+      || typeof value === 'number'
+      || typeof value === 'boolean'
+      || typeof value === 'bigint'
+    );
   }
 
   #isClosedDuringDispatch(session: RoadexSession, sessionGeneration: number): boolean {
