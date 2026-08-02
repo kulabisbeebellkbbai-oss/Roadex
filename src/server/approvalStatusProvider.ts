@@ -1,4 +1,9 @@
-import { type ApprovalAuthorityClass, type ApprovalDecision, type NormalizedApprovalStatus, type RoadexApprovalStatusProjection } from '../shared/approvalWorkflowContracts';
+import {
+  type ApprovalAuthorityClass,
+  type ApprovalDecision,
+  type NormalizedApprovalStatus,
+  type RoadexApprovalStatusProjection,
+} from '../shared/approvalWorkflowContracts.js';
 
 export type ApprovalScope = {
   projectId: string;
@@ -32,14 +37,6 @@ const APPROVAL_DECISIONS = new Set<ApprovalDecision>([
   'expired',
   'revoked',
 ]);
-
-const ALLOWED_SOURCE_KINDS: ReadonlyArray<RoadexApprovalStatusProjection['sourceKind']> = [
-  'admin-plan',
-  'roadex-human-decision',
-];
-const ALLOWED_AUTHORITIES: ReadonlyArray<ApprovalAuthorityClass> = ['privileged-operation', 'project-workflow'];
-const ALLOWED_SOURCE_SET = new Set<string>(ALLOWED_SOURCE_KINDS);
-const ALLOWED_AUTHORITY_SET = new Set<string>(ALLOWED_AUTHORITIES);
 const APPROVAL_PROJECTION_REQUIRED_KEYS = [
   'approvalRef',
   'sourceKind',
@@ -191,46 +188,82 @@ function parseRoadexApprovalStatusProjection(value: unknown): RoadexApprovalStat
   }
 
   const candidate = value as Record<string, unknown>;
+  const sourceKind = parseSourceKind(candidate.sourceKind);
+  const authorityClass = parseOpaqueString(parseApprovalAuthorityClass(candidate.authorityClass), MAX_TEXT_FIELD_LENGTH);
+  const decision = parseApprovalDecision(candidate.decision);
+  const approvalRef = parseOpaqueString(candidate.approvalRef, MAX_APPROVAL_REF_LENGTH);
+  const projectId = parseOpaqueString(candidate.projectId, MAX_SCOPE_FIELD_LENGTH);
+  const workspaceId = parseOpaqueString(candidate.workspaceId, MAX_SCOPE_FIELD_LENGTH);
+  const resourceRef = parseOpaqueString(candidate.resourceRef, MAX_SCOPE_FIELD_LENGTH);
+  const subject = parseOpaqueString(candidate.subject, MAX_TEXT_FIELD_LENGTH);
+  const scopeDigest = parseOpaqueString(candidate.scopeDigest, MAX_TEXT_FIELD_LENGTH);
+  const decisionVersion = parseOpaqueString(candidate.decisionVersion, MAX_TEXT_FIELD_LENGTH);
+  const updatedAt = parseOpaqueString(candidate.updatedAt, MAX_TEXT_FIELD_LENGTH);
 
-  if (!ALLOWED_SOURCE_SET.has(candidate.sourceKind)) {
-    throw new Error('Approval status has unsupported source kind.');
-  }
-
-  if (!ALLOWED_AUTHORITY_SET.has(candidate.authorityClass)) {
-    throw new Error('Approval status has unsupported authority class.');
-  }
-
-  if (
-    !isCanonicalOpaque(candidate.approvalRef, MAX_APPROVAL_REF_LENGTH)
-    || !isCanonicalOpaque(candidate.projectId, MAX_SCOPE_FIELD_LENGTH)
-    || !isCanonicalOpaque(candidate.workspaceId, MAX_SCOPE_FIELD_LENGTH)
-    || !isCanonicalOpaque(candidate.resourceRef, MAX_SCOPE_FIELD_LENGTH)
-    || !isCanonicalOpaque(candidate.authorityClass, MAX_TEXT_FIELD_LENGTH)
-    || !isCanonicalOpaque(candidate.subject, MAX_TEXT_FIELD_LENGTH)
-    || !isCanonicalOpaque(candidate.scopeDigest, MAX_TEXT_FIELD_LENGTH)
-    || !isCanonicalOpaque(candidate.decisionVersion, MAX_TEXT_FIELD_LENGTH)
-    || !isCanonicalOpaque(candidate.updatedAt, MAX_TEXT_FIELD_LENGTH)
-    || typeof candidate.authorityClass !== 'string'
-    || !isValidIso(candidate.updatedAt)
-    || typeof candidate.decision !== 'string'
-    || !APPROVAL_DECISIONS.has(candidate.decision)
-  ) {
+  if (!isValidIso(updatedAt)) {
     throw new Error('Approval status has invalid values.');
   }
 
   return {
-    approvalRef: candidate.approvalRef,
-    sourceKind: candidate.sourceKind,
-    projectId: candidate.projectId,
-    workspaceId: candidate.workspaceId,
-    resourceRef: candidate.resourceRef,
-    authorityClass: candidate.authorityClass,
-    subject: candidate.subject,
-    scopeDigest: candidate.scopeDigest,
-    decision: candidate.decision,
-    decisionVersion: candidate.decisionVersion,
-    updatedAt: candidate.updatedAt,
+    approvalRef,
+    sourceKind,
+    projectId,
+    workspaceId,
+    resourceRef,
+    authorityClass,
+    subject,
+    scopeDigest,
+    decision,
+    decisionVersion,
+    updatedAt,
   } as RoadexApprovalStatusProjection;
+}
+
+function parseSourceKind(value: unknown): RoadexApprovalStatusProjection['sourceKind'] {
+  if (!isApprovalSourceKind(value)) {
+    throw new Error('Approval status has unsupported source kind.');
+  }
+
+  return value;
+}
+
+function parseApprovalAuthorityClass(value: unknown): ApprovalAuthorityClass {
+  if (!isApprovalAuthorityClass(value)) {
+    throw new Error('Approval status has unsupported authority class.');
+  }
+
+  return value;
+}
+
+function parseApprovalDecision(value: unknown): ApprovalDecision {
+  if (!isApprovalDecision(value) || !isCanonicalOpaque(value, MAX_TEXT_FIELD_LENGTH)) {
+    throw new Error('Approval status has invalid values.');
+  }
+
+  return value;
+}
+
+function isApprovalSourceKind(value: unknown): value is RoadexApprovalStatusProjection['sourceKind'] {
+  return value === 'admin-plan' || value === 'roadex-human-decision';
+}
+
+function isApprovalAuthorityClass(value: unknown): value is ApprovalAuthorityClass {
+  return value === 'privileged-operation' || value === 'project-workflow';
+}
+
+function isApprovalDecision(value: unknown): value is ApprovalDecision {
+  return (
+    typeof value === 'string'
+    && APPROVAL_DECISIONS.has(value as ApprovalDecision)
+  );
+}
+
+function parseOpaqueString(value: unknown, maxLength: number): string {
+  if (!isCanonicalOpaque(value, maxLength)) {
+    throw new Error('Approval status has invalid values.');
+  }
+
+  return value;
 }
 
 function providerError(message: string, error?: unknown, token?: string): Error {

@@ -47,6 +47,13 @@ function buildProjection(overrides: Partial<Projection> = {}): Projection {
   };
 }
 
+function buildProjectionUnknown(overrides: Record<string, unknown> = {}): unknown {
+  return {
+    ...buildProjection(),
+    ...overrides,
+  };
+}
+
 describe('createOverseerApprovalStatusProvider', () => {
   it('reads only the exact scoped projection', async () => {
     const fetchJson = vi.fn(async () => buildProjection());
@@ -129,15 +136,15 @@ describe('createOverseerApprovalStatusProvider', () => {
   });
 
   it('rejects unsupported source kind and authority', async () => {
-    const unsupportedSource = {
+    const unsupportedSource = buildProjectionUnknown({
       ...buildProjection(),
       sourceKind: 'admin-legacy',
-    } as Projection & { sourceKind: string };
+    });
 
-    const unsupportedAuthority = {
+    const unsupportedAuthority = buildProjectionUnknown({
       ...buildProjection(),
       authorityClass: 'project',
-    } as Projection & { authorityClass: string };
+    });
 
     const unsupportedSourceProvider = createOverseerApprovalStatusProvider({
       readToken: () => token,
@@ -151,6 +158,25 @@ describe('createOverseerApprovalStatusProvider', () => {
 
     await expect(unsupportedSourceProvider.getStatus(approvalRef, validScope)).rejects.toThrow();
     await expect(unsupportedAuthorityProvider.getStatus(approvalRef, validScope)).rejects.toThrow();
+  });
+
+  it('rejects malformed source or authority values in projection', async () => {
+    const malformedSourceProvider = createOverseerApprovalStatusProvider({
+      readToken: () => token,
+      fetchJson: async () => buildProjectionUnknown({
+        sourceKind: 123,
+      }),
+    });
+
+    const malformedAuthorityProvider = createOverseerApprovalStatusProvider({
+      readToken: () => token,
+      fetchJson: async () => buildProjectionUnknown({
+        authorityClass: 456,
+      }),
+    });
+
+    await expect(malformedSourceProvider.getStatus(approvalRef, validScope)).rejects.toThrow();
+    await expect(malformedAuthorityProvider.getStatus(approvalRef, validScope)).rejects.toThrow();
   });
 
   it('rejects malformed JSON, missing fields, and extra fields', async () => {
@@ -238,6 +264,29 @@ describe('createOverseerApprovalStatusProvider', () => {
     expect(init.headers).toMatchObject({ Authorization: `Bearer ${token}` });
 
     fetchSpy.mockRestore();
+  });
+
+  it('reads token for each request', async () => {
+    const tokens = ['token-rot-0', 'token-rot-1'];
+    let tokenIndex = 0;
+
+    const fetchTokenLog: string[] = [];
+    const provider = createOverseerApprovalStatusProvider({
+      readToken: () => {
+        const value = tokens[tokenIndex];
+        tokenIndex += 1;
+        return value;
+      },
+      fetchJson: async (_path, fetchedToken) => {
+        fetchTokenLog.push(fetchedToken);
+        return buildProjection();
+      },
+    });
+
+    await provider.getStatus(approvalRef, validScope);
+    await provider.getStatus(approvalRef, validScope);
+
+    expect(fetchTokenLog).toEqual(tokens);
   });
 
   it('returns redacted errors when token is echoed by provider errors', async () => {
