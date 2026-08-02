@@ -10,7 +10,18 @@ function isSafeSingleLineOpaque(value: string): boolean {
   if (value.trim() !== value) {
     return false;
   }
-  return !/[\r\n]/.test(value);
+
+  for (let i = 0; i < value.length; i += 1) {
+    const codePoint = value.charCodeAt(i);
+    if (codePoint < 0x20 || codePoint === 0x7f) {
+      return false;
+    }
+    if (codePoint >= 0x80 && codePoint <= 0x9f) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 export function buildApprovalContinuation(wait: ApprovalWaitRecord): string {
