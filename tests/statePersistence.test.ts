@@ -194,7 +194,7 @@ describe('state persistence', () => {
     expect(state.approvalWaits.map((value) => value.id)).toEqual(['valid-wait']);
   });
 
-  it('rejects waits with extra own properties while preserving session and audit on in-memory sanitization', () => {
+  it('rejects waits with non-enumerable and symbol own extras while preserving session and audit on in-memory sanitization', () => {
     const now = new Date(0).toISOString();
     const session = sessionFixture('session-1', 'ready', now);
     const validWait = approvalWaitFixture({
@@ -205,28 +205,46 @@ describe('state persistence', () => {
       approvalRef: 'approval-valid',
       continuationId: 'cont-valid',
     });
-    const extras = [
-      { key: 'consolePath', value: '/admin/approvals/approval-extra' },
-      { key: 'continuationText', value: 'unexpected' },
-      { key: 'credential', value: 'sneaky' },
-      { key: 'unexpected', value: 'still-bad' },
+    const pollutions = [
+      {
+        label: 'non-enumerable string extra',
+        mutate: (polluted: Record<string, unknown>) => {
+          Object.defineProperty(polluted, 'credential', {
+            value: 'sneaky',
+            enumerable: false,
+            configurable: true,
+            writable: true,
+          });
+        },
+      },
+      {
+        label: 'symbol own extra',
+        mutate: (polluted: Record<string, unknown>) => {
+          (polluted as Record<symbol, unknown>)[Symbol('extra')] = 'sneaky';
+        },
+      },
     ] as const;
 
-    for (const extra of extras) {
+    for (const pollution of pollutions) {
+      const slug = pollution.label.replace(/ /g, '-');
       const polluted = {
         ...approvalWaitFixture({
-          id: `invalid-${extra.key}`,
+          id: `invalid-${slug}`,
           sessionId: session.id,
           consoleSurface: 'admin',
           authorityClass: 'privileged-operation',
-          approvalRef: `approval-invalid-${extra.key}`,
-          continuationId: `cont-invalid-${extra.key}`,
+          approvalRef: `approval-${slug}`,
+          continuationId: `cont-${slug}`,
         }),
-        [extra.key]: extra.value,
-      } as unknown as ApprovalWaitRecord;
+      } as Record<string, unknown>;
+      pollution.mutate(polluted);
+
       const state = serializeState({
         sessions: [session],
-        approvalWaits: [polluted, validWait],
+        approvalWaits: [
+          polluted as unknown as ApprovalWaitRecord,
+          validWait,
+        ],
         auditEvents: [{
           id: 'audit-valid',
           at: now,

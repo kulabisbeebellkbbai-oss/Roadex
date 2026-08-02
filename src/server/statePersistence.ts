@@ -545,10 +545,12 @@ function sanitizeOperation(record: DeviceBridgeOperationRecord): DeviceBridgeOpe
 function sanitizeApprovalWait(record: unknown): ApprovalWaitRecord | undefined {
   if (record === null || typeof record !== 'object') return undefined;
   const candidate = record as Record<string, unknown>;
-  const recordKeys = Object.keys(candidate);
-  for (const key of recordKeys) {
+  const ownKeys = Reflect.ownKeys(candidate);
+  for (const key of ownKeys) {
+    if (typeof key !== 'string') return undefined;
     if (!APPROVAL_WAIT_ALLOWED_KEYS.has(key)) return undefined;
   }
+  const recordKeys = ownKeys as string[];
   if (
     !APPROVAL_WAIT_REQUIRED_KEY_LIST.every((key) => recordKeys.includes(key))
   ) return undefined;
