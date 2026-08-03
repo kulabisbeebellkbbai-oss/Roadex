@@ -344,8 +344,63 @@ Status: deployed and locally verified; live DonutHole mutation not authorized
 
 ## Human-Approval Continuation Workflow
 
-Status: design and limited source expansion approved; implementation plan
-ready for execution selection
+### 2026-08-02 Task 7 verification checkpoint
+
+Status: Roadex source, bounded local verification, independent security review,
+and approval-workflow responsive browser verification passed; deployment not
+authorized
+
+- Reviewed Roadex implementation HEAD is
+  `08a0e3ba4dbd4c733467deff00f3527c8accf7ce`. Task 5 received independent
+  PASS/APPROVED at `9d13f05`; Task 6 received PASS/APPROVED at `32a020d`.
+  Stockwell initially reviewed Overseer `f345769`; the accepted no-backfill
+  remediation is `d2eae2e2963c51dc59d8c2aab71fd5e4ac2ea95f`.
+- B.A.'s backend assignment is `done` after the Overseer remediation and
+  independent rereview. Face's UI assignment is `done` for source,
+  component/server-rendered tests, CSS/mobile fixtures, and responsive browser
+  verification. The default 30-second mobile run first timed out during browser
+  launch; a harness-only 120,000 ms timeout exposed pointer interception at the
+  semantic Close navigation target. Commit `08a0e3b` constrains the drawer to
+  `min(360px, calc(100vw - 44px))` and starts the backdrop after it, preserving
+  a reachable 44px close target. Independent reruns passed 14
+  `humanApprovalUi` tests, lint, and the exact approval mobile E2E on Android
+  Pixel 7 and iPhone 15 with `--timeout=120000`.
+- Murdock's recorded Roadex gates are green: combined focused 8 files/231
+  tests, exact Task 7 approval suite 8 files/137 tests, bounded full Roadex 48
+  files/503 tests, lint, server TypeScript compilation, production build,
+  zero-vulnerability audit, clean diff check, and the post-fix two-device
+  approval mobile E2E. Murdock is `done` for the Task 7 verification scope.
+- In the source-only Overseer worktree, the exact Roadex projection suite
+  passed 133 tests, the approval-status API subset passed 10 tests, and a
+  selected suite excluding one unrelated UI matrix test passed 180 tests with
+  1 deselected. The isolated unrelated
+  `gateway_prefix_exposes_authenticated_panel_matrix` remains not green because
+  `/Overseer/virtual/evidence` exceeds the temporary `LocalApiHarness` hard
+  five-second timeout. Live Overseer health returned `ok` during a read-only
+  check, and the tests did not use live state. This unrelated gateway UI-matrix
+  timeout is explicitly qualified and is not a blocker for Task 7.
+- Stockwell's initial verdict was `FAIL / CHANGES_REQUESTED` for one Important
+  no-backfill gap. Remediation now rejects preexisting unbound admin and Roadex
+  sources inside `BEGIN IMMEDIATE` before the callback while preserving
+  idempotent replay, atomic rollback, and concurrency. Independent rereview
+  found Critical none, Important none, and Minor none; Stockwell is `done` with
+  **Security PASS / Quality APPROVED**.
+- The fake-provider/fake-runner lifecycle integration passed without live
+  provider, approval, provisioning, or browser dependence. It covers the same
+  managed thread, a one-run grant, persist-before-terminal ordering, the
+  immediate-resolve race, and shutdown.
+- `docs/human-approval-continuation-verification.md` records the qualified
+  evidence and a default-off deployment handoff. The restart command is marked
+  not executed; no checksum or live result is invented.
+- No deployment, restart, live smoke, approval mutation, provisioning, network,
+  gateway, firewall, or IDS action occurred. Source approval does not authorize
+  deployment or real provisioning. A separate Overseer admin plan is required
+  for any deployment/restart and any separate Overseer producer integration.
+
+### Approved design and ownership history
+
+Status: design and limited source expansion approved; implementation plan was
+approved for source and local-test execution
 
 - Approved design:
   `docs/superpowers/specs/2026-08-02-human-approval-continuation-design.md`
