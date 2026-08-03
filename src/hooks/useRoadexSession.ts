@@ -35,6 +35,7 @@ import {
 } from './sessionSelection';
 import { detectDeviceCapability, requestUsbDescriptor } from '../client/deviceCapability';
 import { probeEsp32Identity } from '../client/esp32IdentityProbe';
+import { isActiveApprovalWait } from '../shared/approvalWorkflowContracts';
 import type {
   BrowserDeviceCapability,
   DeviceBridgePolicy,
@@ -72,6 +73,8 @@ export type RoadexSessionState = {
   auditEvents: AuditEvent[];
   error?: string;
   notice?: string;
+  approvalWait?: RoadexSession['waitingApproval'];
+  approvalComposerBlocked: boolean;
   sendPrompt: (prompt: string) => Promise<void>;
   cancelPrompt: () => Promise<void>;
   closeCurrentSession: () => Promise<void>;
@@ -130,43 +133,62 @@ export function useRoadexSession(): RoadexSessionState {
     [session, token],
   );
 
+  const hydrateFromBootstrap = useCallback(async (targetSessionId: string | undefined) => {
+    const result = await loginAndBootstrap();
+    const preferredSession = targetSessionId
+      ? result.bootstrap.sessions.find((candidate) => candidate.id === targetSessionId)
+      : resolveRememberedSession(
+        result.bootstrap.sessions,
+        readSelectedSessionPreference(),
+      );
+    const archived = await listArchivedSessions(result.token);
+    setToken(result.token);
+    setUser(result.bootstrap.user);
+    setWorkspaces(result.bootstrap.workspaces);
+    setSessions(result.bootstrap.sessions);
+    setManagedThreads(result.bootstrap.managedThreads);
+    setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
+    setSerialVerificationProfiles(result.bootstrap.serialVerificationProfiles);
+    setBleVerificationProfiles(result.bootstrap.bleVerificationProfiles);
+    setUsbDeviceProfiles(result.bootstrap.usbDeviceProfiles);
+    setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
+    setSession(preferredSession);
+    setArchivedSessions(archived.sessions);
+    setAuditEvents(result.bootstrap.auditEvents);
+    setTranscript(result.bootstrap.streamPreview.filter(
+      (event) => !preferredSession || event.sessionId === preferredSession.id,
+    ));
+    if (preferredSession) {
+      const events = await readSessionStream(result.token, preferredSession.id);
+      setTranscript(events);
+    }
+    return preferredSession;
+  }, []);
+
+  const refreshFromBootstrap = useCallback(async (targetSessionId: string | undefined) => {
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      await hydrateFromBootstrap(targetSessionId);
+      setConnectionState('connected');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Roadex bootstrap refresh failed.');
+      setConnectionState('error');
+    }
+  }, [hydrateFromBootstrap]);
+
   const attach = useCallback(async () => {
     setConnectionState('loading');
     setError(undefined);
     setNotice(undefined);
     try {
-      const result = await loginAndBootstrap();
-      const activeSession = resolveRememberedSession(
-        result.bootstrap.sessions,
-        readSelectedSessionPreference(),
-      );
-      setToken(result.token);
-      setUser(result.bootstrap.user);
-      setWorkspaces(result.bootstrap.workspaces);
-      setSessions(result.bootstrap.sessions);
-      setManagedThreads(result.bootstrap.managedThreads);
-      setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
-      setSerialVerificationProfiles(result.bootstrap.serialVerificationProfiles);
-      setBleVerificationProfiles(result.bootstrap.bleVerificationProfiles);
-      setUsbDeviceProfiles(result.bootstrap.usbDeviceProfiles);
-      setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
-      setSession(activeSession);
-      const archived = await listArchivedSessions(result.token);
-      setArchivedSessions(archived.sessions);
-      setAuditEvents(result.bootstrap.auditEvents);
-      setTranscript(result.bootstrap.streamPreview.filter(
-        (event) => !activeSession || event.sessionId === activeSession.id,
-      ));
-      if (activeSession) {
-        const events = await readSessionStream(result.token, activeSession.id);
-        setTranscript(events);
-      }
+      await hydrateFromBootstrap(undefined);
       setConnectionState('connected');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Roadex session attach failed.');
       setConnectionState('error');
     }
-  }, []);
+  }, [hydrateFromBootstrap]);
 
   useEffect(() => {
     void attach();
@@ -177,6 +199,12 @@ export function useRoadexSession(): RoadexSessionState {
   }, [session?.id]);
 
   const sessionId = session?.id;
+  const isApprovalTransitionEvent = useCallback((event: StreamEvent) => {
+    if (event.kind !== 'system' || typeof event.message !== 'string') return false;
+    return event.message.startsWith('Roadex is waiting for human approval in ')
+      || event.message.startsWith('Roadex human approval result:');
+  }, []);
+
   useEffect(() => {
     setDescriptorObservation(undefined);
     setPendingProbeApproval(undefined);
@@ -195,6 +223,9 @@ export function useRoadexSession(): RoadexSessionState {
       (event) => {
         if (activeStreamSessionId.current !== sessionId) return;
         setTranscript((existing) => mergeStreamEvents(existing, [event]));
+        if (isApprovalTransitionEvent(event)) {
+          void refreshFromBootstrap(sessionId);
+        }
         if (isRunnerTerminal(event)) {
           const lifecycle = lifecycleForTerminalEvent(event);
           if (!lifecycle) return;
@@ -209,7 +240,7 @@ export function useRoadexSession(): RoadexSessionState {
         setConnectionState('error');
       },
     );
-  }, [sessionId, token]);
+  }, [sessionId, token, isApprovalTransitionEvent, refreshFromBootstrap]);
 
   const sendPrompt = useCallback(
     async (prompt: string) => {
@@ -736,6 +767,8 @@ export function useRoadexSession(): RoadexSessionState {
       auditEvents,
       error,
       notice,
+      approvalWait: session?.waitingApproval,
+      approvalComposerBlocked: Boolean(session?.waitingApproval && isActiveApprovalWait(session.waitingApproval.state)),
       sendPrompt,
       cancelPrompt,
       closeCurrentSession,
