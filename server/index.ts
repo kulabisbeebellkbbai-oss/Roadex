@@ -1,6 +1,15 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { once } from 'node:events';
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+} from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { extname, isAbsolute, join, normalize } from 'node:path';
 import { authenticate, gatewayAuthRequired, mockAuthToken, mockUser } from '../src/server/authService.js';
 import {
   bootstrap,
@@ -10,6 +19,10 @@ import {
   closeSession,
   createDeviceInventoryBinding,
   createInitialState,
+  createApprovalContinuationDispatcher,
+  createApprovalCoordinatorCallbacks,
+  createApprovalShutdown,
+  createApprovalWorkflowRunRuntime,
   createSessionFromApi,
   listDeviceArtifactMetadata,
   listArchivedSessions,
@@ -28,6 +41,8 @@ import {
   streamEventsForSession,
   submitPrompt,
   submitDeviceBridgeProbe,
+  resolveApprovalPollMs,
+  startApprovalPoller,
 } from '../src/server/sessionService.js';
 import {
   isAvailableDeviceBridgeIntakeRoute,
@@ -42,6 +57,12 @@ import { ProjectCreationBroker, type TeamEvidence } from '../src/server/projectC
 import { isAvailableProjectCreationRoute } from '../src/server/projectCreationPolicy.js';
 import { ProjectCreationWorker } from '../src/server/projectCreationWorker.js';
 import { createControlledOperationGrantIssuer } from '../src/server/controlledOperationGrantIssuer.js';
+import { createOverseerApprovalStatusProvider } from '../src/server/approvalStatusProvider.js';
+import { ApprovalCoordinator } from '../src/server/approvalCoordinator.js';
+import { ApprovalWorkflowGrantBroker } from '../src/server/approvalWorkflowGrantBroker.js';
+import { startApprovalWorkflowHost } from '../src/server/approvalWorkflowHost.js';
+import { AppPublicationRequester } from '../src/server/appPublicationRequester.js';
+import { isAvailableAppPublicationRoute } from '../src/server/appPublicationPolicy.js';
 
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8780);
@@ -49,6 +70,7 @@ const liveStreamKeepaliveMs = resolveLiveStreamKeepaliveMs(process.env.ROADEX_SS
 const state = createInitialState();
 let projectCreationBroker: ProjectCreationBroker | undefined;
 let projectCreationWorker: ProjectCreationWorker | undefined;
+let appPublicationRequester: AppPublicationRequester | undefined;
 state.resolveControlledRunnerGrant = (context) =>
   getProjectCreationBroker().resolveControlledRunnerGrant({
     userId: context.userId,
@@ -72,8 +94,9 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(port, host, () => {
-  console.log(`Roadex API listening at http://${host}:${port}`);
+void startRoadexApi().catch(() => {
+  console.error('Roadex API startup failed.');
+  process.exitCode = 1;
 });
 
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -151,6 +174,48 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
   }
 
+  if (url.search === '' && isAvailableAppPublicationRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const requester = getAppPublicationRequester();
+    if (req.method === 'POST' && url.pathname === '/api/app-publication/requests') {
+      if (!isJsonRequest(req)) {
+        sendJson(res, 415, { error: { code: 'unsupported_media_type', message: 'JSON content type is required.' } });
+        return;
+      }
+      const keyHeader = req.headers['idempotency-key'];
+      const key = typeof keyHeader === 'string' ? keyHeader : undefined;
+      const result = requester.create(auth.user, key, await readJson<unknown>(req, 32_768));
+      if (result.outcome === 'created' || result.outcome === 'replayed') {
+        sendJson(res, result.outcome === 'created' ? 201 : 200, {
+          ok: true,
+          request: result.request,
+          replayed: result.outcome === 'replayed',
+        });
+        return;
+      }
+      if (result.outcome === 'conflict') {
+        sendJson(res, 409, {
+          ok: false,
+          error: {
+            code: 'idempotency_conflict',
+            message: 'The idempotency key is already bound to a different publication request.',
+            gate: 'app-publication',
+          },
+        });
+        return;
+      }
+      sendJson(res, 403, appPublicationDenied());
+      return;
+    }
+    const match = url.pathname.match(/^\/api\/app-publication\/requests\/([A-Za-z0-9_-]{1,128})$/);
+    if (req.method === 'GET' && match) {
+      const request = requester.get(auth.user, match[1]);
+      sendJson(res, request ? 200 : 404, request ? { ok: true, request } : appPublicationDenied());
+      return;
+    }
+  }
+
   if (url.pathname === '/api/sessions' && req.method === 'GET') {
     const auth = requireAuth(req, res);
     if (!auth) return;
@@ -177,7 +242,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Session not found.' } });
       return;
     }
-    sendJson(res, 202, result);
+    sendJson(res, result.accepted ? 202 : 409, result);
     return;
   }
 
@@ -198,7 +263,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (closeMatch && req.method === 'POST') {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const result = closeSession(state, auth.user, decodeURIComponent(closeMatch[1]));
+    const result = await closeSession(state, auth.user, decodeURIComponent(closeMatch[1]));
     if (!result) {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Session not found.' } });
       return;
@@ -211,7 +276,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (reopenMatch && req.method === 'POST') {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const result = reopenSession(state, auth.user, decodeURIComponent(reopenMatch[1]));
+    const result = await reopenSession(state, auth.user, decodeURIComponent(reopenMatch[1]));
     if (!result) {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Archived session not found.' } });
       return;
@@ -521,12 +586,34 @@ function getProjectCreationWorker(): ProjectCreationWorker {
   return projectCreationWorker;
 }
 
+function getAppPublicationRequester(): AppPublicationRequester {
+  appPublicationRequester ??= new AppPublicationRequester({
+    workspaceBelongsToProject(userId, projectId, workspaceId) {
+      return projectId === workspaceId && state.sessions.sessions.some((session) => (
+        session.userId === userId && session.workspace.id === workspaceId
+      ));
+    },
+  });
+  return appPublicationRequester;
+}
+
 function projectCreationDenied(): { ok: false; error: { code: string; message: string } } {
   return {
     ok: false,
     error: {
       code: 'project_creation_denied',
       message: 'Project creation request denied.',
+    },
+  };
+}
+
+function appPublicationDenied(): { ok: false; error: { code: string; message: string; gate: string } } {
+  return {
+    ok: false,
+    error: {
+      code: 'app_publication_denied',
+      message: 'App publication request denied.',
+      gate: 'app-publication',
     },
   };
 }
@@ -579,5 +666,133 @@ function contentType(path: string): string {
       return 'image/svg+xml';
     default:
       return 'application/octet-stream';
+  }
+}
+
+async function startRoadexApi(): Promise<void> {
+  const grantBroker = new ApprovalWorkflowGrantBroker();
+  const workflowRuntime = createApprovalWorkflowRunRuntime(grantBroker);
+  state.approvalWorkflowRuntime = workflowRuntime;
+  const provider = createOverseerApprovalStatusProvider({
+    readToken: readApprovalStatusToken,
+  });
+  const coordinatorRef: { current?: ApprovalCoordinator } = {};
+  const queueContinuation = createApprovalContinuationDispatcher(state, {
+    completeRunner: (...args) => {
+      if (!coordinatorRef.current) {
+        throw new Error('approval_coordinator_unavailable');
+      }
+      return coordinatorRef.current.completeRunner(...args);
+    },
+  });
+  const coordinator = new ApprovalCoordinator(
+    state.approvalWaits,
+    state.sessions.sessions,
+    provider,
+    createApprovalCoordinatorCallbacks(state, queueContinuation),
+    {
+      authorizeStreamingRegistration: (session, capability) => {
+        if (!capability.runnerRunId || !state.activeRuns.has(session.id)) {
+          return false;
+        }
+        const active = workflowRuntime.resolveRunContext(capability.runnerRunId);
+        return active?.runnerRunId === capability.runnerRunId
+          && active.sessionId === capability.sessionId
+          && active.userId === capability.userId
+          && active.projectId === capability.projectId
+          && active.workspaceId === capability.workspaceId
+          && active.resourceRef === capability.resourceRef
+          && active.managedThreadId === capability.managedThreadId;
+      },
+    },
+  );
+  coordinatorRef.current = coordinator;
+  state.approvalLifecycleRuntime = {
+    closeSessionWait: (sessionId) => coordinator.closeSessionWait(sessionId),
+    reopenSessionWait: (sessionId) => coordinator.reopenSessionWait(sessionId),
+    failUserRun: (sessionId, outcome) => coordinator.failUserRun(sessionId, outcome),
+  };
+  const workflowHost = startApprovalWorkflowHost({
+    consumeGrant: (token) => grantBroker.consume(token),
+    resolveRunContext: (runId) => workflowRuntime.resolveRunContext(runId),
+    registerApprovalWait: (capability, input) => coordinator.register(capability, input),
+  });
+  await once(workflowHost, 'listening');
+  await coordinator.recover();
+
+  const poller = startApprovalPoller(
+    coordinator,
+    resolveApprovalPollMs(process.env.ROADEX_APPROVAL_POLL_MS),
+  );
+  const shutdown = createApprovalShutdown({
+    stopPolling: () => clearInterval(poller as ReturnType<typeof setInterval>),
+    closeWorkflowHost: () => new Promise<void>((resolveClose, rejectClose) => {
+      workflowHost.close((error?: Error) => {
+        if (error) {
+          rejectClose(new Error('approval_workflow_host_close_failed'));
+          return;
+        }
+        resolveClose();
+      });
+    }),
+    revokeOutstandingGrants: () => workflowRuntime.revokeOutstanding(),
+    closeHttpServer: () => new Promise<void>((resolveClose, rejectClose) => {
+      server.close((error?: Error) => {
+        if (error) {
+          rejectClose(new Error('roadex_http_close_failed'));
+          return;
+        }
+        resolveClose();
+      });
+    }),
+  });
+  const handleSignal = (): void => {
+    void shutdown().catch(() => {
+      process.exitCode = 1;
+    });
+  };
+  process.once('SIGTERM', handleSignal);
+  process.once('SIGINT', handleSignal);
+
+  server.listen(port, host, () => {
+    console.log(`Roadex API listening at http://${host}:${port}`);
+  });
+}
+
+function readApprovalStatusToken(): string {
+  const path = process.env.ROADEX_OVERSEER_APPROVAL_TOKEN_FILE;
+  if (!path || !isAbsolute(path) || path.includes('\0')) {
+    throw new Error('approval_status_token_unavailable');
+  }
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const descriptorStat = fstatSync(descriptor);
+    const pathStat = lstatSync(path);
+    if (
+      !descriptorStat.isFile()
+      || !pathStat.isFile()
+      || pathStat.isSymbolicLink()
+      || descriptorStat.uid !== process.getuid?.()
+      || pathStat.uid !== descriptorStat.uid
+      || pathStat.dev !== descriptorStat.dev
+      || pathStat.ino !== descriptorStat.ino
+      || (descriptorStat.mode & 0o077) !== 0
+      || descriptorStat.size < 1
+      || descriptorStat.size > 256
+    ) {
+      throw new Error('approval_status_token_unavailable');
+    }
+    const token = readFileSync(descriptor, 'utf8').trim();
+    if (token.length === 0) {
+      throw new Error('approval_status_token_unavailable');
+    }
+    return token;
+  } catch {
+    throw new Error('approval_status_token_unavailable');
+  } finally {
+    if (descriptor !== undefined) {
+      closeSync(descriptor);
+    }
   }
 }

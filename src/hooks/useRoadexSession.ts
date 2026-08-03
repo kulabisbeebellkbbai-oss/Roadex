@@ -35,6 +35,7 @@ import {
 } from './sessionSelection';
 import { detectDeviceCapability, requestUsbDescriptor } from '../client/deviceCapability';
 import { probeEsp32Identity } from '../client/esp32IdentityProbe';
+import { isActiveApprovalWait } from '../shared/approvalWorkflowContracts';
 import type {
   BrowserDeviceCapability,
   DeviceBridgePolicy,
@@ -72,6 +73,8 @@ export type RoadexSessionState = {
   auditEvents: AuditEvent[];
   error?: string;
   notice?: string;
+  approvalWait?: RoadexSession['waitingApproval'];
+  approvalComposerBlocked: boolean;
   sendPrompt: (prompt: string) => Promise<void>;
   cancelPrompt: () => Promise<void>;
   closeCurrentSession: () => Promise<void>;
@@ -118,6 +121,7 @@ export function useRoadexSession(): RoadexSessionState {
   const [notice, setNotice] = useState<string>();
   const threadSelectionSequence = useRef(0);
   const activeStreamSessionId = useRef<string | undefined>(undefined);
+  const promptTransitionGeneration = useRef(0);
   const verifiedDeviceMac = useRef<string | undefined>(undefined);
 
   const refreshStream = useCallback(
@@ -130,43 +134,64 @@ export function useRoadexSession(): RoadexSessionState {
     [session, token],
   );
 
+  const hydrateFromBootstrap = useCallback(async (targetSessionId: string | undefined) => {
+    promptTransitionGeneration.current += 1;
+    const result = await loginAndBootstrap();
+    const preferredSession = targetSessionId
+      ? result.bootstrap.sessions.find((candidate) => candidate.id === targetSessionId)
+      : resolveRememberedSession(
+        result.bootstrap.sessions,
+        readSelectedSessionPreference(),
+      );
+    const archived = await listArchivedSessions(result.token);
+    activeStreamSessionId.current = preferredSession?.id;
+    setToken(result.token);
+    setUser(result.bootstrap.user);
+    setWorkspaces(result.bootstrap.workspaces);
+    setSessions(result.bootstrap.sessions);
+    setManagedThreads(result.bootstrap.managedThreads);
+    setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
+    setSerialVerificationProfiles(result.bootstrap.serialVerificationProfiles);
+    setBleVerificationProfiles(result.bootstrap.bleVerificationProfiles);
+    setUsbDeviceProfiles(result.bootstrap.usbDeviceProfiles);
+    setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
+    setSession(preferredSession);
+    setArchivedSessions(archived.sessions);
+    setAuditEvents(result.bootstrap.auditEvents);
+    setTranscript(result.bootstrap.streamPreview.filter(
+      (event) => !preferredSession || event.sessionId === preferredSession.id,
+    ));
+    if (preferredSession) {
+      const events = await readSessionStream(result.token, preferredSession.id);
+      setTranscript(events);
+    }
+    return preferredSession;
+  }, []);
+
+  const refreshFromBootstrap = useCallback(async (targetSessionId: string | undefined) => {
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      await hydrateFromBootstrap(targetSessionId);
+      setConnectionState('connected');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Roadex bootstrap refresh failed.');
+      setConnectionState('error');
+    }
+  }, [hydrateFromBootstrap]);
+
   const attach = useCallback(async () => {
     setConnectionState('loading');
     setError(undefined);
     setNotice(undefined);
     try {
-      const result = await loginAndBootstrap();
-      const activeSession = resolveRememberedSession(
-        result.bootstrap.sessions,
-        readSelectedSessionPreference(),
-      );
-      setToken(result.token);
-      setUser(result.bootstrap.user);
-      setWorkspaces(result.bootstrap.workspaces);
-      setSessions(result.bootstrap.sessions);
-      setManagedThreads(result.bootstrap.managedThreads);
-      setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
-      setSerialVerificationProfiles(result.bootstrap.serialVerificationProfiles);
-      setBleVerificationProfiles(result.bootstrap.bleVerificationProfiles);
-      setUsbDeviceProfiles(result.bootstrap.usbDeviceProfiles);
-      setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
-      setSession(activeSession);
-      const archived = await listArchivedSessions(result.token);
-      setArchivedSessions(archived.sessions);
-      setAuditEvents(result.bootstrap.auditEvents);
-      setTranscript(result.bootstrap.streamPreview.filter(
-        (event) => !activeSession || event.sessionId === activeSession.id,
-      ));
-      if (activeSession) {
-        const events = await readSessionStream(result.token, activeSession.id);
-        setTranscript(events);
-      }
+      await hydrateFromBootstrap(undefined);
       setConnectionState('connected');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Roadex session attach failed.');
       setConnectionState('error');
     }
-  }, []);
+  }, [hydrateFromBootstrap]);
 
   useEffect(() => {
     void attach();
@@ -177,6 +202,12 @@ export function useRoadexSession(): RoadexSessionState {
   }, [session?.id]);
 
   const sessionId = session?.id;
+  const isApprovalTransitionEvent = useCallback((event: StreamEvent) => {
+    if (event.kind !== 'system' || typeof event.message !== 'string') return false;
+    return event.message.startsWith('Roadex is waiting for human approval in ')
+      || event.message.startsWith('Roadex human approval result:');
+  }, []);
+
   useEffect(() => {
     setDescriptorObservation(undefined);
     setPendingProbeApproval(undefined);
@@ -195,7 +226,11 @@ export function useRoadexSession(): RoadexSessionState {
       (event) => {
         if (activeStreamSessionId.current !== sessionId) return;
         setTranscript((existing) => mergeStreamEvents(existing, [event]));
+        if (isApprovalTransitionEvent(event)) {
+          void refreshFromBootstrap(sessionId);
+        }
         if (isRunnerTerminal(event)) {
+          promptTransitionGeneration.current += 1;
           const lifecycle = lifecycleForTerminalEvent(event);
           if (!lifecycle) return;
           setSession((existing) => existing ? { ...existing, lifecycle } : existing);
@@ -205,16 +240,18 @@ export function useRoadexSession(): RoadexSessionState {
       },
       (streamError) => {
         if (activeStreamSessionId.current !== sessionId) return;
+        promptTransitionGeneration.current += 1;
         setError(streamError.message);
         setConnectionState('error');
       },
     );
-  }, [sessionId, token]);
+  }, [sessionId, token, isApprovalTransitionEvent, refreshFromBootstrap]);
 
   const sendPrompt = useCallback(
     async (prompt: string) => {
       if (!session) return;
       const targetSessionId = session.id;
+      const transitionGeneration = ++promptTransitionGeneration.current;
       setConnectionState('streaming');
       setSession((existing) => existing ? { ...existing, lifecycle: 'streaming' } : existing);
       setSessions((existing) => updateSessionLifecycle(existing, session.id, 'streaming'));
@@ -222,8 +259,32 @@ export function useRoadexSession(): RoadexSessionState {
       setNotice(undefined);
       try {
         const response = await submitPrompt(token, session.id, prompt);
+        if (!response.accepted) {
+          if (
+            promptTransitionGeneration.current !== transitionGeneration
+            || activeStreamSessionId.current !== targetSessionId
+          ) return;
+          setSessions((existing) => existing.map((candidate) => candidate.id === targetSessionId
+            && candidate.lifecycle === 'streaming'
+            ? { ...candidate, lifecycle: candidate.waitingApproval ? 'paused' : session.lifecycle }
+            : candidate));
+          if (activeStreamSessionId.current === targetSessionId) {
+            setSession((existing) => existing?.id === targetSessionId
+              && existing.lifecycle === 'streaming'
+              ? { ...existing, lifecycle: existing.waitingApproval ? 'paused' : session.lifecycle }
+              : existing);
+            setError(undefined);
+            setNotice(response.error.message);
+            setConnectionState('connected');
+          }
+          return;
+        }
         setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
       } catch (caught) {
+        if (
+          promptTransitionGeneration.current !== transitionGeneration
+          || activeStreamSessionId.current !== targetSessionId
+        ) return;
         setSessions((existing) => updateSessionLifecycle(existing, targetSessionId, 'ready'));
         if (activeStreamSessionId.current === targetSessionId) {
           setSession((existing) => existing?.id === targetSessionId ? { ...existing, lifecycle: 'ready' } : existing);
@@ -237,6 +298,7 @@ export function useRoadexSession(): RoadexSessionState {
 
   const cancelPrompt = useCallback(async () => {
     if (!session) return;
+    promptTransitionGeneration.current += 1;
     const targetSession = session;
     try {
       const response = await cancelSession(token, targetSession.id);
@@ -263,6 +325,7 @@ export function useRoadexSession(): RoadexSessionState {
     setConnectionState('loading');
     setError(undefined);
     setNotice(undefined);
+    promptTransitionGeneration.current += 1;
     activeStreamSessionId.current = undefined;
     try {
       const response = await closeSession(token, session.id);
@@ -314,6 +377,9 @@ export function useRoadexSession(): RoadexSessionState {
   }, [closeCurrentSession, session?.id, token]);
 
   const recoverThread = useCallback(async (sessionId: string) => {
+    if (session?.id === sessionId) {
+      promptTransitionGeneration.current += 1;
+    }
     setError(undefined);
     setNotice(undefined);
     try {
@@ -334,6 +400,7 @@ export function useRoadexSession(): RoadexSessionState {
     setConnectionState('loading');
     setError(undefined);
     setNotice(undefined);
+    promptTransitionGeneration.current += 1;
     activeStreamSessionId.current = undefined;
     try {
       const response = await reopenSession(token, sessionId);
@@ -364,6 +431,7 @@ export function useRoadexSession(): RoadexSessionState {
       setConnectionState('loading');
       setError(undefined);
       setNotice(undefined);
+      promptTransitionGeneration.current += 1;
       activeStreamSessionId.current = undefined;
       try {
         const result = await createSession(token, { workspaceId });
@@ -391,6 +459,7 @@ export function useRoadexSession(): RoadexSessionState {
       setConnectionState('loading');
       setError(undefined);
       setNotice(undefined);
+      promptTransitionGeneration.current += 1;
       activeStreamSessionId.current = undefined;
       try {
         const result = await createSession(token, { workspaceId, newThread: true });
@@ -418,6 +487,7 @@ export function useRoadexSession(): RoadexSessionState {
       if (active) {
         const sequence = ++threadSelectionSequence.current;
         const previousSessionId = session?.id;
+        promptTransitionGeneration.current += 1;
         activeStreamSessionId.current = undefined;
         setConnectionState('loading');
         setError(undefined);
@@ -447,6 +517,7 @@ export function useRoadexSession(): RoadexSessionState {
 
   const attachManagedThread = useCallback(
     async (threadId: string, workspaceId: string) => {
+      promptTransitionGeneration.current += 1;
       activeStreamSessionId.current = undefined;
       setConnectionState('loading');
       setError(undefined);
@@ -472,6 +543,8 @@ export function useRoadexSession(): RoadexSessionState {
   );
 
   const retry = useCallback(async () => {
+    promptTransitionGeneration.current += 1;
+    activeStreamSessionId.current = undefined;
     if (!workspaces[0]) {
       await attach();
       return;
@@ -479,6 +552,7 @@ export function useRoadexSession(): RoadexSessionState {
 
     try {
       const result = await createSession(token, { workspaceId: workspaces[0].id });
+      activeStreamSessionId.current = result.session.id;
       setSessions(result.bootstrap.sessions);
       setManagedThreads(result.bootstrap.managedThreads);
       setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
@@ -736,6 +810,8 @@ export function useRoadexSession(): RoadexSessionState {
       auditEvents,
       error,
       notice,
+      approvalWait: session?.waitingApproval,
+      approvalComposerBlocked: Boolean(session?.waitingApproval && isActiveApprovalWait(session.waitingApproval.state)),
       sendPrompt,
       cancelPrompt,
       closeCurrentSession,

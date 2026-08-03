@@ -3,6 +3,7 @@ import type { DeviceInventoryBindingRef } from './deviceBridgeContracts.js';
 import type { SerialVerificationProfile } from './serialVerificationContracts.js';
 import type { BleVerificationProfile } from './bleVerificationContracts.js';
 import type { UsbDeviceProfile } from './usbDeviceProfileContracts.js';
+import type { WaitingApprovalSummary } from './approvalWorkflowContracts.js';
 
 export type SessionLifecycle =
   | 'pending'
@@ -58,7 +59,14 @@ export type AuditEvent = {
     | 'device_bridge.operation_probe'
     | 'device_bridge.artifact_delivery'
     | 'device_bridge.operation_write'
-    | 'security.denied';
+    | 'security.denied'
+    | 'approval_wait.register'
+    | 'approval_wait.status'
+    | 'approval_wait.security_failure'
+    | 'approval_wait.resume_queued'
+    | 'approval_wait.resume_dispatched'
+    | 'approval_wait.resume_completed'
+    | 'approval_wait.reconciliation_required';
   resource: string;
   outcome: 'allowed' | 'denied';
   summary: string;
@@ -120,6 +128,7 @@ export type RoadexSession = {
   updatedAt: string;
   codexThreadId?: string;
   managedThreadId?: string;
+  waitingApproval?: WaitingApprovalSummary;
   runActivity?: {
     status: 'working';
     startedAt: string;

@@ -270,3 +270,126 @@ test('restores the selected owned thread after reload', async ({ page }) => {
   await page.getByRole('button', { name: 'Open navigation and controls' }).click();
   await expect(page.getByTestId('thread-selector')).toHaveValue('roadex:session-first');
 });
+
+test('shows human approval-wait state on mobile without overflow and hydrates reconnect changes', async ({ page }) => {
+  let bootstrapWaitState: 'pending' | 'verification-delayed' | 'terminal' = 'pending';
+  const session = {
+    id: 'session-mobile-wait',
+    userId: 'owner',
+    workspace: { id: 'roadex', name: 'Roadex', root: '/srv/roadex' },
+    lifecycle: 'paused',
+    runnerMode: 'codex',
+    transport: 'sse',
+    deviceBridge: 'disabled',
+    gates: [],
+    createdAt: '2026-08-02T00:00:00.000Z',
+    updatedAt: '2026-08-02T00:00:00.000Z',
+  } as const;
+
+  const approvalFor = (state: 'pending' | 'verification-delayed') => ({
+    waitId: `wait-${state}`,
+    approvalRef: 'overview.roadex.approval',
+    subject: 'mobile approval test subject',
+    consoleSurface: 'overview' as const,
+    consolePath: '/Overseer/overview',
+    state,
+    updatedAt: '2026-08-02T00:00:00.000Z',
+  });
+
+  await page.route('**/api/bootstrap', (route) => {
+    const waitingApproval = bootstrapWaitState === 'pending'
+      ? approvalFor('pending')
+      : bootstrapWaitState === 'verification-delayed'
+        ? approvalFor('verification-delayed')
+        : undefined;
+    route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        user: { id: 'owner', displayName: 'Owner', authMode: 'protected-gateway', roles: ['user', 'admin', 'security-reviewer'] },
+        workspaces: [session.workspace],
+        sessions: [{
+          ...session,
+          lifecycle: bootstrapWaitState === 'terminal' ? 'ready' : 'paused',
+          waitingApproval,
+        }],
+        auditEvents: [],
+        streamPreview: [],
+        managedThreads: [],
+        deviceBridgePolicy: {
+          state: 'disabled',
+          approvedFoundation: true,
+          operations: ['esp32.flash'],
+          requestIntakeEnabled: false,
+          descriptorObservationEnabled: false,
+          operationsEnabled: false,
+          writeEnabled: false,
+          reason: 'disabled',
+        },
+        deviceInventoryBindingRefs: [],
+        serialVerificationProfiles: [],
+        bleVerificationProfiles: [],
+        usbDeviceProfiles: [],
+      }),
+    });
+  });
+  await page.route('**/api/sessions', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ sessions: [] }),
+  }));
+  await page.route('**/api/sessions/session-mobile-wait/stream*', (route) => route.fulfill({
+    contentType: 'text/event-stream',
+    body: '',
+  }));
+
+  await page.reload();
+
+  const approvalCard = page.locator('[aria-label="Human approval required"]');
+  await expect(approvalCard).toBeVisible();
+  await expect(page.getByText('Awaiting human approval (Overview Console)')).toBeVisible();
+  await expect(page.locator('.prompt-row input')).toBeDisabled();
+  const consoleLink = approvalCard.getByRole('link', { name: 'Open Overview Console' });
+  await expect(consoleLink).toHaveAttribute('href', '/Overseer/overview');
+  await consoleLink.focus();
+  await expect(consoleLink).toBeFocused();
+
+  const ordered = await page.evaluate(() => {
+    const approval = document.querySelector<HTMLElement>('[aria-label="Human approval required"]');
+    const transcript = document.querySelector<HTMLElement>('[aria-label="Conversation history"]');
+    const shell = document.documentElement;
+    const transcriptRect = document.querySelector<HTMLElement>('.transcript')?.getBoundingClientRect();
+    if (!approval || !transcript || !transcriptRect) throw new Error('Mobile approval fixture is incomplete.');
+    return {
+      order: approval.compareDocumentPosition(transcript) & Node.DOCUMENT_POSITION_FOLLOWING,
+      overflowX: shell.scrollWidth - shell.clientWidth,
+      transcriptBottom: transcriptRect.bottom,
+      viewportHeight: window.innerHeight,
+      bodyWidth: document.body.getBoundingClientRect().width,
+      shellWidth: shell.getBoundingClientRect().width,
+      consoleTargetHeight: document.querySelector<HTMLElement>('.approval-wait-link')?.getBoundingClientRect().height ?? 0,
+      consoleFocusOutline: getComputedStyle(document.querySelector<HTMLElement>('.approval-wait-link')!).outlineStyle,
+    };
+  });
+
+  expect(ordered.order).toBeGreaterThan(0);
+  expect(ordered.overflowX).toBeLessThanOrEqual(0);
+  expect(ordered.transcriptBottom).toBeLessThanOrEqual(ordered.viewportHeight + 1);
+  expect(ordered.shellWidth).toBeLessThanOrEqual(ordered.bodyWidth);
+  expect(ordered.consoleTargetHeight).toBeGreaterThanOrEqual(44);
+  expect(ordered.consoleFocusOutline).not.toBe('none');
+
+  const navigation = page.getByRole('button', { name: 'Open navigation and controls' });
+  await navigation.click();
+  await expect(page.getByRole('complementary', { name: 'Roadex navigation' })).toBeVisible();
+  await page.getByRole('button', { name: 'Close navigation' }).click();
+  await expect(page.locator('.transcript')).toBeVisible();
+
+  bootstrapWaitState = 'verification-delayed';
+  await page.reload();
+  await expect(approvalCard).toContainText('Approval verification is delayed.');
+  await expect(page.locator('.prompt-row input')).toBeDisabled();
+
+  bootstrapWaitState = 'terminal';
+  await page.reload();
+  await expect(approvalCard).toHaveCount(0);
+  await expect(page.locator('.prompt-row input')).toBeEnabled();
+});

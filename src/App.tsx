@@ -36,6 +36,7 @@ import { resolveLayoutMode, toggleLayoutMode } from './layoutMode';
 import { hasBleRuntimeVerification, verifyBleRuntime } from './client/bleRuntimeVerifier';
 import { hasSerialRuntimeVerification, verifySerialRuntime } from './client/serialRuntimeVerifier';
 import { allowsUsbOperation } from './shared/usbDeviceProfileContracts';
+import type { WaitingApprovalSummary } from './shared/approvalWorkflowContracts';
 
 function App() {
   const roadex = useRoadexSession();
@@ -109,11 +110,16 @@ function App() {
   const selectedThreadLabel = roadex.managedThreads.find(
     (candidate) => candidate.id === session?.codexThreadId,
   )?.label ?? (session ? `Thread ${session.id.slice(-8)}` : 'Attaching thread');
+  const approvalWait = roadex.approvalWait;
+  const approvalConsoleLabel = approvalWait?.consoleSurface === 'admin' ? 'Admin Console' : 'Overview Console';
+  const approvalConsolePath = safeApprovalConsolePath(approvalWait);
+  const approvalCards = approvalWait ? approvalCopy(approvalWait) : undefined;
   const composerDisabled =
     roadex.connectionState === 'loading' ||
     roadex.connectionState === 'streaming' ||
     roadex.connectionState === 'error' ||
     !session ||
+    roadex.approvalComposerBlocked ||
     session.lifecycle !== 'ready';
   const threadIsWorking = roadex.connectionState === 'streaming'
     || session?.lifecycle === 'streaming'
@@ -555,9 +561,13 @@ function App() {
             <span className="mobile-title">{session?.workspace.name ?? 'Roadex'}</span>
             <strong className="mobile-title">{selectedThreadLabel}</strong>
           </div>
-          <div aria-live="polite" className="session-pill" role="status">
-            <Activity size={16} />
-            <span>{threadIsWorking ? 'Working' : roadex.connectionState}</span>
+          <div
+            aria-live="polite"
+            className={`session-pill${approvalWait ? ' approval' : ''}`}
+            role="status"
+          >
+            {approvalWait ? <Clock3 size={16} /> : <Activity size={16} />}
+            <span>{approvalWait ? `Awaiting human approval (${approvalConsoleLabel})` : threadIsWorking ? 'Working' : roadex.connectionState}</span>
           </div>
           <button
             data-testid="layout-toggle"
@@ -618,6 +628,22 @@ function App() {
                 {threadIsWorking ? 'Working' : session?.lifecycle ?? 'loading'}
               </span>
             </div>
+
+            {approvalWait && approvalCards ? (
+              <section
+                aria-label="Human approval required"
+                className={`approval-wait approval-${approvalWait.state}`}
+                role="status"
+              >
+                <div className="approval-wait-heading">
+                  <span className="section-label">Human approval required</span>
+                  <strong>{approvalCards.heading}</strong>
+                </div>
+                {approvalCards.body.map((line) => <p key={line}>{line}</p>)}
+                <code>Approval reference: {approvalWait.approvalRef}</code>
+                {approvalConsolePath ? <a className="approval-wait-link" href={approvalConsolePath}>Open {approvalConsoleLabel}</a> : null}
+              </section>
+            ) : null}
 
             <div
               aria-label="Conversation history"
@@ -938,6 +964,81 @@ function readLayoutPreference(): string | null {
   } catch {
     return null;
   }
+}
+
+function approvalCopy(wait: WaitingApprovalSummary): {
+  heading: string;
+  body: string[];
+} {
+  switch (wait.state) {
+    case 'pending': {
+      return {
+        heading: 'This thread is safely paused.',
+        body: [
+          `Approve ${wait.subject} in the ${wait.consoleSurface === 'admin' ? 'Admin Console' : 'Overview Console'}.`,
+          'Roadex will continue automatically after approval is verified.',
+        ],
+      };
+    }
+    case 'verification-delayed': {
+      return {
+        heading: 'Approval verification is delayed.',
+        body: [
+          `Roadex has not rechecked ${wait.subject} yet.`,
+          'Roadex will continue automatically after approval is verified.',
+        ],
+      };
+    }
+    case 'security-failure': {
+      return {
+        heading: 'Approval could not be validated safely.',
+        body: [
+          `Roadex could not verify the approval binding for ${wait.subject}.`,
+          'This thread remains paused and will not continue automatically.',
+        ],
+      };
+    }
+    case 'approved-resume-queued': {
+      return {
+        heading: 'Approval granted - resuming automatically.',
+        body: [
+          `Approval for ${wait.subject} is recorded in the ${wait.consoleSurface === 'admin' ? 'Admin Console' : 'Overview Console'}.`,
+          'Waiting for runner capacity.',
+        ],
+      };
+    }
+    case 'resume-dispatching': {
+      return {
+        heading: 'Approval granted - resuming automatically.',
+        body: [
+          `Dispatching the continuation for ${wait.subject}.`,
+          'Roadex is continuing the managed thread automatically.',
+        ],
+      };
+    }
+    case 'resume-reconciliation-required': {
+      return {
+        heading: 'Approval granted - resuming automatically.',
+        body: [
+          `Approval for ${wait.subject} remains recorded.`,
+          'Approval remains recorded, but an operator must verify whether the exact continuation was accepted.',
+        ],
+      };
+    }
+    default:
+      return {
+        heading: 'This thread is safely paused.',
+        body: ['Roadex will continue automatically after approval is verified.'],
+      };
+  }
+}
+
+function safeApprovalConsolePath(wait: WaitingApprovalSummary | undefined): string | undefined {
+  if (!wait?.consolePath) return undefined;
+  const deploymentPath = wait.consoleSurface === 'admin'
+    ? '/Overseer/admin'
+    : '/Overseer/overview';
+  return wait.consolePath === deploymentPath ? deploymentPath : undefined;
 }
 
 function deviceTransportLabel(transport: 'webusb' | 'unavailable'): string {
