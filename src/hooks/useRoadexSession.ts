@@ -144,6 +144,7 @@ export function useRoadexSession(): RoadexSessionState {
         readSelectedSessionPreference(),
       );
     const archived = await listArchivedSessions(result.token);
+    activeStreamSessionId.current = preferredSession?.id;
     setToken(result.token);
     setUser(result.bootstrap.user);
     setWorkspaces(result.bootstrap.workspaces);
@@ -551,6 +552,7 @@ export function useRoadexSession(): RoadexSessionState {
 
     try {
       const result = await createSession(token, { workspaceId: workspaces[0].id });
+      activeStreamSessionId.current = result.session.id;
       setSessions(result.bootstrap.sessions);
       setManagedThreads(result.bootstrap.managedThreads);
       setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
