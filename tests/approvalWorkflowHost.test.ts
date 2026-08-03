@@ -1,5 +1,11 @@
-import { createConnection } from 'node:net';
-import { rmSync } from 'node:fs';
+import { createConnection, createServer, type Server } from 'node:net';
+import {
+  lstatSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ApprovalWorkflowGrantBroker } from '../src/server/approvalWorkflowGrantBroker';
 import { startApprovalWorkflowHost } from '../src/server/approvalWorkflowHost';
@@ -126,6 +132,14 @@ describe('approval workflow host listener', () => {
         .toEqual({ ok: false, reason: 'request_invalid' });
       expect(consumed).toBe(0);
 
+      expect(await sendApprovalWorkflowRequest({ token: 'a'.repeat(42), provider: 'overseer', approvalRef: 'admin.roadex.test' }))
+        .toEqual({ ok: false, reason: 'request_invalid' });
+      expect(await sendApprovalWorkflowRequest({ token: `${'a'.repeat(42)}.`, provider: 'overseer', approvalRef: 'admin.roadex.test' }))
+        .toEqual({ ok: false, reason: 'request_invalid' });
+      expect(await sendApprovalWorkflowRequest({ token: `${'A'.repeat(42)}B`, provider: 'overseer', approvalRef: 'admin.roadex.test' }))
+        .toEqual({ ok: false, reason: 'request_invalid' });
+      expect(consumed).toBe(0);
+
       expect(await sendApprovalWorkflowRequest({
         token: grant.token,
         provider: 'overseer',
@@ -144,27 +158,231 @@ describe('approval workflow host listener', () => {
       await closeServer(host);
     }
   });
+
+  it('requires one complete bounded newline request', async () => {
+    let consumed = 0;
+    const host = startApprovalWorkflowHost({
+      consumeGrant: () => {
+        consumed += 1;
+        return undefined;
+      },
+      resolveRunContext: () => undefined,
+      registerApprovalWait: async () => WAIT,
+      verifyPeer: async () => true,
+    });
+    await waitForListening(host);
+    try {
+      expect(await sendRawApprovalWorkflowRequest(`${'x'.repeat(4_096)}\n`))
+        .toEqual({ ok: false, reason: 'request_too_large' });
+      expect(await sendRawApprovalWorkflowRequest(`${JSON.stringify({
+        token: 'A'.repeat(43),
+        provider: 'overseer',
+        approvalRef: 'admin.roadex.test',
+      })}\n{}\n`)).toEqual({ ok: false, reason: 'request_invalid' });
+      expect(consumed).toBe(0);
+    } finally {
+      await closeServer(host);
+    }
+  });
+
+  it('consumes before registration and returns one redacted error when registration rejects', async () => {
+    const broker = new ApprovalWorkflowGrantBroker();
+    const grant = broker.issue({
+      userId: 'owner',
+      sessionId: 'session-1',
+      workspaceId: 'roadex',
+      managedThreadId: 'thread-1',
+      runId: 'run-1',
+    });
+    const runContext: ApprovalSessionCapability = {
+      sessionId: 'session-1',
+      userId: 'owner',
+      projectId: 'roadex',
+      workspaceId: 'roadex',
+      resourceRef: 'resource-1',
+      managedThreadId: 'thread-1',
+    };
+    const host = startApprovalWorkflowHost({
+      consumeGrant: (token) => broker.consume(token),
+      resolveRunContext: () => runContext,
+      registerApprovalWait: async () => {
+        throw new Error(`private ${grant.token}`);
+      },
+      verifyPeer: async () => true,
+    });
+    await waitForListening(host);
+    try {
+      const response = await sendApprovalWorkflowRequest({
+        token: grant.token,
+        provider: 'overseer',
+        approvalRef: 'admin.roadex.test',
+      });
+      expect(response).toEqual({ ok: false, reason: 'workflow_request_failed' });
+      expect(JSON.stringify(response)).not.toContain(grant.token);
+      expect(broker.consume(grant.token)).toBeUndefined();
+    } finally {
+      await closeServer(host);
+    }
+  });
+
+  it('bounds a registration callback that never settles', async () => {
+    const broker = new ApprovalWorkflowGrantBroker();
+    const grant = broker.issue({
+      userId: 'owner',
+      sessionId: 'session-1',
+      workspaceId: 'roadex',
+      managedThreadId: 'thread-1',
+      runId: 'run-1',
+    });
+    const host = startApprovalWorkflowHost({
+      consumeGrant: (token) => broker.consume(token),
+      resolveRunContext: () => ({
+        sessionId: 'session-1',
+        userId: 'owner',
+        projectId: 'roadex',
+        workspaceId: 'roadex',
+        resourceRef: 'resource-1',
+        managedThreadId: 'thread-1',
+      }),
+      registerApprovalWait: async () => new Promise<RegisterApprovalWaitResult>(() => {}),
+      verifyPeer: async () => true,
+      requestTimeoutMs: 25,
+    });
+    await waitForListening(host);
+    try {
+      expect(await sendApprovalWorkflowRequest({
+        token: grant.token,
+        provider: 'overseer',
+        approvalRef: 'admin.roadex.test',
+      })).toEqual({ ok: false, reason: 'request_timeout' });
+    } finally {
+      await closeServer(host);
+    }
+  });
+
+  it('does not unlink a replacement path when the bound socket closes', async () => {
+    const replacementBackup = `${APPROVAL_WORKFLOW_SOCKET}.bound-${process.pid}`;
+    rmSync(replacementBackup, { force: true });
+    const host = startApprovalWorkflowHost({
+      consumeGrant: () => undefined,
+      resolveRunContext: () => undefined,
+      registerApprovalWait: async () => WAIT,
+      verifyPeer: async () => true,
+    });
+    await waitForListening(host);
+    try {
+      const bound = lstatSync(APPROVAL_WORKFLOW_SOCKET);
+      renameSync(APPROVAL_WORKFLOW_SOCKET, replacementBackup);
+      writeFileSync(APPROVAL_WORKFLOW_SOCKET, 'replacement-must-survive', { mode: 0o600 });
+      await new Promise<void>((resolve) => host.close(() => resolve()));
+
+      const replacement = lstatSync(APPROVAL_WORKFLOW_SOCKET);
+      expect(replacement.isFile()).toBe(true);
+      expect(`${replacement.dev}:${replacement.ino}`).not.toBe(`${bound.dev}:${bound.ino}`);
+      expect(readFileSync(APPROVAL_WORKFLOW_SOCKET, 'utf8')).toBe('replacement-must-survive');
+    } finally {
+      if (host.listening) {
+        await new Promise<void>((resolve) => host.close(() => resolve()));
+      }
+      rmSync(APPROVAL_WORKFLOW_SOCKET, { force: true });
+      rmSync(replacementBackup, { force: true });
+    }
+  });
+
+  it('does not clobber an existing Unix socket at startup', async () => {
+    rmSync(APPROVAL_WORKFLOW_SOCKET, { force: true });
+    const existing = createServer();
+    existing.listen(APPROVAL_WORKFLOW_SOCKET);
+    await waitForListening(existing);
+    const identity = lstatSync(APPROVAL_WORKFLOW_SOCKET);
+    let unexpected: Server | undefined;
+    try {
+      expect(() => {
+        unexpected = startApprovalWorkflowHost({
+          consumeGrant: () => undefined,
+          resolveRunContext: () => undefined,
+          registerApprovalWait: async () => WAIT,
+          verifyPeer: async () => true,
+        });
+      }).toThrow('host_path_invalid');
+      const after = lstatSync(APPROVAL_WORKFLOW_SOCKET);
+      expect(`${after.dev}:${after.ino}`).toBe(`${identity.dev}:${identity.ino}`);
+    } finally {
+      if (unexpected?.listening) {
+        await new Promise<void>((resolve) => unexpected?.close(() => resolve()));
+      }
+      await new Promise<void>((resolve) => existing.close(() => resolve()));
+      rmSync(APPROVAL_WORKFLOW_SOCKET, { force: true });
+    }
+  });
+
+  it('preserves a replacement socket and tolerates an already absent path on shutdown', async () => {
+    const backup = `${APPROVAL_WORKFLOW_SOCKET}.original-${process.pid}`;
+    rmSync(backup, { force: true });
+    const host = startApprovalWorkflowHost({
+      consumeGrant: () => undefined,
+      resolveRunContext: () => undefined,
+      registerApprovalWait: async () => WAIT,
+      verifyPeer: async () => true,
+    });
+    await waitForListening(host);
+    renameSync(APPROVAL_WORKFLOW_SOCKET, backup);
+    const replacement = createServer();
+    replacement.listen(APPROVAL_WORKFLOW_SOCKET);
+    await waitForListening(replacement);
+    const replacementIdentity = lstatSync(APPROVAL_WORKFLOW_SOCKET);
+    try {
+      await new Promise<void>((resolve) => host.close(() => resolve()));
+      const after = lstatSync(APPROVAL_WORKFLOW_SOCKET);
+      expect(after.isSocket()).toBe(true);
+      expect(`${after.dev}:${after.ino}`).toBe(`${replacementIdentity.dev}:${replacementIdentity.ino}`);
+    } finally {
+      await new Promise<void>((resolve) => replacement.close(() => resolve()));
+      rmSync(APPROVAL_WORKFLOW_SOCKET, { force: true });
+      rmSync(backup, { force: true });
+    }
+
+    const absentHost = startApprovalWorkflowHost({
+      consumeGrant: () => undefined,
+      resolveRunContext: () => undefined,
+      registerApprovalWait: async () => WAIT,
+      verifyPeer: async () => true,
+    });
+    await waitForListening(absentHost);
+    rmSync(APPROVAL_WORKFLOW_SOCKET, { force: true });
+    await expect(new Promise<void>((resolve) => absentHost.close(() => resolve()))).resolves.toBeUndefined();
+  });
 });
 
 async function sendApprovalWorkflowRequest(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return sendRawApprovalWorkflowRequest(`${JSON.stringify(payload)}\n`);
+}
+
+async function sendRawApprovalWorkflowRequest(payload: string): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(APPROVAL_WORKFLOW_SOCKET);
     let output = '';
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error('host response timeout'));
+    }, 1_000);
     socket.setEncoding('utf8');
     socket.on('connect', () => {
-      socket.end(`${JSON.stringify(payload)}\n`);
+      socket.end(payload);
     });
     socket.on('data', (chunk) => {
       output += chunk;
     });
     socket.on('error', reject);
     socket.on('end', () => {
+      clearTimeout(timer);
       try {
         resolve(JSON.parse(output.trim()));
       } catch {
         reject(new Error('invalid host output'));
       }
     });
+    socket.on('close', () => clearTimeout(timer));
   });
 }
 

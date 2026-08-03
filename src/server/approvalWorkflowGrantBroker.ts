@@ -11,7 +11,7 @@ export type ApprovalWorkflowGrant = {
 };
 
 const APPROVAL_WORKFLOW_TOKEN_TTL_MS = 5 * 60 * 1_000;
-const APPROVAL_WORKFLOW_TOKEN_PATTERN = /^[A-Za-z0-9._-]{20,16000}$/;
+const APPROVAL_WORKFLOW_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const USER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const WORKSPACE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -38,7 +38,7 @@ export class ApprovalWorkflowGrantBroker {
     }
     this.purgeExpired();
     const token = randomBytes(32).toString('base64url');
-    if (!APPROVAL_WORKFLOW_TOKEN_PATTERN.test(token)) {
+    if (!isApprovalWorkflowToken(token)) {
       throw new Error('workflow_grant_internal');
     }
     const grant: ApprovalWorkflowGrant = {
@@ -59,7 +59,7 @@ export class ApprovalWorkflowGrantBroker {
 
   consume(token: string): ApprovalWorkflowGrant | undefined {
     this.purgeExpired();
-    if (!APPROVAL_WORKFLOW_TOKEN_PATTERN.test(token)) return undefined;
+    if (!isApprovalWorkflowToken(token)) return undefined;
     const key = this.tokenDigest(token);
     const grant = this.grants.get(key);
     this.grants.delete(key);
@@ -100,5 +100,17 @@ export class ApprovalWorkflowGrantBroker {
 
   private tokenDigest(token: string): string {
     return createHash('sha256').update(token).digest('hex');
+  }
+}
+
+export function isApprovalWorkflowToken(value: unknown): value is string {
+  if (typeof value !== 'string' || !APPROVAL_WORKFLOW_TOKEN_PATTERN.test(value)) {
+    return false;
+  }
+  try {
+    const decoded = Buffer.from(value, 'base64url');
+    return decoded.length === 32 && decoded.toString('base64url') === value;
+  } catch {
+    return false;
   }
 }

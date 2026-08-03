@@ -1,10 +1,11 @@
 import { createServer, type Server, type Socket } from 'node:net';
+import { randomBytes } from 'node:crypto';
 import {
   chmodSync,
   lstatSync,
   mkdirSync,
   realpathSync,
-  rmSync,
+  renameSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
 import type {
@@ -17,13 +18,15 @@ import {
 } from './runnerCapabilityProfile.js';
 import { verifyLinuxPeerCredentials } from './controlledOperationsPeer.js';
 import type { ApprovalWorkflowGrant } from './approvalWorkflowGrantBroker.js';
+import { isApprovalWorkflowToken } from './approvalWorkflowGrantBroker.js';
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_REQUEST_BYTES = 4_096;
 const MAX_RESPONSE_BYTES = 4_096;
 const REQUEST_KEYS = ['approvalRef', 'provider', 'token'];
 const APPROVAL_REFERENCE_PATTERN = /^(admin|roadex-human-decision)\.[A-Za-z0-9._:-]{1,220}$/;
-const TOKEN_PATTERN = /^[A-Za-z0-9._-]{20,16000}$/;
+const WAIT_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+type SocketIdentity = { dev: number; ino: number };
 
 export type ApprovalWorkflowHostDependencies = {
   consumeGrant: (token: string) => ApprovalWorkflowGrant | undefined;
@@ -33,6 +36,7 @@ export type ApprovalWorkflowHostDependencies = {
     input: RegisterApprovalWaitInput,
   ) => Promise<RegisterApprovalWaitResult>;
   verifyPeer?: (socket: Socket) => Promise<boolean>;
+  requestTimeoutMs?: number;
 };
 
 type ApprovalWorkflowRequest = {
@@ -52,27 +56,41 @@ export function startApprovalWorkflowHost(
   dependencies: ApprovalWorkflowHostDependencies,
 ): Server {
   const verifyPeer = dependencies.verifyPeer ?? verifyLinuxPeerCredentials;
+  const requestTimeoutMs = dependencies.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+  if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > REQUEST_TIMEOUT_MS) {
+    throw new Error('host_timeout_invalid');
+  }
   prepareSocketPath(APPROVAL_WORKFLOW_SOCKET);
-  const server = createServer({ allowHalfOpen: true }, (socket) => {
+  let boundIdentity: SocketIdentity | undefined;
+  const server = createServer({ allowHalfOpen: true, pauseOnConnect: true }, (socket) => {
     let input = Buffer.alloc(0);
-    let completed = false;
+    let processing = false;
+    let responded = false;
     let peerAllowed = false;
+    let inputEnded = false;
+    const respond = (response: ApprovalWorkflowResponse): void => {
+      if (responded) return;
+      responded = true;
+      clearTimeout(timer);
+      const encoded = JSON.stringify(response);
+      const bounded = Buffer.byteLength(encoded) <= MAX_RESPONSE_BYTES
+        ? encoded
+        : JSON.stringify({ ok: false, reason: 'response_invalid' });
+      socket.resume();
+      socket.end(`${bounded}\n`);
+    };
     const deny = (reason: string): void => {
-      if (completed) return;
-      completed = true;
-      socket.end(`${JSON.stringify({ ok: false, reason }).slice(0, MAX_RESPONSE_BYTES)}\n`);
+      respond({ ok: false, reason });
     };
     const timer = setTimeout(() => {
       deny('request_timeout');
-      socket.destroy();
-    }, REQUEST_TIMEOUT_MS);
+    }, requestTimeoutMs);
     timer.unref();
 
     const processInput = (): void => {
-      if (completed || !peerAllowed || socket.destroyed) return;
+      if (processing || responded || !peerAllowed || !inputEnded || socket.destroyed) return;
       const newline = input.indexOf(0x0a);
-      if (newline < 0) return;
-      if (newline !== input.length - 1) {
+      if (newline < 0 || newline !== input.length - 1) {
         deny('request_invalid');
         return;
       }
@@ -83,11 +101,10 @@ export function startApprovalWorkflowHost(
         deny('request_invalid');
         return;
       }
-      completed = true;
-      clearTimeout(timer);
+      processing = true;
       void executeRequest(request)
         .then((response) => {
-          socket.end(`${JSON.stringify(response).slice(0, MAX_RESPONSE_BYTES)}\n`);
+          respond(response);
         })
         .catch(() => {
           deny('workflow_request_failed');
@@ -127,12 +144,16 @@ export function startApprovalWorkflowHost(
       .catch(() => deny('peer_denied'));
 
     socket.on('data', (chunk) => {
-      if (completed) return;
+      if (processing || responded) return;
       input = Buffer.concat([input, chunk]);
       if (input.length > MAX_REQUEST_BYTES) {
         deny('request_too_large');
         return;
       }
+      processInput();
+    });
+    socket.once('end', () => {
+      inputEnded = true;
       processInput();
     });
     socket.once('close', () => clearTimeout(timer));
@@ -141,16 +162,18 @@ export function startApprovalWorkflowHost(
   server.once('listening', () => {
     chmodSync(APPROVAL_WORKFLOW_SOCKET, 0o600);
     const socketStat = lstatSync(APPROVAL_WORKFLOW_SOCKET);
+    boundIdentity = { dev: socketStat.dev, ino: socketStat.ino };
     if (
       !socketStat.isSocket()
       || socketStat.uid !== process.getuid?.()
       || (socketStat.mode & 0o077) !== 0
     ) {
       server.close();
+      return;
     }
   });
+  installReplacementSafeClose(server, () => boundIdentity);
   server.listen(APPROVAL_WORKFLOW_SOCKET);
-  server.once('close', () => rmSync(APPROVAL_WORKFLOW_SOCKET, { force: true }));
   return server;
 }
 
@@ -158,7 +181,7 @@ function parseRequest(value: string): ApprovalWorkflowRequest {
   const parsed = JSON.parse(value) as Record<string, unknown>;
   const keys = Object.keys(parsed).sort();
   if (keys.join(',') !== REQUEST_KEYS.join(',')) throw new Error('request_invalid');
-  if (typeof parsed.token !== 'string' || !TOKEN_PATTERN.test(parsed.token)) throw new Error('request_invalid');
+  if (!isApprovalWorkflowToken(parsed.token)) throw new Error('request_invalid');
   if (parsed.provider !== 'overseer') throw new Error('request_invalid');
   if (
     typeof parsed.approvalRef !== 'string'
@@ -173,6 +196,7 @@ function publicResult(result: RegisterApprovalWaitResult): ApprovalWorkflowRespo
     || typeof result !== 'object'
     || result.ok !== true
     || typeof result.wait.waitId !== 'string'
+    || !WAIT_ID_PATTERN.test(result.wait.waitId)
     || !['pending', 'verification-delayed', 'security-failure', 'approved-resume-queued', 'resume-dispatching', 'resume-reconciliation-required'].includes(result.wait.state)
   ) {
     return { ok: false, reason: 'scope_mismatch' };
@@ -208,10 +232,7 @@ function prepareSocketPath(path: string): void {
     if ((existing.mode & 0o077) !== 0) {
       throw new Error('host_path_invalid');
     }
-    if (existing.isSocket() && existing.uid === process.getuid?.()) {
-      rmSync(path);
-      return;
-    }
+    throw new Error('host_path_invalid');
   } catch (error) {
     if (
       error instanceof Error
@@ -222,4 +243,71 @@ function prepareSocketPath(path: string): void {
     }
     throw new Error('host_path_invalid');
   }
+}
+
+function installReplacementSafeClose(
+  server: Server,
+  getBoundIdentity: () => SocketIdentity | undefined,
+): void {
+  const nativeClose = server.close.bind(server);
+  server.close = ((callback?: (error?: Error) => void): Server => {
+    const held = holdReplacementDuringClose(APPROVAL_WORKFLOW_SOCKET, getBoundIdentity());
+    return nativeClose((error?: Error) => {
+      let restoreError: Error | undefined;
+      try {
+        held?.restore();
+      } catch {
+        restoreError = new Error('host_path_invalid');
+      }
+      callback?.(restoreError ?? error);
+    });
+  }) as Server['close'];
+}
+
+function holdReplacementDuringClose(
+  path: string,
+  boundIdentity: SocketIdentity | undefined,
+): { restore: () => void } | undefined {
+  let current;
+  try {
+    current = lstatSync(path);
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    throw new Error('host_path_invalid');
+  }
+  if (
+    boundIdentity
+    && current.isSocket()
+    && current.dev === boundIdentity.dev
+    && current.ino === boundIdentity.ino
+  ) {
+    return undefined;
+  }
+
+  const heldPath = `${path}.shutdown-${randomBytes(16).toString('hex')}`;
+  renameSync(path, heldPath);
+  const heldIdentity = lstatSync(heldPath);
+  return {
+    restore: () => {
+      const stillHeld = lstatSync(heldPath);
+      if (stillHeld.dev !== heldIdentity.dev || stillHeld.ino !== heldIdentity.ino) {
+        throw new Error('host_path_invalid');
+      }
+      try {
+        lstatSync(path);
+        return;
+      } catch (error) {
+        if (!isMissing(error)) throw new Error('host_path_invalid');
+      }
+      renameSync(heldPath, path);
+    },
+  };
+}
+
+function isMissing(error: unknown): boolean {
+  return (
+    error instanceof Error
+    && 'code' in error
+    && (error as NodeJS.ErrnoException).code === 'ENOENT'
+  );
 }

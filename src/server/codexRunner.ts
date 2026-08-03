@@ -14,6 +14,7 @@ import {
 import { constants as fsConstants } from 'node:fs';
 import { join } from 'node:path';
 import { createStreamEvent } from './mockRunner.js';
+import { isApprovalWorkflowToken } from './approvalWorkflowGrantBroker.js';
 import {
   CONTROLLED_RUNNER_CONFIG_OVERRIDES,
   CONTROLLED_OPERATION_TOKEN_DIRECTORY,
@@ -176,21 +177,23 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
     options.onEvent?.(event);
   };
   pushEvent('system', 'Starting Codex CLI runner.');
-  const controlledOperationTokenFile = (
-    options.capabilityProfile.mode === 'controlled-project-manager'
-    && options.controlledOperationToken
-  )
-    ? createControlledOperationTokenFile(options.controlledOperationToken)
-    : undefined;
-  const approvalWorkflowTokenFile = (
-    options.capabilityProfile.mode === 'controlled-project-manager'
-    && options.approvalWorkflowToken
-    && options.runId
-  )
-    ? createApprovalWorkflowTokenFile(options.approvalWorkflowToken)
-    : undefined;
+  let controlledOperationTokenFile: string | undefined;
+  let approvalWorkflowTokenFile: string | undefined;
   let child;
   try {
+    controlledOperationTokenFile = (
+      options.capabilityProfile.mode === 'controlled-project-manager'
+      && options.controlledOperationToken
+    )
+      ? createControlledOperationTokenFile(options.controlledOperationToken)
+      : undefined;
+    approvalWorkflowTokenFile = (
+      options.capabilityProfile.mode === 'controlled-project-manager'
+      && options.approvalWorkflowToken
+      && options.runId
+    )
+      ? createApprovalWorkflowTokenFile(options.approvalWorkflowToken)
+      : undefined;
     child = spawn(
       options.executable,
       buildCodexExecArgs(
@@ -366,8 +369,16 @@ export function createControlledOperationTokenFile(token: string): string {
   return path;
 }
 
-export function createApprovalWorkflowTokenFile(token: string): string {
-  if (!/^[A-Za-z0-9._-]{20,16000}$/.test(token)) throw new Error('approval_workflow_token_invalid');
+export type ApprovalWorkflowTokenFileOperations = {
+  writeFile?: typeof writeFileSync;
+  sync?: typeof fsyncSync;
+};
+
+export function createApprovalWorkflowTokenFile(
+  token: string,
+  operations: ApprovalWorkflowTokenFileOperations = {},
+): string {
+  if (!isApprovalWorkflowToken(token)) throw new Error('approval_workflow_token_invalid');
   mkdirSync(APPROVAL_WORKFLOW_TOKEN_DIRECTORY, { recursive: true, mode: 0o700 });
   const directory = lstatSync(APPROVAL_WORKFLOW_TOKEN_DIRECTORY);
   if (
@@ -382,12 +393,23 @@ export function createApprovalWorkflowTokenFile(token: string): string {
     fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
     0o600,
   );
+  let failure: unknown;
   try {
     fchmodSync(descriptor, 0o600);
-    writeFileSync(descriptor, token, { encoding: 'utf8' });
-    fsyncSync(descriptor);
+    (operations.writeFile ?? writeFileSync)(descriptor, token, { encoding: 'utf8' });
+    (operations.sync ?? fsyncSync)(descriptor);
+  } catch (error) {
+    failure = error;
   } finally {
     closeSync(descriptor);
+  }
+  if (failure !== undefined) {
+    try {
+      unlinkSync(path);
+    } catch {
+      throw new Error('approval_workflow_token_cleanup_failed');
+    }
+    throw failure;
   }
   return path;
 }

@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { chmodSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildCodexExecArgs, createCodexRunner, parseCodexJsonl, parseCodexJsonlEvents } from '../src/server/codexRunner';
 import {
   createApprovalWorkflowTokenFile,
 } from '../src/server/codexRunner';
+import {
+  APPROVAL_WORKFLOW_TOKEN_DIRECTORY,
+  CONTROLLED_OPERATION_TOKEN_DIRECTORY,
+} from '../src/server/runnerCapabilityProfile';
 
 describe('createCodexRunner', () => {
   it('creates Codex sessions with device bridge disabled', () => {
@@ -152,63 +156,173 @@ describe('createCodexRunner', () => {
   });
 
   it('adds the bounded workflow MCP only for a controlled token with controlled-run identifier', () => {
-    const workflowToken = createApprovalWorkflowTokenFile('b'.repeat(40));
-    const args = buildCodexExecArgs(
-      '/tmp/workspace',
-      'human approval needed',
-      'thread-123',
-      {
-        mode: 'controlled-project-manager',
-        profile: 'roadex-controlled-project-manager',
-      },
-      undefined,
-      workflowToken,
-      'run-123',
-    );
+    const rawToken = 'g'.repeat(43);
+    const workflowToken = createApprovalWorkflowTokenFile(rawToken);
+    try {
+      const args = buildCodexExecArgs(
+        '/tmp/workspace',
+        'human approval needed',
+        'thread-123',
+        {
+          mode: 'controlled-project-manager',
+          profile: 'roadex-controlled-project-manager',
+        },
+        undefined,
+        workflowToken,
+        'run-123',
+      );
 
-    expect(args).toContain('mcp_servers.roadex-workflow.command="node"');
-    expect(args).toContain(
-      'mcp_servers.roadex-workflow.env={ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE="' + workflowToken + '",ROADEX_APPROVAL_WORKFLOW_SOCKET="/run/user/1000/roadex-approval-workflow.sock"}',
-    );
-    expect(args).toContain('mcp_servers.roadex-workflow.enabled_tools=["await_human_approval"]');
-    expect(args).toContain('mcp_servers.roadex-workflow.default_tools_approval_mode="approve"');
-    expect(args.at(-1)).toContain('human approval needed');
-    expect(args.join('\n')).not.toContain('b'.repeat(40));
+      expect(args).toContain('mcp_servers.roadex-workflow.command="node"');
+      expect(args).toContain(
+        'mcp_servers.roadex-workflow.env={ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE="' + workflowToken + '",ROADEX_APPROVAL_WORKFLOW_SOCKET="/run/user/1000/roadex-approval-workflow.sock"}',
+      );
+      expect(args).toContain('mcp_servers.roadex-workflow.enabled_tools=["await_human_approval"]');
+      expect(args).toContain('mcp_servers.roadex-workflow.default_tools_approval_mode="approve"');
+      expect(args.at(-1)).toContain('human approval needed');
+      expect(args.join('\n')).not.toContain(rawToken);
+    } finally {
+      unlinkSync(workflowToken);
+    }
   });
 
   it('requires a workflow run identifier for workflow MCP overrides', () => {
-    const workflowToken = createApprovalWorkflowTokenFile('c'.repeat(40));
-    const args = buildCodexExecArgs(
-      '/tmp/workspace',
-      'no run id provided',
-      'thread-123',
-      {
-        mode: 'controlled-project-manager',
-        profile: 'roadex-controlled-project-manager',
-      },
-      undefined,
-      workflowToken,
-    );
-    expect(args.join('\n')).not.toContain('roadex-workflow');
+    const workflowToken = createApprovalWorkflowTokenFile('k'.repeat(43));
+    try {
+      const args = buildCodexExecArgs(
+        '/tmp/workspace',
+        'no run id provided',
+        'thread-123',
+        {
+          mode: 'controlled-project-manager',
+          profile: 'roadex-controlled-project-manager',
+        },
+        undefined,
+        workflowToken,
+      );
+      expect(args.join('\n')).not.toContain('roadex-workflow');
+    } finally {
+      unlinkSync(workflowToken);
+    }
   });
 
   it('never injects workflow MCP for restricted runs', () => {
-    const workflowToken = createApprovalWorkflowTokenFile('e'.repeat(40));
-    const args = buildCodexExecArgs(
-      '/tmp/workspace',
-      'restricted run',
-      'thread-123',
-      { mode: 'restricted' },
-      undefined,
-      workflowToken,
-      'run-123',
-    );
-    expect(args.join('\n')).not.toContain('roadex-workflow');
-    expect(args.join('\n')).not.toContain('await_human_approval');
+    const workflowToken = createApprovalWorkflowTokenFile('o'.repeat(43));
+    try {
+      const args = buildCodexExecArgs(
+        '/tmp/workspace',
+        'restricted run',
+        'thread-123',
+        { mode: 'restricted' },
+        undefined,
+        workflowToken,
+        'run-123',
+      );
+      expect(args.join('\n')).not.toContain('roadex-workflow');
+      expect(args.join('\n')).not.toContain('await_human_approval');
+    } finally {
+      unlinkSync(workflowToken);
+    }
+  });
+
+  it('requires the exact canonical 256-bit workflow token shape', () => {
+    expect(() => createApprovalWorkflowTokenFile('A'.repeat(42))).toThrow('approval_workflow_token_invalid');
+    expect(() => createApprovalWorkflowTokenFile('A'.repeat(44))).toThrow('approval_workflow_token_invalid');
+    expect(() => createApprovalWorkflowTokenFile(`${'A'.repeat(42)}.`)).toThrow('approval_workflow_token_invalid');
+    expect(() => createApprovalWorkflowTokenFile(`${'A'.repeat(42)}B`)).toThrow('approval_workflow_token_invalid');
+  });
+
+  it.each(['write', 'sync'] as const)('removes a partial workflow token file when %s fails', (failure) => {
+    const before = readTokenFiles(APPROVAL_WORKFLOW_TOKEN_DIRECTORY);
+    expect(() => createApprovalWorkflowTokenFile('w'.repeat(43), {
+      ...(failure === 'write'
+        ? { writeFile: () => { throw new Error('write failed'); } }
+        : { sync: () => { throw new Error('sync failed'); } }),
+    })).toThrow(`${failure} failed`);
+    expect(readTokenFiles(APPROVAL_WORKFLOW_TOKEN_DIRECTORY)).toEqual(before);
+  });
+
+  it('removes the first token file when second token-file creation fails', async () => {
+    const controlledBefore = readTokenFiles(CONTROLLED_OPERATION_TOKEN_DIRECTORY);
+    const workflowBefore = readTokenFiles(APPROVAL_WORKFLOW_TOKEN_DIRECTORY);
+    const root = mkdtempSync(join(tmpdir(), 'roadex-workflow-second-token-'));
+    const runner = createCodexRunner({ executable: '/definitely/not/codex' });
+    const session = runner.createSession({
+      userId: 'owner',
+      workspace: { id: 'roadex', name: 'Roadex', root },
+    });
+    session.managedThreadId = 'thread-roadex';
+    session.codexThreadId = 'thread-roadex';
+    const previousEnabled = process.env.ROADEX_CONTROLLED_RUNNER_ENABLED;
+    process.env.ROADEX_CONTROLLED_RUNNER_ENABLED = 'true';
+    try {
+      await expect(runner.runPrompt({
+        session,
+        prompt: 'human pause',
+        capabilityGrant: {
+          userId: 'owner',
+          workspaceId: 'roadex',
+          workspaceRoot: root,
+          managedThreadId: 'thread-roadex',
+          operationId: 'operation-roadex',
+          status: 'active',
+        },
+        controlledOperationToken: 'A'.repeat(43),
+        approvalWorkflowToken: 'A'.repeat(42),
+        runId: 'run-roadex',
+      })).rejects.toThrow('approval_workflow_token_invalid');
+      expect(readTokenFiles(CONTROLLED_OPERATION_TOKEN_DIRECTORY)).toEqual(controlledBefore);
+      expect(readTokenFiles(APPROVAL_WORKFLOW_TOKEN_DIRECTORY)).toEqual(workflowBefore);
+    } finally {
+      if (previousEnabled === undefined) {
+        delete process.env.ROADEX_CONTROLLED_RUNNER_ENABLED;
+      } else {
+        process.env.ROADEX_CONTROLLED_RUNNER_ENABLED = previousEnabled;
+      }
+    }
+  });
+
+  it('removes both token files when child spawn fails', async () => {
+    const controlledBefore = readTokenFiles(CONTROLLED_OPERATION_TOKEN_DIRECTORY);
+    const workflowBefore = readTokenFiles(APPROVAL_WORKFLOW_TOKEN_DIRECTORY);
+    const root = mkdtempSync(join(tmpdir(), 'roadex-workflow-spawn-failure-'));
+    const runner = createCodexRunner({ executable: '/definitely/not/a/roadex-codex-binary' });
+    const session = runner.createSession({
+      userId: 'owner',
+      workspace: { id: 'roadex', name: 'Roadex', root },
+    });
+    session.managedThreadId = 'thread-roadex';
+    session.codexThreadId = 'thread-roadex';
+    const previousEnabled = process.env.ROADEX_CONTROLLED_RUNNER_ENABLED;
+    process.env.ROADEX_CONTROLLED_RUNNER_ENABLED = 'true';
+    try {
+      await expect(runner.runPrompt({
+        session,
+        prompt: 'human pause',
+        capabilityGrant: {
+          userId: 'owner',
+          workspaceId: 'roadex',
+          workspaceRoot: root,
+          managedThreadId: 'thread-roadex',
+          operationId: 'operation-roadex',
+          status: 'active',
+        },
+        controlledOperationToken: 'A'.repeat(43),
+        approvalWorkflowToken: '0'.repeat(43),
+        runId: 'run-roadex',
+      })).rejects.toBeTruthy();
+      expect(readTokenFiles(CONTROLLED_OPERATION_TOKEN_DIRECTORY)).toEqual(controlledBefore);
+      expect(readTokenFiles(APPROVAL_WORKFLOW_TOKEN_DIRECTORY)).toEqual(workflowBefore);
+    } finally {
+      if (previousEnabled === undefined) {
+        delete process.env.ROADEX_CONTROLLED_RUNNER_ENABLED;
+      } else {
+        process.env.ROADEX_CONTROLLED_RUNNER_ENABLED = previousEnabled;
+      }
+    }
   });
 
   it('removes the approval workflow token file after one controlled execution', async () => {
-    const tokenFiles = readTokenFiles();
+    const tokenFiles = readTokenFiles(APPROVAL_WORKFLOW_TOKEN_DIRECTORY);
     const root = mkdtempSync(join(tmpdir(), 'roadex-workflow-token-run-'));
     const executable = join(root, 'codex-workflow-token');
     writeFileSync(executable, [
@@ -221,24 +335,36 @@ describe('createCodexRunner', () => {
       userId: 'owner',
       workspace: { id: 'roadex', name: 'Roadex', root },
     });
-    const result = await runner.runPrompt({
-      session,
-      prompt: 'human pause',
-      capabilityGrant: {
-        userId: 'owner',
-        workspaceId: 'roadex',
-        workspaceRoot: root,
-        managedThreadId: 'thread-roadex',
-        operationId: 'operation-roadex',
-        status: 'active',
-      },
-      approvalWorkflowToken: 'f'.repeat(40),
-      runId: 'run-roadex',
-    });
+    session.managedThreadId = 'thread-roadex';
+    session.codexThreadId = 'thread-roadex';
+    const previousEnabled = process.env.ROADEX_CONTROLLED_RUNNER_ENABLED;
+    process.env.ROADEX_CONTROLLED_RUNNER_ENABLED = 'true';
+    try {
+      const result = await runner.runPrompt({
+        session,
+        prompt: 'human pause',
+        capabilityGrant: {
+          userId: 'owner',
+          workspaceId: 'roadex',
+          workspaceRoot: root,
+          managedThreadId: 'thread-roadex',
+          operationId: 'operation-roadex',
+          status: 'active',
+        },
+        approvalWorkflowToken: 's'.repeat(43),
+        runId: 'run-roadex',
+      });
 
-    expect(result.ok).toBe(true);
-    const afterRun = readTokenFiles();
-    expect(afterRun).toEqual(tokenFiles);
+      expect(result.ok).toBe(true);
+      const afterRun = readTokenFiles(APPROVAL_WORKFLOW_TOKEN_DIRECTORY);
+      expect(afterRun).toEqual(tokenFiles);
+    } finally {
+      if (previousEnabled === undefined) {
+        delete process.env.ROADEX_CONTROLLED_RUNNER_ENABLED;
+      } else {
+        process.env.ROADEX_CONTROLLED_RUNNER_ENABLED = previousEnabled;
+      }
+    }
   });
 
   it('extracts final answer text from Codex JSONL item events', () => {
@@ -294,8 +420,7 @@ describe('createCodexRunner', () => {
   });
 });
 
-function readTokenFiles(): string[] {
-  const tokenDirectory = '/run/user/1000/roadex-approval-workflow-tokens';
+function readTokenFiles(tokenDirectory: string): string[] {
   try {
     return readdirSync(tokenDirectory, { withFileTypes: true })
       .filter((entry) => entry.isFile())
