@@ -1,5 +1,7 @@
 .agents/
 .codex/
+.superpowers/
+.worktrees/
 
 # Local secrets and personal exports
 .env

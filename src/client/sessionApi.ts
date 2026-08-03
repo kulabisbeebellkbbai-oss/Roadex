@@ -23,7 +23,7 @@ import type {
   DeviceDescriptorObservationPayload,
   DeviceDescriptorObservationResponse,
 } from '../shared/deviceBridgeContracts';
-import { isApiError } from '../shared/apiContracts';
+import { isApiError, isPromptApprovalPendingResponse } from '../shared/apiContracts';
 import type {
   ProjectCreationChallengeResponse,
   ProjectCreationConfirmPayload,
@@ -31,6 +31,11 @@ import type {
   ProjectCreationProposalPublic,
   ProjectCreationProposalResponse,
 } from '../shared/projectCreationContracts';
+import type {
+  AppPublicationRequestPublic,
+  AppPublicationRequestResponse,
+  AppPublicationRequestSpec,
+} from '../shared/appPublicationContracts';
 
 let csrfToken: string | undefined;
 
@@ -88,6 +93,9 @@ export async function submitPrompt(
     method: 'POST',
     token,
     body: { prompt },
+    acceptErrorResponse: (status, payload): payload is PromptResponse => (
+      status === 409 && isPromptApprovalPendingResponse(payload)
+    ),
   });
 }
 
@@ -136,6 +144,35 @@ export async function revokeProjectProposal(
     { method: 'POST', token, body: {}, requestId: crypto.randomUUID() },
   );
   return response.proposal;
+}
+
+export async function createAppPublicationRequest(
+  token: string | undefined,
+  spec: AppPublicationRequestSpec,
+  idempotencyKey: string,
+): Promise<AppPublicationRequestPublic> {
+  const response = await request<AppPublicationRequestResponse>(
+    '/Roadex/api/app-publication/requests',
+    {
+      method: 'POST',
+      token,
+      body: spec,
+      requestId: crypto.randomUUID(),
+      headers: { 'idempotency-key': idempotencyKey },
+    },
+  );
+  return response.request;
+}
+
+export async function getAppPublicationRequest(
+  token: string | undefined,
+  requestId: string,
+): Promise<AppPublicationRequestPublic> {
+  const response = await request<AppPublicationRequestResponse>(
+    `/Roadex/api/app-publication/requests/${encodeURIComponent(requestId)}`,
+    { token },
+  );
+  return response.request;
 }
 
 export async function submitDeviceDescriptorObservation(
@@ -394,14 +431,16 @@ async function readLiveSessionStream(
   }
 }
 
-type RequestOptions = {
+type RequestOptions<Response> = {
   method?: string;
   token?: string;
   body?: unknown;
   requestId?: string;
+  acceptErrorResponse?: (status: number, payload: unknown) => payload is Response;
+  headers?: Record<string, string>;
 };
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+async function request<T>(path: string, options: RequestOptions<T> = {}): Promise<T> {
   const method = options.method ?? 'GET';
   const response = await fetch(path, {
     method,
@@ -410,6 +449,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
       ...(method !== 'GET' && csrfToken ? { 'x-roadex-csrf': csrfToken } : {}),
       ...(options.requestId ? { 'x-roadex-request-id': options.requestId } : {}),
+      ...options.headers,
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
@@ -419,7 +459,10 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   const payload = (await response.json()) as T | ApiError;
   if (!response.ok || isApiError(payload)) {
-    if (response.status === 409 && !isApiError(payload)) {
+    if (options.acceptErrorResponse?.(response.status, payload)) {
+      return payload;
+    }
+    if (response.status === 409 && !options.acceptErrorResponse && !isApiError(payload)) {
       return payload as T;
     }
     const message = isApiError(payload) ? payload.error.message : `Request failed with status ${response.status}`;
@@ -429,7 +472,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return payload;
 }
 
-async function requestOptional<T>(path: string, options: RequestOptions = {}): Promise<
+async function requestOptional<T>(path: string, options: RequestOptions<T> = {}): Promise<
   | {
       ok: true;
       payload: T;

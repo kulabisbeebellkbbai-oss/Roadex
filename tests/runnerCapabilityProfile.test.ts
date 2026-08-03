@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   CONTROLLED_RUNNER_PROFILE,
+  APPROVAL_WORKFLOW_MCP,
+  APPROVAL_WORKFLOW_SOCKET,
+  APPROVAL_WORKFLOW_TOKEN_DIRECTORY,
+  approvalWorkflowConfigOverrides,
+  CONTROLLED_RUNNER_CONFIG_OVERRIDES,
   resolveRunnerCapabilityProfile,
 } from '../src/server/runnerCapabilityProfile';
 
@@ -14,6 +19,27 @@ function controlledEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 }
 
 describe('resolveRunnerCapabilityProfile', () => {
+  it('always equips managed project turns with a bounded required Playwright MCP', () => {
+    expect(CONTROLLED_RUNNER_CONFIG_OVERRIDES).toContain(
+      'mcp_servers.playwright.required=true',
+    );
+    expect(CONTROLLED_RUNNER_CONFIG_OVERRIDES).toContain(
+      'mcp_servers.playwright.enabled_tools=["browser_navigate","browser_resize","browser_snapshot","browser_evaluate","browser_take_screenshot","browser_console_messages","browser_close"]',
+    );
+  });
+
+  it('equips managed project turns with read-only TheUnderdark discovery tools', () => {
+    expect(CONTROLLED_RUNNER_CONFIG_OVERRIDES).toContain(
+      'mcp_servers.theunderdark.required=true',
+    );
+    expect(CONTROLLED_RUNNER_CONFIG_OVERRIDES).toContain(
+      'mcp_servers.theunderdark.enabled_tools=["underdark_project_get","underdark_root_get","underdark_path_stat","underdark_directory_list","underdark_operation_get","underdark_health_get"]',
+    );
+    expect(CONTROLLED_RUNNER_CONFIG_OVERRIDES.join('\n')).not.toContain(
+      'underdark_file_write',
+    );
+  });
+
   it('defaults to the restricted runner when the gate is not literal true', () => {
     expect(resolveRunnerCapabilityProfile(
       { userId: 'owner', workspaceId: 'roadex' },
@@ -129,5 +155,21 @@ describe('resolveRunnerCapabilityProfile', () => {
         status: 'active',
       },
     })).toEqual({ mode: 'restricted' });
+  });
+
+  it('injects only the workflow MCP override when token file is valid', () => {
+    const tokenFile = `${APPROVAL_WORKFLOW_TOKEN_DIRECTORY}/12345678-1234-1234-1234-123456789abc`;
+    expect(approvalWorkflowConfigOverrides(tokenFile)).toEqual([
+      'mcp_servers.roadex-workflow.command="node"',
+      `mcp_servers.roadex-workflow.args=["${APPROVAL_WORKFLOW_MCP}"]`,
+      `mcp_servers.roadex-workflow.env={ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE="${tokenFile}",ROADEX_APPROVAL_WORKFLOW_SOCKET="${APPROVAL_WORKFLOW_SOCKET}"}`,
+      'mcp_servers.roadex-workflow.required=true',
+      'mcp_servers.roadex-workflow.enabled_tools=["await_human_approval"]',
+      'mcp_servers.roadex-workflow.default_tools_approval_mode="approve"',
+    ]);
+  });
+
+  it('skips malformed workflow token files', () => {
+    expect(approvalWorkflowConfigOverrides('/tmp/invalid-token')).toEqual([]);
   });
 });

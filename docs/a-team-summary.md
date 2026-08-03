@@ -23,6 +23,9 @@ The first priority is a secure, usable browser portal across Windows, macOS, Lin
 - Authentication, authorization, and user/session isolation.
 - Secure audit logging and administrative oversight.
 - Security review gates for sensitive actions.
+- Durable human-approval waits that name the correct Admin or Overview Console
+  and automatically continue the same managed thread only after exact
+  authoritative approval.
 - Later-stage client device and peripheral bridge.
 - Later-stage USB/serial workflows, including ESP32 flashing from Android.
 
@@ -35,6 +38,8 @@ The first priority is a secure, usable browser portal across Windows, macOS, Lin
 - Safely introducing client peripheral access later without weakening the core security boundary.
 - Platform restrictions for USB and device access, especially on iOS and some mobile browsers.
 - Verifying that server-side execution cannot be abused through prompt, terminal, file, or device operations.
+- Preventing stale, unbound, mismatched, or ambiguous approval evidence from
+  resuming a Roadex thread.
 
 ## Security And Verification
 
@@ -51,3 +56,18 @@ Verification should include security-focused tests for authentication, authoriza
 5. Build the browser-first portal shell.
 6. Add session streaming and project workspace interaction.
 7. Defer client device access until the core portal is working and security-reviewed.
+
+## Approved Human-Approval Workflow
+
+Roadex will persist one exact approval wait for a controlled session, clearly
+tell the user whether approval belongs in the Admin Console or Overview
+Console, continue observing it if the browser disconnects, and queue one fixed
+continuation in the same managed thread after an authoritative `approved`
+decision. Roadex cannot grant, infer, dispatch, or alter approval.
+
+The approved limited Overseer compatibility work is source-only: new
+Roadex-owned approval producers may create an immutable project/workspace/
+resource binding in the source plan's original transaction, and Roadex may read
+one exact redacted status projection. Legacy unbound approvals cannot
+auto-resume. Deployment, service restart, live approval changes, provisioning,
+and protected smoke remain separate approval boundaries.
