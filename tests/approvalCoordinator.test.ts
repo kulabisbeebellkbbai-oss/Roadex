@@ -1144,6 +1144,226 @@ describe('ApprovalCoordinator', () => {
     expect(cb.events[0]).toContain('Roadex is waiting');
   });
 
+  it('publishes every active wait transition only after its canonical state persists', async () => {
+    const orderedCallbacks = (
+      wait: ApprovalWaitRecord,
+      queueContinuation: ApprovalCoordinatorCallbacks['queueContinuation'] = async () => ({
+        status: 'started',
+        runnerRunId: 'runner-ordered',
+      }),
+    ): { callbacks: ApprovalCoordinatorCallbacks; order: string[] } => {
+      const order: string[] = [];
+      return {
+        order,
+        callbacks: {
+          persist: () => { order.push(`persist:${wait.state}`); },
+          publish: (_sessionId, message) => { order.push(`publish:${message}`); },
+          audit: () => {},
+          queueContinuation,
+        },
+      };
+    };
+
+    const clock = clockWithState();
+    const delayedWait = fixtureWait({ state: 'pending', nextCheckAt: clock.now(), checkAttempt: 0 });
+    const delayedSession = fixtureSession();
+    bindSessionToWait(delayedSession, delayedWait);
+    let providerAttempt = 0;
+    const delayedCallbacks = orderedCallbacks(delayedWait);
+    const delayedCoordinator = new ApprovalCoordinator(
+      [delayedWait],
+      [delayedSession],
+      {
+        getStatus: async () => {
+          providerAttempt += 1;
+          if (providerAttempt === 1) throw new Error('temporary');
+          return fixtureStatus();
+        },
+      },
+      delayedCallbacks.callbacks,
+      { clock },
+    );
+    await delayedCoordinator.tick();
+    clock.set(BASE.getTime() + 6_000);
+    await delayedCoordinator.tick();
+    expect(delayedCallbacks.order).toEqual([
+      'persist:verification-delayed',
+      'publish:Roadex human approval result: verification-delayed',
+      'persist:pending',
+      'publish:Roadex human approval result: pending',
+    ]);
+
+    const approvedWait = fixtureWait({ state: 'pending', nextCheckAt: clock.now() });
+    const approvedSession = fixtureSession();
+    bindSessionToWait(approvedSession, approvedWait);
+    const approvedCallbacks = orderedCallbacks(approvedWait);
+    await new ApprovalCoordinator(
+      [approvedWait],
+      [approvedSession],
+      statusSequenceProvider([fixtureStatus({ decision: 'approved' })]),
+      approvedCallbacks.callbacks,
+      { clock },
+    ).tick();
+    expect(approvedCallbacks.order).toEqual([
+      'persist:approved-resume-queued',
+      'publish:Roadex human approval result: approved-resume-queued',
+      'persist:resume-dispatching',
+      'publish:Roadex human approval result: resume-dispatching',
+      'persist:resume-dispatching',
+      'publish:Roadex human approval result: resume-dispatching',
+    ]);
+
+    const capacityWait = fixtureWait({ state: 'approved-resume-queued', nextCheckAt: clock.now() });
+    const capacitySession = fixtureSession();
+    bindSessionToWait(capacitySession, capacityWait);
+    const capacityCallbacks = orderedCallbacks(capacityWait, async () => ({
+      status: 'capacity',
+      retryAt: '2026-08-02T18:01:00.000Z',
+    }));
+    await new ApprovalCoordinator(
+      [capacityWait],
+      [capacitySession],
+      statusSequenceProvider([]),
+      capacityCallbacks.callbacks,
+      { clock },
+    ).tick();
+    expect(capacityCallbacks.order).toEqual([
+      'persist:resume-dispatching',
+      'publish:Roadex human approval result: resume-dispatching',
+      'persist:approved-resume-queued',
+      'publish:Roadex human approval result: approved-resume-queued',
+    ]);
+
+    const ambiguousWait = fixtureWait({ state: 'approved-resume-queued', nextCheckAt: clock.now() });
+    const ambiguousSession = fixtureSession();
+    bindSessionToWait(ambiguousSession, ambiguousWait);
+    const ambiguousCallbacks = orderedCallbacks(ambiguousWait, async () => ({ status: 'ambiguous' }));
+    await new ApprovalCoordinator(
+      [ambiguousWait],
+      [ambiguousSession],
+      statusSequenceProvider([]),
+      ambiguousCallbacks.callbacks,
+      { clock },
+    ).tick();
+    expect(ambiguousCallbacks.order).toEqual([
+      'persist:resume-dispatching',
+      'publish:Roadex human approval result: resume-dispatching',
+      'persist:resume-reconciliation-required',
+      'publish:Roadex human approval result: resume-reconciliation-required',
+    ]);
+
+    const bindingWait = fixtureWait({ state: 'approved-resume-queued', nextCheckAt: clock.now() });
+    const bindingSession = fixtureSession();
+    bindSessionToWait(bindingSession, bindingWait);
+    const bindingCallbacks = orderedCallbacks(bindingWait, async () => {
+      bindingSession.managedThreadId = 'thread-drifted';
+      return { status: 'started', runnerRunId: 'runner-binding-loss' };
+    });
+    await new ApprovalCoordinator(
+      [bindingWait],
+      [bindingSession],
+      statusSequenceProvider([]),
+      bindingCallbacks.callbacks,
+      { clock },
+    ).tick();
+    expect(bindingCallbacks.order).toEqual([
+      'persist:resume-dispatching',
+      'publish:Roadex human approval result: resume-dispatching',
+      'persist:resume-reconciliation-required',
+      'publish:Roadex human approval result: resume-reconciliation-required',
+    ]);
+
+    const recoveryWait = fixtureWait({
+      state: 'resume-dispatching',
+      runnerRunId: 'runner-lost',
+      dispatchReservedAt: clock.now(),
+    });
+    const recoverySession = fixtureSession();
+    bindSessionToWait(recoverySession, recoveryWait);
+    const recoveryCallbacks = orderedCallbacks(recoveryWait);
+    await new ApprovalCoordinator(
+      [recoveryWait],
+      [recoverySession],
+      statusSequenceProvider([]),
+      recoveryCallbacks.callbacks,
+      { clock },
+    ).recover();
+    expect(recoveryCallbacks.order).toEqual([
+      'persist:resume-reconciliation-required',
+      'publish:Roadex human approval result: resume-reconciliation-required',
+    ]);
+
+    const failedWait = fixtureWait({ state: 'pending', nextCheckAt: clock.now() });
+    const failedSession = fixtureSession();
+    bindSessionToWait(failedSession, failedWait);
+    const publish = vi.fn();
+    await new ApprovalCoordinator(
+      [failedWait],
+      [failedSession],
+      { getStatus: async () => { throw new Error('temporary'); } },
+      callbacksBuilder({
+        persist: () => { throw new Error('persist failed'); },
+        publish,
+      }).callbacks,
+      { clock },
+    ).tick();
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('creates a fresh queued successor when a closed approval is already approved on reopen', async () => {
+    const clock = clockWithState();
+    const closedWait = fixtureWait({ state: 'session-closed', updatedAt: clock.now(), nextCheckAt: clock.now() });
+    const session = fixtureSession({ lifecycle: 'closed' });
+    session.lifecycle = 'closed';
+    delete session.waitingApproval;
+    const waits = [closedWait];
+    const queueContinuation = vi.fn(async () => ({ status: 'started', runnerRunId: 'runner-reopened' } as const));
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      [session],
+      statusSequenceProvider([fixtureStatus({
+        decision: 'approved',
+        decisionVersion: `sha256:${'e'.repeat(64)}`,
+      })]),
+      { ...callbacksBuilder().callbacks, queueContinuation },
+      { clock, idSource: { generateWaitId: () => 'wait-reopened-approved' } },
+    );
+
+    await expect(coordinator.reopenSessionWait(session.id)).resolves.toBe('waiting');
+
+    expect(waits).toHaveLength(2);
+    expect(closedWait.state).toBe('session-closed');
+    expect(waits[1]).toMatchObject({
+      id: 'wait-reopened-approved',
+      state: 'resume-dispatching',
+      runnerRunId: 'runner-reopened',
+      decisionVersion: `sha256:${'e'.repeat(64)}`,
+    });
+    expect(waits[1].continuationId).not.toBe(closedWait.continuationId);
+    expect(session.lifecycle).toBe('paused');
+    expect(session.waitingApproval?.waitId).toBe('wait-reopened-approved');
+    expect(queueContinuation).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a closed approval session closed when reopen provider verification fails', async () => {
+    const closedWait = fixtureWait({ state: 'session-closed' });
+    const session = fixtureSession({ lifecycle: 'closed' });
+    session.lifecycle = 'closed';
+    delete session.waitingApproval;
+    const waits = [closedWait];
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      [session],
+      { getStatus: async () => { throw new Error('provider unavailable'); } },
+      callbacksBuilder().callbacks,
+      { clock: clockWithState(), idSource: { generateWaitId: () => 'must-not-create' } },
+    );
+
+    await expect(coordinator.reopenSessionWait(session.id)).resolves.toBe('denied');
+    expect(session.lifecycle).toBe('closed');
+    expect(waits).toEqual([closedWait]);
+  });
+
   it('transitions approved wait to resume-dispatching state with persistent dispatch reserve', async () => {
     const clock = clockWithState();
     const waits = [fixtureWait({ nextCheckAt: clock.now(), checkAttempt: 0 })];
@@ -2273,6 +2493,80 @@ describe('ApprovalCoordinator', () => {
     await expect(completion.completeRunner(wait.continuationId, 'runner-1', result)).resolves.toBe(true);
     expect(wait.state).toBe(expectedState);
     expect(session.lifecycle).toBe('paused');
+  });
+
+  it('reconciles a completed runner on a later tick when completion persistence initially fails', async () => {
+    let persistenceAvailable = false;
+    const order: string[] = [];
+    const wait = fixtureWait({
+      state: 'resume-dispatching',
+      runnerRunId: 'runner-persist-retry',
+      dispatchReservedAt: BASE.toISOString(),
+      nextCheckAt: BASE.toISOString(),
+    });
+    const session = fixtureSession();
+    bindSessionToWait(session, wait);
+    const queueContinuation = vi.fn(async () => ({ status: 'started', runnerRunId: 'duplicate' } as const));
+    const coordinator = new ApprovalCoordinator(
+      [wait],
+      [session],
+      statusSequenceProvider([]),
+      {
+        persist: () => {
+          order.push(`persist:${wait.state}`);
+          if (!persistenceAvailable) throw new Error('temporary persistence outage');
+        },
+        publish: (_sessionId, message) => { order.push(`publish:${message}`); },
+        audit: () => {},
+        queueContinuation,
+      },
+      { clock: clockWithState() },
+    );
+
+    await expect(coordinator.completeRunner(wait.continuationId, 'runner-persist-retry', {
+      status: 'succeeded',
+      managedThreadId: 'thread-1',
+    })).resolves.toBe(false);
+    expect(wait.state).toBe('resume-dispatching');
+    expect(wait.runnerRunId).toBe('runner-persist-retry');
+
+    persistenceAvailable = true;
+    order.length = 0;
+    await coordinator.tick();
+
+    expect(wait.state).toBe('resume-reconciliation-required');
+    expect(wait.runnerRunId).toBeUndefined();
+    expect(queueContinuation).not.toHaveBeenCalled();
+    expect(order).toEqual([
+      'persist:resume-reconciliation-required',
+      'publish:Roadex human approval result: resume-reconciliation-required',
+    ]);
+  });
+
+  it.each([
+    ['security-failure', 'security-failure'],
+    ['reconciliation-required', 'resume-reconciliation-required'],
+  ] as const)('moves an active user-run wait through coordinator %s handling', async (outcome, expectedState) => {
+    const wait = fixtureWait({ state: 'pending' });
+    const session = fixtureSession();
+    bindSessionToWait(session, wait);
+    const publish = vi.fn();
+    const coordinator = new ApprovalCoordinator(
+      [wait],
+      [session],
+      statusSequenceProvider([]),
+      callbacksBuilder({ publish }).callbacks,
+      { clock: clockWithState() },
+    );
+
+    await expect(coordinator.failUserRun(session.id, outcome)).resolves.toBe(true);
+
+    expect(wait.state).toBe(expectedState);
+    expect(session.lifecycle).toBe('paused');
+    expect(publish).toHaveBeenCalledWith(
+      session.id,
+      `Roadex human approval result: ${expectedState}`,
+    );
   });
 
   it('recovers dispatching waits to reconciliation without redispatching queued or pending waits', async () => {
