@@ -41,6 +41,10 @@ export type ApprovalContinuationDispatchResult =
   | { status: 'ambiguous' }
   | { status: 'denied'; reason: 'session-closed' | 'thread-mismatch' | 'scope-mismatch' };
 
+export type ApprovalRunnerCompletionResult =
+  | { status: 'succeeded'; managedThreadId: string }
+  | { status: 'failed' };
+
 export type ApprovalCoordinatorStateClock = {
   now: () => string;
 };
@@ -61,6 +65,11 @@ type ApprovalCoordinatorOptions = {
 type PublicWaitState = WaitingApprovalSummary['state'];
 
 type SessionSnapshot = { lifecycle: RoadexSession['lifecycle']; waitingApproval?: WaitingApprovalSummary };
+
+type DispatchAcknowledgement = {
+  persisted: Promise<void>;
+  release: () => void;
+};
 
 const WAIT_BASE_DELAYS_MS = [2000, 5000, 15000, 30000, 60000];
 const OPAQUE_TOKEN_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -117,6 +126,7 @@ export class ApprovalCoordinator {
   readonly #backoffJitter: (attempt: number) => number;
   readonly #sessionGeneration: Map<string, number>;
   readonly #sessionLocks: Map<string, Promise<unknown>>;
+  readonly #dispatchAcknowledgements: Map<string, DispatchAcknowledgement>;
   readonly #waitIdReservations: Set<string>;
   readonly #closedSessionRetirements: ApprovalWaitRecord[];
   #waitIdReservationLock = Promise.resolve();
@@ -139,6 +149,7 @@ export class ApprovalCoordinator {
     this.#backoffJitter = options.backoffJitter ?? (() => 0);
     this.#sessionGeneration = new Map();
     this.#sessionLocks = new Map();
+    this.#dispatchAcknowledgements = new Map();
     this.#waitIdReservations = new Set();
     this.#closedSessionRetirements = [];
 
@@ -479,6 +490,94 @@ export class ApprovalCoordinator {
     }
   }
 
+  async recover(): Promise<void> {
+    if (!await this.#persistClosedSessionRetirements()) {
+      return;
+    }
+
+    const dispatching = [...this.#waits].filter((wait) => wait.state === 'resume-dispatching');
+    for (const wait of dispatching) {
+      const session = this.#sessions.find((entry) => entry.id === wait.sessionId);
+      if (!session || session.lifecycle === 'closed') {
+        continue;
+      }
+      await this.#recoverDispatchingWait(wait, session, true);
+    }
+  }
+
+  async completeRunner(
+    continuationId: string,
+    runnerRunId: string,
+    result: ApprovalRunnerCompletionResult | unknown,
+  ): Promise<boolean> {
+    if (!SHA256_PATTERN.test(continuationId) || !this.#isOpaqueToken(runnerRunId, MAX_RUNNER_RUN_ID_LENGTH)) {
+      return false;
+    }
+    await this.#dispatchAcknowledgements.get(continuationId)?.persisted;
+    const candidate = this.#waits.find((wait) => (
+      wait.continuationId === continuationId
+      && wait.runnerRunId === runnerRunId
+      && wait.state === 'resume-dispatching'
+    ));
+    if (!candidate) {
+      return false;
+    }
+
+    return this.#withSessionLock(candidate.sessionId, async () => {
+      const wait = this.#waits.find((entry) => (
+        entry === candidate
+        && entry.continuationId === continuationId
+        && entry.runnerRunId === runnerRunId
+        && entry.state === 'resume-dispatching'
+      ));
+      const session = this.#sessions.find((entry) => entry.id === candidate.sessionId);
+      if (!wait || !session || session.lifecycle === 'closed') {
+        return false;
+      }
+
+      const sessionBefore = this.snapshotSession(session);
+      const waitBefore = this.snapshotWait(wait);
+      const parsed = this.#safeParseRunnerCompletion(result);
+      const canonical = this.#isDispatchEvidenceCanonical(wait, session);
+      const now = this.#clock.now();
+
+      if (canonical && parsed?.status === 'succeeded' && parsed.managedThreadId === wait.managedThreadId) {
+        wait.state = 'resumed';
+        wait.resumedAt = now;
+      } else if (!canonical || parsed?.status === 'succeeded') {
+        wait.state = 'security-failure';
+        delete wait.resumedAt;
+      } else {
+        wait.state = 'resume-reconciliation-required';
+        delete wait.resumedAt;
+      }
+      wait.updatedAt = now;
+      wait.nextCheckAt = now;
+      delete wait.runnerRunId;
+      delete wait.dispatchReservedAt;
+
+      return this.#persistWaitTransition(
+        session,
+        sessionBefore,
+        wait,
+        waitBefore,
+        () => {
+          this.projectSessionForWait(session);
+        },
+        () => {
+          this.#publish(wait.sessionId, this.#terminalCopy(wait.state));
+          if (wait.state === 'resumed') {
+            this.#audit('approval_wait.resume_completed', 'allowed', this.#auditSummary(wait), wait.sessionId);
+          } else if (wait.state === 'security-failure') {
+            this.#audit('approval_wait.security_failure', 'denied', this.#auditSummary(wait), wait.sessionId);
+          } else {
+            this.#audit('approval_wait.reconciliation_required', 'denied', this.#auditSummary(wait), wait.sessionId);
+          }
+        },
+      );
+    });
+  }
+
   async #persistClosedSessionRetirements(): Promise<boolean> {
     if (this.#closedSessionRetirements.length === 0) {
       return true;
@@ -803,6 +902,7 @@ export class ApprovalCoordinator {
       return;
     }
 
+    const acknowledgement = this.#createDispatchAcknowledgement(wait.continuationId);
     let result: ApprovalContinuationDispatchResult | unknown;
     try {
       result = await this.#callbacks.queueContinuation(wait, buildApprovalContinuation(wait));
@@ -810,19 +910,43 @@ export class ApprovalCoordinator {
       result = { status: 'ambiguous' };
     }
 
-    await this.#withSessionLock(session.id, async () => {
-      if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['resume-dispatching'], true)) {
-        await this.#applyDispatchResultWithBindingLoss(
-          wait,
-          session,
-          result,
-          sessionGeneration,
-        );
-        return;
-      }
+    try {
+      await this.#withSessionLock(session.id, async () => {
+        if (!this.#isCurrentWaitForSession(wait, session, sessionGeneration, ['resume-dispatching'], true)) {
+          await this.#applyDispatchResultWithBindingLoss(
+            wait,
+            session,
+            result,
+            sessionGeneration,
+          );
+          return;
+        }
 
-      await this.#applyDispatchResult(wait, session, result, sessionGeneration);
+        await this.#applyDispatchResult(wait, session, result, sessionGeneration);
+      });
+    } finally {
+      this.#releaseDispatchAcknowledgement(wait.continuationId, acknowledgement);
+    }
+  }
+
+  #createDispatchAcknowledgement(continuationId: string): DispatchAcknowledgement {
+    let release = () => {};
+    const persisted = new Promise<void>((resolve) => {
+      release = resolve;
     });
+    const acknowledgement = { persisted, release };
+    this.#dispatchAcknowledgements.set(continuationId, acknowledgement);
+    return acknowledgement;
+  }
+
+  #releaseDispatchAcknowledgement(
+    continuationId: string,
+    acknowledgement: DispatchAcknowledgement,
+  ): void {
+    acknowledgement.release();
+    if (this.#dispatchAcknowledgements.get(continuationId) === acknowledgement) {
+      this.#dispatchAcknowledgements.delete(continuationId);
+    }
   }
 
   async #applyDispatchResult(
@@ -964,9 +1088,13 @@ export class ApprovalCoordinator {
     }
   }
 
-  async #recoverDispatchingWait(wait: ApprovalWaitRecord, session: RoadexSession): Promise<void> {
+  async #recoverDispatchingWait(
+    wait: ApprovalWaitRecord,
+    session: RoadexSession,
+    startupRecovery = false,
+  ): Promise<void> {
     await this.#withSessionLock(session.id, async () => {
-      if (wait.runnerRunId !== undefined) {
+      if (wait.state !== 'resume-dispatching' || (!startupRecovery && wait.runnerRunId !== undefined)) {
         return;
       }
 
@@ -1251,6 +1379,29 @@ export class ApprovalCoordinator {
   #safeParseDispatchResult(value: unknown): ApprovalContinuationDispatchResult | null {
     try {
       return this.#parseDispatchResult(value);
+    } catch {
+      return null;
+    }
+  }
+
+  #safeParseRunnerCompletion(value: unknown): ApprovalRunnerCompletionResult | null {
+    try {
+      const candidate = this.#readOwnEnumerableDataProperties(value);
+      if (candidate === null) {
+        return null;
+      }
+      const status = candidate.get('status');
+      if (status === 'failed' && this.#hasExactPropertyKeys(candidate, ['status'])) {
+        return { status: 'failed' };
+      }
+      if (status !== 'succeeded' || !this.#hasExactPropertyKeys(candidate, ['status', 'managedThreadId'])) {
+        return null;
+      }
+      const managedThreadId = candidate.get('managedThreadId');
+      if (typeof managedThreadId !== 'string' || !this.#isFieldValid(managedThreadId)) {
+        return null;
+      }
+      return { status: 'succeeded', managedThreadId };
     } catch {
       return null;
     }

@@ -2181,6 +2181,151 @@ describe('ApprovalCoordinator', () => {
     expect(cb.audits.every((audit) => !audit.summary.includes('Restart test service'))).toBe(true);
   });
 
+  it('persists successful runner completion before publishing and ignores duplicate completion', async () => {
+    const order: string[] = [];
+    const wait = fixtureWait({
+      state: 'resume-dispatching',
+      runnerRunId: 'runner-1',
+      dispatchReservedAt: BASE.toISOString(),
+      nextCheckAt: BASE.toISOString(),
+    });
+    const session = fixtureSession();
+    bindSessionToWait(session, wait);
+    const coordinator = new ApprovalCoordinator(
+      [wait],
+      [session],
+      statusSequenceProvider([]),
+      callbacksBuilder({
+        persist: () => { order.push(`persist:${wait.state}`); },
+        publish: () => { order.push(`publish:${wait.state}`); },
+        audit: (action) => { order.push(`audit:${action}`); },
+      }).callbacks,
+      { clock: clockWithState() },
+    );
+    const completion = coordinator as ApprovalCoordinator & {
+      completeRunner?: (
+        continuationId: string,
+        runnerRunId: string,
+        result: { status: 'succeeded'; managedThreadId: string } | { status: 'failed' },
+      ) => Promise<boolean>;
+    };
+
+    expect(typeof completion.completeRunner).toBe('function');
+    if (!completion.completeRunner) return;
+    await expect(completion.completeRunner(wait.continuationId, 'runner-1', {
+      status: 'succeeded',
+      managedThreadId: 'thread-1',
+    })).resolves.toBe(true);
+
+    expect(wait.state).toBe('resumed');
+    expect(wait.resumedAt).toBe(BASE.toISOString());
+    expect(session.lifecycle).toBe('ready');
+    expect(session.waitingApproval).toBeUndefined();
+    expect(order).toEqual([
+      'persist:resumed',
+      'publish:resumed',
+      'audit:approval_wait.resume_completed',
+    ]);
+
+    order.length = 0;
+    await expect(completion.completeRunner(wait.continuationId, 'runner-1', {
+      status: 'succeeded',
+      managedThreadId: 'thread-1',
+    })).resolves.toBe(false);
+    expect(order).toEqual([]);
+  });
+
+  it.each([
+    {
+      result: { status: 'succeeded', managedThreadId: 'other-thread' } as const,
+      expectedState: 'security-failure' as const,
+    },
+    {
+      result: { status: 'failed' } as const,
+      expectedState: 'resume-reconciliation-required' as const,
+    },
+  ])('fails runner completion closed to $expectedState', async ({ result, expectedState }) => {
+    const wait = fixtureWait({
+      state: 'resume-dispatching',
+      runnerRunId: 'runner-1',
+      dispatchReservedAt: BASE.toISOString(),
+      nextCheckAt: BASE.toISOString(),
+    });
+    const session = fixtureSession();
+    bindSessionToWait(session, wait);
+    const coordinator = new ApprovalCoordinator(
+      [wait],
+      [session],
+      statusSequenceProvider([]),
+      callbacksBuilder().callbacks,
+      { clock: clockWithState() },
+    );
+    const completion = coordinator as ApprovalCoordinator & {
+      completeRunner?: (
+        continuationId: string,
+        runnerRunId: string,
+        completionResult: typeof result,
+      ) => Promise<boolean>;
+    };
+
+    expect(typeof completion.completeRunner).toBe('function');
+    if (!completion.completeRunner) return;
+    await expect(completion.completeRunner(wait.continuationId, 'runner-1', result)).resolves.toBe(true);
+    expect(wait.state).toBe(expectedState);
+    expect(session.lifecycle).toBe('paused');
+  });
+
+  it('recovers dispatching waits to reconciliation without redispatching queued or pending waits', async () => {
+    const dispatching = fixtureWait({
+      state: 'resume-dispatching',
+      runnerRunId: 'runner-before-restart',
+      dispatchReservedAt: BASE.toISOString(),
+      nextCheckAt: '2026-08-02T19:00:00.000Z',
+    });
+    const queued = fixtureWait({
+      id: 'wait-2',
+      sessionId: 'session-2',
+      userId: 'user-2',
+      approvalRef: 'admin.roadex.queued',
+      state: 'approved-resume-queued',
+      continuationId: deriveContinuationId('session-2', 'admin.roadex.queued', `sha256:${'a'.repeat(64)}`),
+      nextCheckAt: '2026-08-02T19:00:00.000Z',
+    });
+    const pending = fixtureWait({
+      id: 'wait-3',
+      sessionId: 'session-3',
+      userId: 'user-3',
+      approvalRef: 'admin.roadex.pending',
+      state: 'pending',
+      continuationId: deriveContinuationId('session-3', 'admin.roadex.pending', `sha256:${'a'.repeat(64)}`),
+      nextCheckAt: '2026-08-02T19:00:00.000Z',
+    });
+    const sessions = [
+      fixtureSession({ id: 'session-1', userId: 'user-1' }),
+      fixtureSession({ id: 'session-2', userId: 'user-2' }),
+      fixtureSession({ id: 'session-3', userId: 'user-3' }),
+    ];
+    [dispatching, queued, pending].forEach((wait, index) => bindSessionToWait(sessions[index], wait));
+    const queue = vi.fn(async () => ({ status: 'started', runnerRunId: 'unexpected' } as const));
+    const coordinator = new ApprovalCoordinator(
+      [dispatching, queued, pending],
+      sessions,
+      statusSequenceProvider([]),
+      { ...callbacksBuilder().callbacks, queueContinuation: queue },
+      { clock: clockWithState() },
+    );
+    const recovering = coordinator as ApprovalCoordinator & { recover?: () => Promise<void> };
+
+    expect(typeof recovering.recover).toBe('function');
+    if (!recovering.recover) return;
+    await recovering.recover();
+
+    expect(dispatching.state).toBe('resume-reconciliation-required');
+    expect(queued.state).toBe('approved-resume-queued');
+    expect(pending.state).toBe('pending');
+    expect(queue).not.toHaveBeenCalled();
+  });
+
   it('prevents overlapping ticks from double dispatching', async () => {
     const clock = clockWithState();
     const waits = [fixtureWait({ state: 'approved-resume-queued', nextCheckAt: clock.now() })];

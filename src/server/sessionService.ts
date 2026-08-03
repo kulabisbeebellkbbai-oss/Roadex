@@ -88,6 +88,33 @@ import type {
   RunnerCapabilityContext,
 } from './runnerCapabilityProfile.js';
 import type { ControlledOperationGrantIssueContext } from './controlledOperationGrantIssuer.js';
+import type {
+  ApprovalCoordinator,
+  ApprovalCoordinatorCallbacks,
+  ApprovalRunnerCompletionResult,
+  ApprovalSessionCapability,
+} from './approvalCoordinator.js';
+import { buildApprovalContinuation } from './approvalContinuation.js';
+import type { ApprovalWorkflowGrantBroker } from './approvalWorkflowGrantBroker.js';
+import {
+  isActiveApprovalWait,
+  type ApprovalWaitRecord,
+} from '../shared/approvalWorkflowContracts.js';
+
+export type ApprovalWorkflowRunRuntime = {
+  beginRun: (capability: ApprovalSessionCapability) => { token: string; runId: string };
+  completeRun: (runId: string) => void;
+  resolveRunContext: (runId: string) => ApprovalSessionCapability | undefined;
+  revokeOutstanding: () => void;
+};
+
+export type PromptSubmissionResult = PromptAcceptedResponse | {
+  accepted: false;
+  error: {
+    code: 'human-approval-pending';
+    message: 'This session is waiting for human approval.';
+  };
+};
 
 export type RoadexState = {
   sessions: SessionStore;
@@ -112,6 +139,8 @@ export type RoadexState = {
   usbDeviceProfiles: UsbDeviceProfile[];
   resolveControlledRunnerGrant: (context: RunnerCapabilityContext) => ControlledRunnerGrant | undefined;
   issueControlledOperationToken: (context: ControlledOperationGrantIssueContext) => string | undefined;
+  approvalWaits: ApprovalWaitRecord[];
+  approvalWorkflowRuntime?: ApprovalWorkflowRunRuntime;
 };
 
 type StreamSubscriber = {
@@ -196,6 +225,7 @@ export function createInitialState(
     maxActiveRuns: Number(process.env.ROADEX_MAX_ACTIVE_RUNS ?? 2),
     maxActiveSessionsPerUser: readPositiveInteger(process.env.ROADEX_MAX_ACTIVE_SESSIONS_PER_USER, 8),
     managedThreadClaims,
+    approvalWaits: persisted.approvalWaits,
     deviceArtifacts: new Map(persisted.deviceArtifacts.map((record) => [record.id, record])),
     deviceBridgeRequests: new Map(persisted.deviceBridgeRequests.map((record) => [record.id, record])),
     deviceBridgeApprovals: new Map(persisted.deviceBridgeApprovals.map((record) => [record.id, record])),
@@ -205,6 +235,315 @@ export function createInitialState(
     resolveControlledRunnerGrant: () => undefined,
     issueControlledOperationToken: () => undefined,
     ...deviceProfiles,
+  };
+}
+
+type ApprovalWorkflowGrantBrokerPort = Pick<ApprovalWorkflowGrantBroker, 'issue' | 'revokeRun'>;
+
+export function createApprovalWorkflowRunRuntime(
+  broker: ApprovalWorkflowGrantBrokerPort,
+  options: { runIdSource?: () => string } = {},
+): ApprovalWorkflowRunRuntime {
+  const contexts = new Map<string, ApprovalSessionCapability>();
+  const runIdSource = options.runIdSource ?? (() => `approval-run-${randomUUID()}`);
+  return {
+    beginRun(capability) {
+      const runId = runIdSource();
+      if (contexts.has(runId)) {
+        throw new Error('approval_workflow_run_invalid');
+      }
+      const grant = broker.issue({
+        userId: capability.userId,
+        sessionId: capability.sessionId,
+        workspaceId: capability.workspaceId,
+        managedThreadId: capability.managedThreadId,
+        runId,
+      });
+      contexts.set(runId, { ...capability });
+      return { token: grant.token, runId };
+    },
+    completeRun(runId) {
+      try {
+        broker.revokeRun(runId);
+      } finally {
+        contexts.delete(runId);
+      }
+    },
+    resolveRunContext(runId) {
+      const context = contexts.get(runId);
+      return context ? { ...context } : undefined;
+    },
+    revokeOutstanding() {
+      for (const runId of [...contexts.keys()]) {
+        try {
+          broker.revokeRun(runId);
+        } finally {
+          contexts.delete(runId);
+        }
+      }
+    },
+  };
+}
+
+export function createApprovalContinuationDispatcher(
+  state: RoadexState,
+  dependencies: {
+    completeRunner: (
+      continuationId: string,
+      runnerRunId: string,
+      result: ApprovalRunnerCompletionResult,
+    ) => Promise<boolean>;
+    now?: () => string;
+  },
+): ApprovalCoordinatorCallbacks['queueContinuation'] {
+  const now = dependencies.now ?? (() => new Date().toISOString());
+  return async (wait, prompt) => {
+    const session = state.sessions.sessions.find((candidate) => candidate.id === wait.sessionId);
+    const liveWait = state.approvalWaits.find((candidate) => candidate === wait);
+    if (!session || !liveWait || session.lifecycle === 'closed') {
+      return { status: 'denied', reason: 'session-closed' };
+    }
+
+    let fixedPrompt: string;
+    try {
+      fixedPrompt = buildApprovalContinuation(liveWait);
+    } catch {
+      return { status: 'denied', reason: 'scope-mismatch' };
+    }
+    if (prompt !== fixedPrompt) {
+      return { status: 'denied', reason: 'scope-mismatch' };
+    }
+    if (
+      session.userId !== liveWait.userId
+      || session.workspace.id !== liveWait.workspaceId
+      || session.managedThreadId !== liveWait.managedThreadId
+      || session.codexThreadId !== liveWait.managedThreadId
+      || session.lifecycle !== 'paused'
+      || session.waitingApproval?.waitId !== liveWait.id
+      || session.waitingApproval.state !== 'resume-dispatching'
+      || liveWait.state !== 'resume-dispatching'
+    ) {
+      return { status: 'denied', reason: 'thread-mismatch' };
+    }
+    if (state.activeRuns.size >= state.maxActiveRuns) {
+      const nowMs = Date.parse(now());
+      const retryAt = Number.isFinite(nowMs)
+        ? new Date(nowMs + 2_000).toISOString()
+        : new Date(Date.now() + 2_000).toISOString();
+      return { status: 'capacity', retryAt };
+    }
+
+    let capabilityGrant: ControlledRunnerGrant | undefined;
+    try {
+      capabilityGrant = state.resolveControlledRunnerGrant({
+        userId: session.userId,
+        workspaceId: session.workspace.id,
+        workspaceRoot: session.workspace.root,
+        managedThreadId: session.managedThreadId,
+        codexThreadId: session.codexThreadId,
+      });
+    } catch {
+      capabilityGrant = undefined;
+    }
+    if (
+      !capabilityGrant
+      || capabilityGrant.status !== 'active'
+      || capabilityGrant.userId !== liveWait.userId
+      || capabilityGrant.workspaceId !== liveWait.workspaceId
+      || capabilityGrant.workspaceRoot !== session.workspace.root
+      || capabilityGrant.managedThreadId !== liveWait.managedThreadId
+      || !state.approvalWorkflowRuntime
+    ) {
+      return { status: 'denied', reason: 'scope-mismatch' };
+    }
+
+    let workflowRun: { token: string; runId: string };
+    try {
+      workflowRun = state.approvalWorkflowRuntime.beginRun({
+        sessionId: liveWait.sessionId,
+        userId: liveWait.userId,
+        projectId: liveWait.projectId,
+        workspaceId: liveWait.workspaceId,
+        resourceRef: liveWait.resourceRef,
+        managedThreadId: liveWait.managedThreadId,
+      });
+    } catch {
+      return { status: 'ambiguous' };
+    }
+
+    const controller = new AbortController();
+    const bufferedEvents: StreamEvent[] = [];
+    let runnerPromise: Promise<ReturnType<SessionRunner['runPrompt']> extends Promise<infer Result> ? Result : never>;
+    try {
+      state.activeRuns.set(session.id, controller);
+      session.runActivity = {
+        status: 'working',
+        startedAt: now(),
+        lastObservedAt: now(),
+      };
+      touchSession(session);
+      appendAudit(
+        state.audit,
+        approvalCoordinatorActor(),
+        'session.prompt',
+        session.id,
+        'allowed',
+        'Started fixed approval continuation.',
+      );
+      addAndPublishStreamEvents(state, [
+        createStreamEvent(session.id, 'system', 'Roadex is resuming after verified human approval.'),
+      ]);
+      runnerPromise = state.runner.runPrompt({
+        session,
+        prompt: fixedPrompt,
+        signal: controller.signal,
+        capabilityGrant,
+        approvalWorkflowToken: workflowRun.token,
+        runId: workflowRun.runId,
+        onActivity: () => {
+          if (!session.runActivity) return;
+          session.runActivity.lastObservedAt = now();
+          touchSession(session);
+        },
+        onEvent: (event) => {
+          if (event.kind === 'assistant') {
+            bufferedEvents.push(event);
+          }
+        },
+      });
+    } catch {
+      state.activeRuns.delete(session.id);
+      session.runActivity = undefined;
+      try {
+        state.approvalWorkflowRuntime.completeRun(workflowRun.runId);
+      } catch {
+        // The dispatch result remains fail-closed and carries no cleanup detail.
+      }
+      try {
+        saveState(state);
+      } catch {
+        // The coordinator retains the durable dispatch reservation.
+      }
+      return { status: 'ambiguous' };
+    }
+
+    void runnerPromise
+      .then(async (result) => {
+        const completion: ApprovalRunnerCompletionResult = result.ok && result.codexThreadId
+          ? { status: 'succeeded', managedThreadId: result.codexThreadId }
+          : { status: 'failed' };
+        const completed = await dependencies.completeRunner(
+          liveWait.continuationId,
+          workflowRun.runId,
+          completion,
+        );
+        if (completed && bufferedEvents.length > 0) {
+          addAndPublishStreamEvents(state, bufferedEvents);
+        }
+      })
+      .catch(async () => {
+        await dependencies.completeRunner(
+          liveWait.continuationId,
+          workflowRun.runId,
+          { status: 'failed' },
+        );
+      })
+      .finally(() => {
+        state.activeRuns.delete(session.id);
+        session.runActivity = undefined;
+        state.approvalWorkflowRuntime?.completeRun(workflowRun.runId);
+        touchSession(session);
+        saveState(state);
+      });
+
+    return { status: 'started', runnerRunId: workflowRun.runId };
+  };
+}
+
+export function createApprovalCoordinatorCallbacks(
+  state: RoadexState,
+  queueContinuation: ApprovalCoordinatorCallbacks['queueContinuation'],
+): ApprovalCoordinatorCallbacks {
+  return {
+    persist: () => saveState(state),
+    publish: (sessionId, message) => {
+      addAndPublishStreamEvents(state, [createStreamEvent(sessionId, 'system', message)]);
+    },
+    audit: (action, outcome, summary, resource) => {
+      appendAudit(state.audit, approvalCoordinatorActor(), action, resource, outcome, summary);
+      saveState(state);
+    },
+    queueContinuation,
+  };
+}
+
+type ApprovalPollHandle = { unref: () => unknown };
+type ApprovalPollScheduler = (callback: () => void, intervalMs: number) => ApprovalPollHandle;
+
+export function resolveApprovalPollMs(value: string | undefined): number {
+  if (value === undefined || !/^[0-9]+$/.test(value)) {
+    return 2_000;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 250 && parsed <= 60_000 ? parsed : 2_000;
+}
+
+export function startApprovalPoller(
+  coordinator: Pick<ApprovalCoordinator, 'tick'>,
+  intervalMs: number,
+  schedule: ApprovalPollScheduler = (callback, delay) => setInterval(callback, delay),
+): ApprovalPollHandle {
+  const timer = schedule(() => {
+    void coordinator.tick().catch(() => undefined);
+  }, intervalMs);
+  timer.unref();
+  return timer;
+}
+
+export function createApprovalShutdown(dependencies: {
+  stopPolling: () => void;
+  closeWorkflowHost: () => Promise<void>;
+  revokeOutstandingGrants: () => void;
+  closeHttpServer: () => Promise<void>;
+}): () => Promise<void> {
+  let shutdown: Promise<void> | undefined;
+  return () => {
+    shutdown ??= (async () => {
+      let failed = false;
+      try {
+        dependencies.stopPolling();
+      } catch {
+        failed = true;
+      }
+      try {
+        await dependencies.closeWorkflowHost();
+      } catch {
+        failed = true;
+      }
+      try {
+        dependencies.revokeOutstandingGrants();
+      } catch {
+        failed = true;
+      }
+      try {
+        await dependencies.closeHttpServer();
+      } catch {
+        failed = true;
+      }
+      if (failed) {
+        throw new Error('approval_shutdown_failed');
+      }
+    })();
+    return shutdown;
+  };
+}
+
+function approvalCoordinatorActor(): UserProfile {
+  return {
+    id: 'roadex-approval-coordinator',
+    displayName: 'Roadex Approval Coordinator',
+    authMode: 'protected-gateway',
+    roles: ['user'],
   };
 }
 
@@ -374,9 +713,32 @@ export function submitPrompt(
   user: UserProfile,
   sessionId: string,
   prompt: string,
-): PromptAcceptedResponse | undefined {
+): PromptSubmissionResult | undefined {
   const session = getOwnedSession(state.sessions, user.id, sessionId);
-  if (!session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle === 'closed' || session.lifecycle === 'blocked' || session.lifecycle === 'streaming') {
+  if (!session || !isManagedSessionAuthorized(state, user, session)) {
+    appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Session is unavailable to this user.');
+    saveState(state);
+    return undefined;
+  }
+  if (state.approvalWaits.some((wait) => wait.sessionId === session.id && isActiveApprovalWait(wait.state))) {
+    appendAudit(
+      state.audit,
+      user,
+      'security.denied',
+      sessionId,
+      'denied',
+      'Prompt denied while human approval is pending.',
+    );
+    saveState(state);
+    return {
+      accepted: false,
+      error: {
+        code: 'human-approval-pending',
+        message: 'This session is waiting for human approval.',
+      },
+    };
+  }
+  if (session.lifecycle === 'closed' || session.lifecycle === 'blocked' || session.lifecycle === 'streaming') {
     appendAudit(state.audit, user, 'security.denied', sessionId, 'denied', 'Session is unavailable to this user.');
     saveState(state);
     return undefined;
@@ -431,6 +793,35 @@ export function submitPrompt(
       'Issued a short-lived controlled operation grant.',
     );
   }
+  let approvalWorkflowRun: { token: string; runId: string } | undefined;
+  if (
+    capabilityGrant
+    && state.approvalWorkflowRuntime
+    && session.managedThreadId
+    && session.codexThreadId === session.managedThreadId
+  ) {
+    try {
+      approvalWorkflowRun = state.approvalWorkflowRuntime.beginRun({
+        sessionId: session.id,
+        userId: session.userId,
+        projectId: session.workspace.id,
+        workspaceId: session.workspace.id,
+        resourceRef: capabilityGrant.operationId,
+        managedThreadId: session.managedThreadId,
+      });
+    } catch {
+      appendAudit(
+        state.audit,
+        user,
+        'security.denied',
+        sessionId,
+        'denied',
+        'Approval workflow authorization is unavailable.',
+      );
+      saveState(state);
+      return undefined;
+    }
+  }
 
   session.lifecycle = 'streaming';
   const runStartedAt = new Date().toISOString();
@@ -458,6 +849,8 @@ export function submitPrompt(
       signal: controller.signal,
       capabilityGrant,
       controlledOperationToken,
+      approvalWorkflowToken: approvalWorkflowRun?.token,
+      runId: approvalWorkflowRun?.runId,
       onActivity: () => {
         if (session.lifecycle !== 'streaming' || !session.runActivity) return;
         session.runActivity.lastObservedAt = new Date().toISOString();
@@ -523,6 +916,9 @@ export function submitPrompt(
     })
     .finally(() => {
       state.activeRuns.delete(session.id);
+      if (approvalWorkflowRun) {
+        state.approvalWorkflowRuntime?.completeRun(approvalWorkflowRun.runId);
+      }
       saveState(state);
     });
   saveState(state);
@@ -2573,6 +2969,7 @@ function saveState(state: RoadexState): void {
     streamEvents: state.sessions.streamEvents,
     auditEvents: state.audit.events,
     managedThreadClaims: [...state.managedThreadClaims.values()],
+    approvalWaits: state.approvalWaits,
     deviceArtifacts: [...state.deviceArtifacts.values()],
     deviceBridgeRequests: [...state.deviceBridgeRequests.values()],
     deviceBridgeApprovals: [...state.deviceBridgeApprovals.values()],
@@ -2595,6 +2992,7 @@ function persistStateSnapshot(
     streamEvents: StreamEvent[];
     auditEvents: AuditEvent[];
     managedThreadClaims: ManagedThreadClaim[];
+    approvalWaits: ApprovalWaitRecord[];
     deviceArtifacts: DeviceArtifactMetadata[];
     deviceBridgeRequests: DeviceBridgeRequestRecord[];
     deviceBridgeApprovals: DeviceBridgeApprovalRecord[];
@@ -2608,6 +3006,7 @@ function persistStateSnapshot(
     streamEvents: overrides.streamEvents ?? state.sessions.streamEvents,
     auditEvents: overrides.auditEvents ?? state.audit.events,
     managedThreadClaims: overrides.managedThreadClaims ?? [...state.managedThreadClaims.values()],
+    approvalWaits: overrides.approvalWaits ?? state.approvalWaits,
     deviceArtifacts: overrides.deviceArtifacts ?? [...state.deviceArtifacts.values()],
     deviceBridgeRequests: overrides.deviceBridgeRequests ?? [...state.deviceBridgeRequests.values()],
     deviceBridgeApprovals: overrides.deviceBridgeApprovals ?? [...state.deviceBridgeApprovals.values()],

@@ -1,6 +1,15 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { once } from 'node:events';
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+} from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { extname, isAbsolute, join, normalize } from 'node:path';
 import { authenticate, gatewayAuthRequired, mockAuthToken, mockUser } from '../src/server/authService.js';
 import {
   bootstrap,
@@ -10,6 +19,10 @@ import {
   closeSession,
   createDeviceInventoryBinding,
   createInitialState,
+  createApprovalContinuationDispatcher,
+  createApprovalCoordinatorCallbacks,
+  createApprovalShutdown,
+  createApprovalWorkflowRunRuntime,
   createSessionFromApi,
   listDeviceArtifactMetadata,
   listArchivedSessions,
@@ -28,6 +41,8 @@ import {
   streamEventsForSession,
   submitPrompt,
   submitDeviceBridgeProbe,
+  resolveApprovalPollMs,
+  startApprovalPoller,
 } from '../src/server/sessionService.js';
 import {
   isAvailableDeviceBridgeIntakeRoute,
@@ -42,6 +57,10 @@ import { ProjectCreationBroker, type TeamEvidence } from '../src/server/projectC
 import { isAvailableProjectCreationRoute } from '../src/server/projectCreationPolicy.js';
 import { ProjectCreationWorker } from '../src/server/projectCreationWorker.js';
 import { createControlledOperationGrantIssuer } from '../src/server/controlledOperationGrantIssuer.js';
+import { createOverseerApprovalStatusProvider } from '../src/server/approvalStatusProvider.js';
+import { ApprovalCoordinator } from '../src/server/approvalCoordinator.js';
+import { ApprovalWorkflowGrantBroker } from '../src/server/approvalWorkflowGrantBroker.js';
+import { startApprovalWorkflowHost } from '../src/server/approvalWorkflowHost.js';
 
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8780);
@@ -72,8 +91,9 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(port, host, () => {
-  console.log(`Roadex API listening at http://${host}:${port}`);
+void startRoadexApi().catch(() => {
+  console.error('Roadex API startup failed.');
+  process.exitCode = 1;
 });
 
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -177,7 +197,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Session not found.' } });
       return;
     }
-    sendJson(res, 202, result);
+    sendJson(res, result.accepted ? 202 : 409, result);
     return;
   }
 
@@ -579,5 +599,113 @@ function contentType(path: string): string {
       return 'image/svg+xml';
     default:
       return 'application/octet-stream';
+  }
+}
+
+async function startRoadexApi(): Promise<void> {
+  const grantBroker = new ApprovalWorkflowGrantBroker();
+  const workflowRuntime = createApprovalWorkflowRunRuntime(grantBroker);
+  state.approvalWorkflowRuntime = workflowRuntime;
+  const provider = createOverseerApprovalStatusProvider({
+    readToken: readApprovalStatusToken,
+  });
+  const coordinatorRef: { current?: ApprovalCoordinator } = {};
+  const queueContinuation = createApprovalContinuationDispatcher(state, {
+    completeRunner: (...args) => {
+      if (!coordinatorRef.current) {
+        throw new Error('approval_coordinator_unavailable');
+      }
+      return coordinatorRef.current.completeRunner(...args);
+    },
+  });
+  const coordinator = new ApprovalCoordinator(
+    state.approvalWaits,
+    state.sessions.sessions,
+    provider,
+    createApprovalCoordinatorCallbacks(state, queueContinuation),
+  );
+  coordinatorRef.current = coordinator;
+  const workflowHost = startApprovalWorkflowHost({
+    consumeGrant: (token) => grantBroker.consume(token),
+    resolveRunContext: (runId) => workflowRuntime.resolveRunContext(runId),
+    registerApprovalWait: (capability, input) => coordinator.register(capability, input),
+  });
+  await once(workflowHost, 'listening');
+  await coordinator.recover();
+
+  const poller = startApprovalPoller(
+    coordinator,
+    resolveApprovalPollMs(process.env.ROADEX_APPROVAL_POLL_MS),
+  );
+  const shutdown = createApprovalShutdown({
+    stopPolling: () => clearInterval(poller as ReturnType<typeof setInterval>),
+    closeWorkflowHost: () => new Promise<void>((resolveClose, rejectClose) => {
+      workflowHost.close((error?: Error) => {
+        if (error) {
+          rejectClose(new Error('approval_workflow_host_close_failed'));
+          return;
+        }
+        resolveClose();
+      });
+    }),
+    revokeOutstandingGrants: () => workflowRuntime.revokeOutstanding(),
+    closeHttpServer: () => new Promise<void>((resolveClose, rejectClose) => {
+      server.close((error?: Error) => {
+        if (error) {
+          rejectClose(new Error('roadex_http_close_failed'));
+          return;
+        }
+        resolveClose();
+      });
+    }),
+  });
+  const handleSignal = (): void => {
+    void shutdown().catch(() => {
+      process.exitCode = 1;
+    });
+  };
+  process.once('SIGTERM', handleSignal);
+  process.once('SIGINT', handleSignal);
+
+  server.listen(port, host, () => {
+    console.log(`Roadex API listening at http://${host}:${port}`);
+  });
+}
+
+function readApprovalStatusToken(): string {
+  const path = process.env.ROADEX_OVERSEER_APPROVAL_TOKEN_FILE;
+  if (!path || !isAbsolute(path) || path.includes('\0')) {
+    throw new Error('approval_status_token_unavailable');
+  }
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const descriptorStat = fstatSync(descriptor);
+    const pathStat = lstatSync(path);
+    if (
+      !descriptorStat.isFile()
+      || !pathStat.isFile()
+      || pathStat.isSymbolicLink()
+      || descriptorStat.uid !== process.getuid?.()
+      || pathStat.uid !== descriptorStat.uid
+      || pathStat.dev !== descriptorStat.dev
+      || pathStat.ino !== descriptorStat.ino
+      || (descriptorStat.mode & 0o077) !== 0
+      || descriptorStat.size < 1
+      || descriptorStat.size > 256
+    ) {
+      throw new Error('approval_status_token_unavailable');
+    }
+    const token = readFileSync(descriptor, 'utf8').trim();
+    if (token.length === 0) {
+      throw new Error('approval_status_token_unavailable');
+    }
+    return token;
+  } catch {
+    throw new Error('approval_status_token_unavailable');
+  } finally {
+    if (descriptor !== undefined) {
+      closeSync(descriptor);
+    }
   }
 }
