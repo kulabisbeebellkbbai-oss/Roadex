@@ -14,6 +14,9 @@ describe('controlled Overseer MCP adapter', () => {
       'service_status',
       'remote_testing_status',
       'record_crew_message',
+      'get_crew_request',
+      'list_crew_requests',
+      'resubmit_crew_request',
     ]);
     const { client, close } = await connectedClient(() => ({ ok: true }));
     try {
@@ -65,8 +68,6 @@ describe('controlled Overseer MCP adapter', () => {
           'high',
           '--requested-by',
           'Roadex-controlled-runner',
-          '--related-resource-id',
-          'roadex.controlled-runner',
         ],
       ]);
     } finally {
@@ -94,6 +95,26 @@ describe('controlled Overseer MCP adapter', () => {
       });
       expect(invalid.isError).toBe(true);
       expect(calls).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+
+  it('allows a Roadex correction to update bounded review linkage and evidence', async () => {
+    const calls: string[][] = [];
+    const { client, close } = await connectedClient((args) => { calls.push(args); return { ok: true }; });
+    try {
+      await client.callTool({ name: 'resubmit_crew_request', arguments: {
+        messageId: 'crew.odo-ids.original',
+        subject: 'Corrected IDS review',
+        message: 'Review the linked staged plan.',
+        relatedPlanId: 'admin.donuthole.route',
+        acceptanceCriteria: ['accepted IDS advisory is linked'],
+        evidenceIds: ['ids-review.admin.donuthole.route'],
+      }});
+      expect(calls[0]).toContain('--related-plan-id');
+      expect(calls[0]).toContain('admin.donuthole.route');
+      expect(calls[0].filter((item) => item === '--expected-requester')).toHaveLength(2);
     } finally {
       await close();
     }

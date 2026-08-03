@@ -42,6 +42,8 @@ import { ProjectCreationBroker, type TeamEvidence } from '../src/server/projectC
 import { isAvailableProjectCreationRoute } from '../src/server/projectCreationPolicy.js';
 import { ProjectCreationWorker } from '../src/server/projectCreationWorker.js';
 import { createControlledOperationGrantIssuer } from '../src/server/controlledOperationGrantIssuer.js';
+import { AppPublicationRequester } from '../src/server/appPublicationRequester.js';
+import { isAvailableAppPublicationRoute } from '../src/server/appPublicationPolicy.js';
 
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8780);
@@ -49,6 +51,7 @@ const liveStreamKeepaliveMs = resolveLiveStreamKeepaliveMs(process.env.ROADEX_SS
 const state = createInitialState();
 let projectCreationBroker: ProjectCreationBroker | undefined;
 let projectCreationWorker: ProjectCreationWorker | undefined;
+let appPublicationRequester: AppPublicationRequester | undefined;
 state.resolveControlledRunnerGrant = (context) =>
   getProjectCreationBroker().resolveControlledRunnerGrant({
     userId: context.userId,
@@ -147,6 +150,48 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (req.method === 'POST' && action === 'revoke') {
       const result = broker.revoke(auth.user, proposalId);
       sendJson(res, result ? 200 : 403, result ? { ok: true, proposal: result } : projectCreationDenied());
+      return;
+    }
+  }
+
+  if (url.search === '' && isAvailableAppPublicationRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const requester = getAppPublicationRequester();
+    if (req.method === 'POST' && url.pathname === '/api/app-publication/requests') {
+      if (!isJsonRequest(req)) {
+        sendJson(res, 415, { error: { code: 'unsupported_media_type', message: 'JSON content type is required.' } });
+        return;
+      }
+      const keyHeader = req.headers['idempotency-key'];
+      const key = typeof keyHeader === 'string' ? keyHeader : undefined;
+      const result = requester.create(auth.user, key, await readJson<unknown>(req, 32_768));
+      if (result.outcome === 'created' || result.outcome === 'replayed') {
+        sendJson(res, result.outcome === 'created' ? 201 : 200, {
+          ok: true,
+          request: result.request,
+          replayed: result.outcome === 'replayed',
+        });
+        return;
+      }
+      if (result.outcome === 'conflict') {
+        sendJson(res, 409, {
+          ok: false,
+          error: {
+            code: 'idempotency_conflict',
+            message: 'The idempotency key is already bound to a different publication request.',
+            gate: 'app-publication',
+          },
+        });
+        return;
+      }
+      sendJson(res, 403, appPublicationDenied());
+      return;
+    }
+    const match = url.pathname.match(/^\/api\/app-publication\/requests\/([A-Za-z0-9_-]{1,128})$/);
+    if (req.method === 'GET' && match) {
+      const request = requester.get(auth.user, match[1]);
+      sendJson(res, request ? 200 : 404, request ? { ok: true, request } : appPublicationDenied());
       return;
     }
   }
@@ -521,12 +566,34 @@ function getProjectCreationWorker(): ProjectCreationWorker {
   return projectCreationWorker;
 }
 
+function getAppPublicationRequester(): AppPublicationRequester {
+  appPublicationRequester ??= new AppPublicationRequester({
+    workspaceBelongsToProject(userId, projectId, workspaceId) {
+      return projectId === workspaceId && state.sessions.sessions.some((session) => (
+        session.userId === userId && session.workspace.id === workspaceId
+      ));
+    },
+  });
+  return appPublicationRequester;
+}
+
 function projectCreationDenied(): { ok: false; error: { code: string; message: string } } {
   return {
     ok: false,
     error: {
       code: 'project_creation_denied',
       message: 'Project creation request denied.',
+    },
+  };
+}
+
+function appPublicationDenied(): { ok: false; error: { code: string; message: string; gate: string } } {
+  return {
+    ok: false,
+    error: {
+      code: 'app_publication_denied',
+      message: 'App publication request denied.',
+      gate: 'app-publication',
     },
   };
 }

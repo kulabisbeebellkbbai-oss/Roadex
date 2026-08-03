@@ -6,6 +6,55 @@ describe('Roadex client CSRF contract', () => {
     vi.resetModules();
   });
 
+  it('creates and retrieves publication requests without exposing an activation call', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input);
+      calls.push({ path, init });
+      return new Response(JSON.stringify({
+        ok: true,
+        request: {
+          id: 'app-publication-1',
+          contractVersion: 'roadex.app-publication.v1',
+          spec,
+          status: 'submitted',
+          createdAt: new Date(0).toISOString(),
+          updatedAt: new Date(0).toISOString(),
+          gates: { gatewayReview: 'pending', idsReview: 'pending', activationApproval: 'pending' },
+          gateway: {},
+        },
+      }), { status: path.endsWith('/requests') ? 201 : 200, headers: { 'content-type': 'application/json' } });
+    }));
+    const spec = {
+      contractVersion: 'roadex.app-publication.v1',
+      project: { projectId: 'donuthole', projectName: 'DonutHole' },
+      workspace: { workspaceId: 'donuthole' },
+      app: { name: 'DonutHole' },
+      publication: {
+        routePrefix: '/Roadex/DonutHole',
+        backendUrl: 'http://127.0.0.1:8798',
+        allowedMethods: ['GET'],
+        healthPath: '/health',
+        routeSelection: 'longest-prefix',
+        preserveFullPath: true,
+        pathNeeds: { assets: [], apis: [] },
+      },
+      rollback: { mode: 'disable-route', healthPath: '/health' },
+    } as const;
+    const { createAppPublicationRequest, getAppPublicationRequest } = await import('../src/client/sessionApi');
+    const created = await createAppPublicationRequest(undefined, spec, 'request-key-00000001');
+    await getAppPublicationRequest(undefined, created.id);
+
+    expect(calls.map((call) => call.path)).toEqual([
+      '/Roadex/api/app-publication/requests',
+      '/Roadex/api/app-publication/requests/app-publication-1',
+    ]);
+    const headers = new Headers(calls[0].init?.headers);
+    expect(headers.get('idempotency-key')).toBe('request-key-00000001');
+    expect(headers.get('x-roadex-request-id')).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
+    expect(calls.some((call) => /activate|approve|deploy/.test(call.path))).toBe(false);
+  });
+
   it('uses exact owner project proposal, challenge, confirmation, and revoke routes', async () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
