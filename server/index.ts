@@ -1,6 +1,7 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type RequestListener, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { authenticate, gatewayAuthRequired, mockAuthToken, mockUser } from '../src/server/authService.js';
 import {
   bootstrap,
@@ -10,13 +11,19 @@ import {
   closeSession,
   createDeviceInventoryBinding,
   createInitialState,
+  attachApprovalLifecycleBridge,
+  auditApprovalCoordinatorTransition,
   createSessionFromApi,
+  dispatchApprovalContinuation,
   listDeviceArtifactMetadata,
   listArchivedSessions,
   listDeviceInventoryBindings,
   observeDeviceDescriptor,
   reopenSession,
+  persistApprovalRuntimeState,
+  publishApprovalCoordinatorSystemText,
   reportDeviceBridgeWrite,
+  resolveActiveApprovalRunCapability,
   registerDeviceArtifactMetadata,
   requestDeviceBridgeIntake,
   startDeviceBridgeProbe,
@@ -28,6 +35,7 @@ import {
   streamEventsForSession,
   submitPrompt,
   submitDeviceBridgeProbe,
+  type RoadexState,
 } from '../src/server/sessionService.js';
 import {
   isAvailableDeviceBridgeIntakeRoute,
@@ -42,41 +50,214 @@ import { ProjectCreationBroker, type TeamEvidence } from '../src/server/projectC
 import { isAvailableProjectCreationRoute } from '../src/server/projectCreationPolicy.js';
 import { ProjectCreationWorker } from '../src/server/projectCreationWorker.js';
 import { createControlledOperationGrantIssuer } from '../src/server/controlledOperationGrantIssuer.js';
+import { ApprovalCoordinator, type ApprovalCoordinatorCallbacks } from '../src/server/approvalCoordinator.js';
+import {
+  createOverseerApprovalStatusProvider,
+  type ApprovalStatusProvider,
+  type OverseerProviderOptions,
+} from '../src/server/approvalStatusProvider.js';
+import { ApprovalWorkflowGrantBroker } from '../src/server/approvalWorkflowGrantBroker.js';
+import {
+  APPROVAL_WORKFLOW_SOCKET,
+  startApprovalWorkflowHost,
+  type ApprovalWorkflowHostOptions,
+} from '../src/server/approvalWorkflowHost.js';
+import { verifyLinuxPeerCredentials } from '../src/server/controlledOperationsPeer.js';
 
-const host = process.env.HOST ?? '127.0.0.1';
-const port = Number(process.env.PORT ?? 8780);
-const liveStreamKeepaliveMs = resolveLiveStreamKeepaliveMs(process.env.ROADEX_SSE_KEEPALIVE_MS);
-const state = createInitialState();
-let projectCreationBroker: ProjectCreationBroker | undefined;
-let projectCreationWorker: ProjectCreationWorker | undefined;
-state.resolveControlledRunnerGrant = (context) =>
-  getProjectCreationBroker().resolveControlledRunnerGrant({
-    userId: context.userId,
-    workspaceId: context.workspaceId,
-    workspaceRoot: context.workspaceRoot ?? '',
-    managedThreadId: context.managedThreadId,
-    codexThreadId: context.codexThreadId,
-  });
-state.issueControlledOperationToken = createControlledOperationGrantIssuer(process.env);
+const DEFAULT_APPROVAL_POLL_MS = 2_000;
+const MIN_APPROVAL_POLL_MS = 250;
+const MAX_APPROVAL_POLL_MS = 60_000;
 
-if (host !== '127.0.0.1' && host !== 'localhost') {
-  throw new Error('Roadex API must bind to loopback until deployment gateway review is complete.');
+type RuntimeCloseable = { close: () => void | Promise<void> };
+type RuntimeTimer = { unref?: () => unknown };
+type RuntimeCoordinator = Pick<
+  ApprovalCoordinator,
+  'recover' | 'tick' | 'closeSessionWait' | 'hasActiveWait' | 'completeContinuation' | 'register'
+>;
+
+type RuntimeAddress = { host: string; port: number };
+
+export type RoadexRuntimeDependencies = {
+  state?: RoadexState;
+  env?: NodeJS.ProcessEnv;
+  createApprovalTokenReader?: (env: NodeJS.ProcessEnv) => () => string;
+  createApprovalProvider?: (options: OverseerProviderOptions) => ApprovalStatusProvider;
+  coordinator?: RuntimeCoordinator;
+  startWorkflowHost?: (
+    options: ApprovalWorkflowHostOptions,
+  ) => RuntimeCloseable | Promise<RuntimeCloseable>;
+  startHttp?: (
+    handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>,
+    address: RuntimeAddress,
+  ) => RuntimeCloseable | Promise<RuntimeCloseable>;
+  setInterval?: (callback: () => void, milliseconds: number) => RuntimeTimer;
+  clearInterval?: (timer: RuntimeTimer) => void;
+  addSignalListener?: (signal: NodeJS.Signals, listener: () => void) => void;
+  removeSignalListener?: (signal: NodeJS.Signals, listener: () => void) => void;
+  log?: (message: string) => void;
+};
+
+export type RoadexRuntime = {
+  state: RoadexState;
+  coordinator: RuntimeCoordinator;
+  broker: ApprovalWorkflowGrantBroker;
+  shutdown: () => Promise<void>;
+};
+
+type RouteContext = {
+  state: RoadexState;
+  coordinator: Pick<RuntimeCoordinator, 'closeSessionWait'>;
+  liveStreamKeepaliveMs: number;
+  projectCreationBroker?: ProjectCreationBroker;
+  projectCreationWorker?: ProjectCreationWorker;
+};
+
+export function resolveApprovalPollMs(value: string | undefined): number {
+  if (value === undefined) return DEFAULT_APPROVAL_POLL_MS;
+  if (!/^[1-9]\d*$/.test(value)) return DEFAULT_APPROVAL_POLL_MS;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= MIN_APPROVAL_POLL_MS && parsed <= MAX_APPROVAL_POLL_MS
+    ? parsed
+    : DEFAULT_APPROVAL_POLL_MS;
 }
 
-const server = createServer(async (req, res) => {
-  try {
-    await route(req, res);
-  } catch (error) {
-    console.error(error);
-    sendJson(res, 500, { error: { code: 'internal_error', message: 'Unexpected server error.' } });
+export async function startRoadexRuntime(
+  dependencies: RoadexRuntimeDependencies = {},
+): Promise<RoadexRuntime> {
+  const env = dependencies.env ?? process.env;
+  const host = env.HOST ?? '127.0.0.1';
+  const port = resolvePort(env.PORT);
+  if (host !== '127.0.0.1' && host !== 'localhost') {
+    throw new Error('approval_runtime_start_failed');
   }
-});
 
-server.listen(port, host, () => {
-  console.log(`Roadex API listening at http://${host}:${port}`);
-});
+  const state = dependencies.state ?? createInitialState();
+  const broker = new ApprovalWorkflowGrantBroker();
+  const createTokenReader = dependencies.createApprovalTokenReader ?? createRuntimeApprovalTokenReader;
+  const createProvider = dependencies.createApprovalProvider ?? createOverseerApprovalStatusProvider;
+  let workflowHost: RuntimeCloseable | undefined;
+  let httpHost: RuntimeCloseable | undefined;
+  let interval: RuntimeTimer | undefined;
+  let shuttingDown = false;
+  let shutdownPromise: Promise<void> | undefined;
+  let tickInProgress: Promise<void> | undefined;
 
-async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const readToken = createTokenReader(env);
+    const provider = createProvider({ readToken });
+    const callbacks: ApprovalCoordinatorCallbacks = {
+      persist: () => persistApprovalRuntimeState(state),
+      publish: (sessionId, message) => publishApprovalCoordinatorSystemText(state, sessionId, message),
+      audit: (action, outcome, summary, resource) =>
+        auditApprovalCoordinatorTransition(state, action, outcome, summary, resource),
+      queueContinuation: (wait, prompt) => shuttingDown
+        ? Promise.resolve({ status: 'ambiguous' as const })
+        : dispatchApprovalContinuation(state, wait, prompt),
+    };
+    const coordinator: RuntimeCoordinator = dependencies.coordinator
+      ?? new ApprovalCoordinator(state.approvalWaits, state.sessions.sessions, provider, callbacks);
+
+    attachApprovalLifecycleBridge(state, {
+      hasActiveWait: (sessionId) => coordinator.hasActiveWait(sessionId),
+      issueWorkflowGrant: (scope) => broker.issue(scope).token,
+      revokeWorkflowGrant: (runId) => broker.revokeRun(runId),
+      completeContinuation: (continuationId, runnerRunId, outcome) =>
+        coordinator.completeContinuation(continuationId, runnerRunId, outcome),
+    });
+
+    const projectServices: RouteContext = {
+      state,
+      coordinator,
+      liveStreamKeepaliveMs: resolveLiveStreamKeepaliveMs(env.ROADEX_SSE_KEEPALIVE_MS),
+    };
+    state.resolveControlledRunnerGrant = (context) =>
+      getProjectCreationBroker(projectServices).resolveControlledRunnerGrant({
+        userId: context.userId,
+        workspaceId: context.workspaceId,
+        workspaceRoot: context.workspaceRoot ?? '',
+        managedThreadId: context.managedThreadId,
+        codexThreadId: context.codexThreadId,
+      });
+    state.issueControlledOperationToken = createControlledOperationGrantIssuer(env);
+
+    const workflowOptions: ApprovalWorkflowHostOptions = {
+      enabled: true,
+      socketPath: APPROVAL_WORKFLOW_SOCKET,
+      verifyPeer: verifyLinuxPeerCredentials,
+      resolveRunCapability: (runId) => resolveActiveApprovalRunCapability(state, runId),
+      register: (capability, input) => coordinator.register(capability, input),
+      broker,
+    };
+    workflowHost = await (dependencies.startWorkflowHost ?? startDefaultWorkflowHost)(workflowOptions);
+    await coordinator.recover();
+
+    const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      try {
+        await route(projectServices, req, res);
+      } catch {
+        sendJson(res, 500, { error: { code: 'internal_error', message: 'Unexpected server error.' } });
+      }
+    };
+    httpHost = await (dependencies.startHttp ?? startDefaultHttp)(handler, { host, port });
+
+    const schedule = dependencies.setInterval ?? ((callback, milliseconds) => setInterval(callback, milliseconds));
+    const clearScheduled = dependencies.clearInterval ?? ((timer) => clearInterval(timer as ReturnType<typeof setInterval>));
+    interval = schedule(() => {
+      if (shuttingDown || tickInProgress !== undefined) return;
+      tickInProgress = Promise.resolve(coordinator.tick())
+        .catch(() => undefined)
+        .finally(() => { tickInProgress = undefined; });
+    }, resolveApprovalPollMs(env.ROADEX_APPROVAL_POLL_MS));
+    interval.unref?.();
+
+    const removeSignal = dependencies.removeSignalListener ?? ((signal, listener) => process.off(signal, listener));
+    const signalHandler = () => { void shutdown().catch(() => undefined); };
+    const shutdown = (): Promise<void> => {
+      shutdownPromise ??= (async () => {
+        let failed = false;
+        shuttingDown = true;
+        if (interval !== undefined) {
+          clearScheduled(interval);
+          interval = undefined;
+        }
+        removeSignal('SIGTERM', signalHandler);
+        removeSignal('SIGINT', signalHandler);
+        if (workflowHost !== undefined) {
+          try { await workflowHost.close(); } catch { failed = true; }
+        }
+        for (const runId of state.activeApprovalRuns.keys()) {
+          try { broker.revokeRun(runId); } catch { failed = true; }
+        }
+        if (httpHost !== undefined) {
+          try { await httpHost.close(); } catch { failed = true; }
+        }
+        if (failed) throw new Error('approval_runtime_shutdown_failed');
+      })();
+      return shutdownPromise;
+    };
+    const addSignal = dependencies.addSignalListener ?? ((signal, listener) => process.on(signal, listener));
+    addSignal('SIGTERM', signalHandler);
+    addSignal('SIGINT', signalHandler);
+    (dependencies.log ?? console.log)(`Roadex API listening at http://${host}:${port}`);
+
+    return { state, coordinator, broker, shutdown };
+  } catch {
+    shuttingDown = true;
+    if (interval !== undefined) {
+      (dependencies.clearInterval ?? ((timer) => clearInterval(timer as ReturnType<typeof setInterval>)))(interval);
+    }
+    if (workflowHost !== undefined) {
+      try { await workflowHost.close(); } catch { /* startup remains failed */ }
+    }
+    if (httpHost !== undefined) {
+      try { await httpHost.close(); } catch { /* startup remains failed */ }
+    }
+    throw new Error('approval_runtime_start_failed');
+  }
+}
+
+async function route(context: RouteContext, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const { state, liveStreamKeepaliveMs } = context;
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
   if (url.pathname === '/api/health') {
@@ -113,7 +294,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       sendJson(res, 415, { error: { code: 'unsupported_media_type', message: 'JSON content type is required.' } });
       return;
     }
-    const broker = getProjectCreationBroker();
+    const broker = getProjectCreationBroker(context);
     if (req.method === 'POST' && url.pathname === '/api/project-creation/proposals') {
       const result = await broker.createProposal(auth.user, await readJson<unknown>(req, 64_000));
       sendJson(res, result ? 201 : 403, result ? { ok: true, proposal: result } : projectCreationDenied());
@@ -140,7 +321,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       const result = await broker.confirm(auth.user, proposalId, await readJson<unknown>(req, 4_096));
       sendJson(res, result ? 200 : 403, result ? { ok: true, proposal: result } : projectCreationDenied());
       if (result?.operation) {
-        queueMicrotask(() => void getProjectCreationWorker().run(auth.user, proposalId));
+        queueMicrotask(() => void getProjectCreationWorker(context).run(auth.user, proposalId));
       }
       return;
     }
@@ -198,11 +379,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (closeMatch && req.method === 'POST') {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const result = closeSession(state, auth.user, decodeURIComponent(closeMatch[1]));
+    const sessionId = decodeURIComponent(closeMatch[1]);
+    const result = closeSession(state, auth.user, sessionId);
     if (!result) {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Session not found.' } });
       return;
     }
+    await context.coordinator.closeSessionWait(sessionId);
     sendJson(res, 202, result);
     return;
   }
@@ -482,10 +665,10 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.end(JSON.stringify(payload));
 }
 
-function getProjectCreationBroker(): ProjectCreationBroker {
-  projectCreationBroker ??= new ProjectCreationBroker({
+function getProjectCreationBroker(context: RouteContext): ProjectCreationBroker {
+  context.projectCreationBroker ??= new ProjectCreationBroker({
     resolveSession(userId, sessionId) {
-      const session = state.sessions.sessions.find((item) => item.id === sessionId && item.userId === userId);
+      const session = context.state.sessions.sessions.find((item) => item.id === sessionId && item.userId === userId);
       return session ? {
         id: session.id,
         userId: session.userId,
@@ -513,12 +696,12 @@ function getProjectCreationBroker(): ProjectCreationBroker {
       }
     },
   });
-  return projectCreationBroker;
+  return context.projectCreationBroker;
 }
 
-function getProjectCreationWorker(): ProjectCreationWorker {
-  projectCreationWorker ??= new ProjectCreationWorker(getProjectCreationBroker());
-  return projectCreationWorker;
+function getProjectCreationWorker(context: RouteContext): ProjectCreationWorker {
+  context.projectCreationWorker ??= new ProjectCreationWorker(getProjectCreationBroker(context));
+  return context.projectCreationWorker;
 }
 
 function projectCreationDenied(): { ok: false; error: { code: string; message: string } } {
@@ -580,4 +763,87 @@ function contentType(path: string): string {
     default:
       return 'application/octet-stream';
   }
+}
+
+function createRuntimeApprovalTokenReader(env: NodeJS.ProcessEnv): () => string {
+  return () => env.ROADEX_OVERSEER_APPROVAL_STATUS_TOKEN ?? '';
+}
+
+function resolvePort(value: string | undefined): number {
+  if (value === undefined) return 8780;
+  if (!/^[1-9]\d{0,4}$/.test(value)) throw new Error('approval_runtime_start_failed');
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed > 65_535) throw new Error('approval_runtime_start_failed');
+  return parsed;
+}
+
+async function startDefaultWorkflowHost(options: ApprovalWorkflowHostOptions): Promise<RuntimeCloseable> {
+  const server = startApprovalWorkflowHost(options);
+  await waitForListening(server);
+  return { close: () => closeNodeServer(server) };
+}
+
+async function startDefaultHttp(
+  handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>,
+  address: RuntimeAddress,
+): Promise<RuntimeCloseable> {
+  const server = createServer(handler as RequestListener);
+  await new Promise<void>((resolve, reject) => {
+    const onError = () => {
+      server.off('listening', onListening);
+      reject(new Error('http_listen_failed'));
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      resolve();
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(address.port, address.host);
+  });
+  return { close: () => closeNodeServer(server) };
+}
+
+async function waitForListening(server: ReturnType<typeof startApprovalWorkflowHost>): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onError = () => {
+      cleanup();
+      reject(new Error('approval_workflow_host_failed'));
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error('approval_workflow_host_failed'));
+    };
+    const onListening = () => {
+      setImmediate(() => {
+        if (!server.listening) {
+          onClose();
+          return;
+        }
+        cleanup();
+        resolve();
+      });
+    };
+    const cleanup = () => {
+      server.off('error', onError);
+      server.off('close', onClose);
+      server.off('listening', onListening);
+    };
+    server.once('error', onError);
+    server.once('close', onClose);
+    server.once('listening', onListening);
+  });
+}
+
+function closeNodeServer(server: { close: (callback: (error?: Error) => void) => unknown }): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
+}
+
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
+  void startRoadexRuntime().catch(() => {
+    console.error('Roadex API failed to start.');
+    process.exitCode = 1;
+  });
 }

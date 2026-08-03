@@ -41,6 +41,17 @@ export type ApprovalContinuationDispatchResult =
   | { status: 'ambiguous' }
   | { status: 'denied'; reason: 'session-closed' | 'thread-mismatch' | 'scope-mismatch' };
 
+export type ApprovalContinuationCompletionOutcome =
+  | { status: 'succeeded'; managedThreadId: string }
+  | { status: 'failed'; managedThreadId?: string }
+  | { status: 'uncertain' };
+
+export type ApprovalContinuationCompletionResult =
+  | { status: 'resumed'; idempotent: boolean }
+  | { status: 'security-failure' }
+  | { status: 'reconciliation-required' }
+  | { status: 'stale' };
+
 export type ApprovalCoordinatorStateClock = {
   now: () => string;
 };
@@ -457,6 +468,29 @@ export class ApprovalCoordinator {
     }
   }
 
+  async recover(): Promise<void> {
+    const nowMs = Date.parse(this.#clock.now());
+    if (!Number.isFinite(nowMs)) {
+      throw new Error('approval_recovery_clock_invalid');
+    }
+
+    for (const wait of [...this.#waits]) {
+      const session = this.#sessions.find((entry) => entry.id === wait.sessionId);
+      if (!session || session.lifecycle === 'closed') {
+        continue;
+      }
+
+      if (wait.state === 'resume-dispatching' && wait.runnerRunId === undefined) {
+        await this.#recoverDispatchingWait(wait, session);
+        continue;
+      }
+
+      if (wait.state === 'approved-resume-queued' && this.#isDue(wait, nowMs)) {
+        await this.#dispatchApprovedWait(wait, session);
+      }
+    }
+  }
+
   async closeSessionWait(sessionId: string): Promise<void> {
     const session = this.#sessions.find((entry) => entry.id === sessionId);
     if (!session) {
@@ -501,6 +535,128 @@ export class ApprovalCoordinator {
 
   hasActiveWait(sessionId: string): boolean {
     return this.#waits.some((wait) => wait.sessionId === sessionId && WAIT_STATES_BLOCKING.has(wait.state));
+  }
+
+  async completeContinuation(
+    continuationId: string,
+    runnerRunId: string,
+    outcome: ApprovalContinuationCompletionOutcome,
+  ): Promise<ApprovalContinuationCompletionResult> {
+    if (!SHA256_PATTERN.test(continuationId) || !this.#isOpaqueToken(runnerRunId, MAX_RUNNER_RUN_ID_LENGTH)) {
+      return { status: 'stale' };
+    }
+
+    const wait = this.#waits.find((candidate) => candidate.continuationId === continuationId);
+    if (!wait) {
+      return { status: 'stale' };
+    }
+
+    return this.#withSessionLock(wait.sessionId, async () => {
+      const liveWait = this.#waits.find((candidate) => candidate === wait && candidate.continuationId === continuationId);
+      const session = this.#sessions.find((candidate) => candidate.id === wait.sessionId);
+      if (!liveWait || !session) {
+        return { status: 'stale' } as const;
+      }
+
+      if (liveWait.state === 'resumed') {
+        return liveWait.runnerRunId === runnerRunId
+          ? { status: 'resumed', idempotent: true } as const
+          : { status: 'stale' } as const;
+      }
+
+      if (liveWait.state !== 'resume-dispatching') {
+        return { status: 'stale' } as const;
+      }
+
+      const sessionBefore = this.snapshotSession(session);
+      const waitBefore = this.snapshotWait(liveWait);
+      const now = this.#clock.now();
+      const runnerMatches = liveWait.runnerRunId === runnerRunId;
+      const scopeMatches = this.#isDispatchEvidenceCanonical(liveWait, session);
+      const parsedOutcome = this.#parseCompletionOutcome(outcome);
+
+      if (!runnerMatches || !scopeMatches || parsedOutcome === null) {
+        liveWait.state = 'security-failure';
+        liveWait.updatedAt = now;
+        liveWait.nextCheckAt = now;
+        delete liveWait.dispatchReservedAt;
+        const persisted = await this.#persistWaitTransition(
+          session,
+          sessionBefore,
+          liveWait,
+          waitBefore,
+          () => this.projectSessionForWait(session),
+          () => {
+            this.#publish(liveWait.sessionId, this.#terminalCopy('security-failure'));
+            this.#audit('approval_wait.security_failure', 'denied', this.#auditSummary(liveWait), liveWait.sessionId);
+          },
+        );
+        return persisted ? { status: 'security-failure' } as const : { status: 'stale' } as const;
+      }
+
+      const observedManagedThreadId = parsedOutcome.status === 'uncertain'
+        ? undefined
+        : parsedOutcome.managedThreadId;
+      if (observedManagedThreadId !== undefined && observedManagedThreadId !== liveWait.managedThreadId) {
+        liveWait.state = 'security-failure';
+        liveWait.updatedAt = now;
+        liveWait.nextCheckAt = now;
+        delete liveWait.dispatchReservedAt;
+        const persisted = await this.#persistWaitTransition(
+          session,
+          sessionBefore,
+          liveWait,
+          waitBefore,
+          () => this.projectSessionForWait(session),
+          () => {
+            this.#publish(liveWait.sessionId, this.#terminalCopy('security-failure'));
+            this.#audit('approval_wait.security_failure', 'denied', this.#auditSummary(liveWait), liveWait.sessionId);
+          },
+        );
+        return persisted ? { status: 'security-failure' } as const : { status: 'stale' } as const;
+      }
+
+      if (parsedOutcome.status !== 'succeeded') {
+        liveWait.state = 'resume-reconciliation-required';
+        liveWait.updatedAt = now;
+        liveWait.nextCheckAt = now;
+        delete liveWait.dispatchReservedAt;
+        const persisted = await this.#persistWaitTransition(
+          session,
+          sessionBefore,
+          liveWait,
+          waitBefore,
+          () => this.projectSessionForWait(session),
+          () => this.#audit(
+            'approval_wait.reconciliation_required',
+            'denied',
+            this.#auditSummary(liveWait),
+            liveWait.sessionId,
+          ),
+        );
+        return persisted ? { status: 'reconciliation-required' } as const : { status: 'stale' } as const;
+      }
+
+      liveWait.state = 'resumed';
+      liveWait.resumedAt = now;
+      liveWait.updatedAt = now;
+      liveWait.nextCheckAt = now;
+      delete liveWait.dispatchReservedAt;
+      const persisted = await this.#persistWaitTransition(
+        session,
+        sessionBefore,
+        liveWait,
+        waitBefore,
+        () => this.projectSessionForWait(session),
+        () => {
+          this.#audit('approval_wait.resume_completed', 'allowed', this.#auditSummary(liveWait), liveWait.sessionId);
+          this.#publish(liveWait.sessionId, this.#terminalCopy('resumed'));
+        },
+      );
+      return persisted
+        ? { status: 'resumed', idempotent: false } as const
+        : { status: 'stale' } as const;
+    });
   }
 
   nextCheckAt(now: string, attempt: number): string {
@@ -1199,6 +1355,35 @@ export class ApprovalCoordinator {
     }
   }
 
+  #parseCompletionOutcome(value: unknown): ApprovalContinuationCompletionOutcome | null {
+    const candidate = this.#readOwnEnumerableDataProperties(value);
+    if (candidate === null) {
+      return null;
+    }
+    const status = candidate.get('status');
+    if (status === 'uncertain' && this.#hasExactPropertyKeys(candidate, ['status'])) {
+      return { status: 'uncertain' };
+    }
+    const managedThreadId = candidate.get('managedThreadId');
+    if (status === 'succeeded' && this.#hasExactPropertyKeys(candidate, ['status', 'managedThreadId'])) {
+      return typeof managedThreadId === 'string' && this.#isFieldValid(managedThreadId)
+        ? { status: 'succeeded', managedThreadId }
+        : null;
+    }
+    if (status === 'failed') {
+      if (this.#hasExactPropertyKeys(candidate, ['status'])) {
+        return { status: 'failed' };
+      }
+      if (this.#hasExactPropertyKeys(candidate, ['status', 'managedThreadId'])) {
+        return managedThreadId === undefined
+          || typeof managedThreadId === 'string' && this.#isFieldValid(managedThreadId)
+          ? { status: 'failed', managedThreadId: managedThreadId as string | undefined }
+          : null;
+      }
+    }
+    return null;
+  }
+
   #isWaitStatusTrusted(wait: ApprovalWaitRecord, status: NormalizedApprovalStatus): boolean {
     if (status.decision === 'approved' || status.decision === 'pending' || NON_APPROVED_DECISIONS.has(status.decision)) {
       if (!this.#isFieldValid(status.approvalRef)
@@ -1538,7 +1723,7 @@ export class ApprovalCoordinator {
 }
 
 function isAllowedLifecycleForRegistration(lifecycle: RoadexSession['lifecycle']): boolean {
-  return lifecycle === 'ready' || lifecycle === 'paused';
+  return lifecycle === 'ready' || lifecycle === 'paused' || lifecycle === 'streaming';
 }
 
 function deriveContinuationId(sessionId: string, approvalRef: string, decisionVersion: string): string {

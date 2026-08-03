@@ -46,6 +46,7 @@ import { storeDeviceArtifact } from '../src/server/deviceArtifactVault';
 import type { SerialVerificationProfile } from '../src/shared/serialVerificationContracts';
 import type { BleVerificationProfile } from '../src/shared/bleVerificationContracts';
 import type { UsbDeviceProfile } from '../src/shared/usbDeviceProfileContracts';
+import type { ApprovalWaitRecord } from '../src/shared/approvalWorkflowContracts';
 
 const workspace: WorkspaceRef = {
   id: 'roadex',
@@ -281,6 +282,49 @@ describe('createMockSession', () => {
 });
 
 describe('Roadex session service', () => {
+  it('denies user prompts while human approval is pending without appending a user event', async () => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const created = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const now = new Date().toISOString();
+    const wait: ApprovalWaitRecord = {
+      id: 'wait-prompt-blocked',
+      sessionId: created.session.id,
+      userId: created.session.userId,
+      projectId: created.session.workspace.id,
+      workspaceId: created.session.workspace.id,
+      managedThreadId: 'managed-thread-1',
+      provider: 'overseer',
+      approvalRef: 'admin.prompt-blocked',
+      resourceRef: 'resource.prompt-blocked',
+      authorityClass: 'privileged-operation',
+      consoleSurface: 'admin',
+      subject: 'Prompt blocked pending approval',
+      state: 'pending',
+      decisionVersion: `sha256:${'a'.repeat(64)}`,
+      continuationId: `sha256:${'b'.repeat(64)}`,
+      checkAttempt: 0,
+      nextCheckAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+    state.approvalWaits.push(wait);
+    created.session.lifecycle = 'paused';
+    const userEventsBefore = state.sessions.streamEvents.filter((event) => event.kind === 'user').length;
+
+    const result = submitPrompt(state, mockUser, created.session.id, 'browser continuation must be denied');
+
+    expect(result).toEqual({ accepted: false, code: 'human-approval-pending' });
+    expect(state.sessions.streamEvents.filter((event) => event.kind === 'user')).toHaveLength(userEventsBefore);
+    expect(state.audit.events.at(-1)).toMatchObject({
+      action: 'security.denied',
+      outcome: 'denied',
+      summary: 'Human approval is pending.',
+    });
+  });
+
   it('observes an allowlisted USB descriptor without persisting or returning the raw serial', async () => {
     const enabled = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED;
     const descriptorKey = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY;

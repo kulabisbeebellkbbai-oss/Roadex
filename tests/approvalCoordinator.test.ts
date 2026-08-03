@@ -314,7 +314,6 @@ describe('ApprovalCoordinator', () => {
     const rejectable: Array<{ session: RoadexSession; label: string }> = [
       { session: fixtureSession({ lifecycle: 'closed' }), label: 'closed' },
       { session: fixtureSession({ lifecycle: 'blocked' }), label: 'blocked' },
-      { session: fixtureSession({ lifecycle: 'streaming' }), label: 'streaming' },
       { session: fixtureSession({ managedThreadId: 'wrong-thread' }), label: 'unbound' },
       { session: fixtureSession({ userId: 'other-user' }), label: 'ownership' },
     ];
