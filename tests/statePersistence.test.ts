@@ -377,11 +377,13 @@ describe('state persistence', () => {
     delete base.decisionObservedAt;
     delete base.dispatchReservedAt;
     delete base.runnerRunId;
+    delete base.successorOfWaitId;
     delete base.resumedAt;
     const optionalFieldsWithPrototypeValues = [
       { field: 'decisionObservedAt', value: now },
       { field: 'dispatchReservedAt', value: now },
       { field: 'runnerRunId', value: 'proto-runner' },
+      { field: 'successorOfWaitId', value: 'proto-predecessor' },
       { field: 'resumedAt', value: now },
     ] as const;
     for (const optional of optionalFieldsWithPrototypeValues) {
@@ -396,6 +398,21 @@ describe('state persistence', () => {
       expect(optional.field in sanitized).toBe(false);
       expect(sanitized[optional.field]).toBeUndefined();
     }
+  });
+
+  it('preserves a canonical successor wait predecessor binding', () => {
+    const successor = {
+      ...approvalWaitFixture({
+        id: 'approval-wait-successor',
+        state: 'approved-resume-queued',
+      }),
+      successorOfWaitId: 'approval-wait-closed',
+    } as ApprovalWaitRecord & { successorOfWaitId: string };
+
+    expect(serializeState({ approvalWaits: [successor] }).approvalWaits).toEqual([successor]);
+
+    const malformed = { ...successor, successorOfWaitId: ' approval-wait-closed' };
+    expect(serializeState({ approvalWaits: [malformed] }).approvalWaits).toEqual([]);
   });
 
   it('rejects malformed approval-wait timestamps and accepts timezone-aware ISO values', () => {

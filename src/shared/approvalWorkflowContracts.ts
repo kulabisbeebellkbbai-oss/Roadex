@@ -63,6 +63,7 @@ export type ApprovalWaitRecord = {
   state: ApprovalWaitState;
   decisionVersion: string;
   continuationId: string;
+  successorOfWaitId?: string;
   checkAttempt: number;
   nextCheckAt: string;
   createdAt: string;

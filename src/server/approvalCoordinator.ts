@@ -279,11 +279,46 @@ export class ApprovalCoordinator {
       return false;
     }
 
-    if (deriveContinuationId(wait.sessionId, wait.approvalRef, wait.decisionVersion) !== wait.continuationId) {
+    const expectedContinuationId = Object.hasOwn(wait, 'successorOfWaitId')
+      ? this.#canonicalSuccessorContinuationId(wait)
+      : deriveContinuationId(wait.sessionId, wait.approvalRef, wait.decisionVersion);
+    if (expectedContinuationId !== wait.continuationId) {
       return false;
     }
 
     return true;
+  }
+
+  #canonicalSuccessorContinuationId(wait: ApprovalWaitRecord): string | undefined {
+    if (!wait.successorOfWaitId
+      || !this.#isOpaqueToken(wait.id)
+      || !this.#isOpaqueToken(wait.successorOfWaitId)
+    ) {
+      return undefined;
+    }
+    const predecessor = this.#waits.find((entry) => entry.id === wait.successorOfWaitId);
+    if (!predecessor
+      || predecessor === wait
+      || predecessor.state !== 'session-closed'
+      || predecessor.sessionId !== wait.sessionId
+      || predecessor.userId !== wait.userId
+      || predecessor.projectId !== wait.projectId
+      || predecessor.workspaceId !== wait.workspaceId
+      || predecessor.managedThreadId !== wait.managedThreadId
+      || predecessor.provider !== wait.provider
+      || predecessor.approvalRef !== wait.approvalRef
+      || predecessor.resourceRef !== wait.resourceRef
+      || predecessor.authorityClass !== wait.authorityClass
+      || predecessor.consoleSurface !== wait.consoleSurface
+    ) {
+      return undefined;
+    }
+    return deriveSuccessorContinuationId(
+      wait.id,
+      wait.sessionId,
+      wait.approvalRef,
+      wait.decisionVersion,
+    );
   }
 
   #isCanonicalWaitingSummary(
@@ -831,7 +866,13 @@ export class ApprovalCoordinator {
           subject: status.subject,
           state: status.decision === 'approved' ? 'approved-resume-queued' : 'pending',
           decisionVersion: status.decisionVersion,
-          continuationId: deriveContinuationId(sessionId, status.approvalRef, status.decisionVersion),
+          continuationId: deriveSuccessorContinuationId(
+            waitId,
+            sessionId,
+            status.approvalRef,
+            status.decisionVersion,
+          ),
+          successorOfWaitId: priorWait.id,
           checkAttempt: 0,
           nextCheckAt: status.decision === 'approved' ? now : this.nextCheckAt(now, 1),
           createdAt: now,
@@ -968,7 +1009,14 @@ export class ApprovalCoordinator {
       const shouldAdvanceDecisionVersion = status.decision === 'approved' || NON_APPROVED_DECISIONS.has(status.decision);
       if (shouldAdvanceDecisionVersion) {
         wait.decisionVersion = status.decisionVersion;
-        wait.continuationId = deriveContinuationId(wait.sessionId, wait.approvalRef, status.decisionVersion);
+        wait.continuationId = wait.successorOfWaitId
+          ? deriveSuccessorContinuationId(
+            wait.id,
+            wait.sessionId,
+            wait.approvalRef,
+            status.decisionVersion,
+          )
+          : deriveContinuationId(wait.sessionId, wait.approvalRef, status.decisionVersion);
       }
       wait.subject = status.subject;
       wait.updatedAt = now;
@@ -1953,5 +2001,21 @@ function isAllowedLifecycleForRegistration(lifecycle: RoadexSession['lifecycle']
 
 function deriveContinuationId(sessionId: string, approvalRef: string, decisionVersion: string): string {
   const canonical = JSON.stringify([sessionId, approvalRef, decisionVersion]);
+  return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
+}
+
+function deriveSuccessorContinuationId(
+  waitId: string,
+  sessionId: string,
+  approvalRef: string,
+  decisionVersion: string,
+): string {
+  const canonical = JSON.stringify([
+    'roadex-approval-successor-v1',
+    waitId,
+    sessionId,
+    approvalRef,
+    decisionVersion,
+  ]);
   return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
 }
