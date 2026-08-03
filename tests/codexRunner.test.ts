@@ -321,6 +321,137 @@ describe('createCodexRunner', () => {
     }
   });
 
+  it('rejects with a fixed redacted failure when pre-spawn workflow cleanup fails', async () => {
+    const workflowBefore = readTokenFiles(APPROVAL_WORKFLOW_TOKEN_DIRECTORY);
+    const root = mkdtempSync(join(tmpdir(), 'roadex-workflow-cleanup-pre-spawn-'));
+    const rawToken = 'A'.repeat(43);
+    const runner = createCodexRunner({
+      executable: '/definitely/not/a/roadex-codex-binary',
+      spawnProcess: () => {
+        throw new Error('spawn detail must not escape');
+      },
+      approvalWorkflowTokenFileOperations: {
+        unlink: () => {
+          throw Object.assign(new Error(`unlink denied ${APPROVAL_WORKFLOW_TOKEN_DIRECTORY}`), {
+            code: 'EACCES',
+          });
+        },
+      },
+    });
+    const session = runner.createSession({
+      userId: 'owner',
+      workspace: { id: 'roadex', name: 'Roadex', root },
+    });
+    session.managedThreadId = 'thread-roadex';
+    session.codexThreadId = 'thread-roadex';
+    const previousEnabled = process.env.ROADEX_CONTROLLED_RUNNER_ENABLED;
+    process.env.ROADEX_CONTROLLED_RUNNER_ENABLED = 'true';
+    let createdFiles: string[] = [];
+    try {
+      const failure = await runner.runPrompt({
+        session,
+        prompt: 'human pause',
+        capabilityGrant: {
+          userId: 'owner',
+          workspaceId: 'roadex',
+          workspaceRoot: root,
+          managedThreadId: 'thread-roadex',
+          operationId: 'operation-roadex',
+          status: 'active',
+        },
+        approvalWorkflowToken: rawToken,
+        runId: 'run-roadex',
+      }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      createdFiles = readTokenFiles(APPROVAL_WORKFLOW_TOKEN_DIRECTORY)
+        .filter((file) => !workflowBefore.includes(file));
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toBe('approval_workflow_token_cleanup_failed');
+      expect((failure as Error).message).not.toContain(rawToken);
+      expect((failure as Error).message).not.toContain(APPROVAL_WORKFLOW_TOKEN_DIRECTORY);
+      expect(createdFiles).toHaveLength(1);
+    } finally {
+      for (const file of createdFiles) {
+        unlinkSync(join(APPROVAL_WORKFLOW_TOKEN_DIRECTORY, file));
+      }
+      if (previousEnabled === undefined) {
+        delete process.env.ROADEX_CONTROLLED_RUNNER_ENABLED;
+      } else {
+        process.env.ROADEX_CONTROLLED_RUNNER_ENABLED = previousEnabled;
+      }
+    }
+  });
+
+  it('does not report success when post-run workflow cleanup fails', async () => {
+    const workflowBefore = readTokenFiles(APPROVAL_WORKFLOW_TOKEN_DIRECTORY);
+    const root = mkdtempSync(join(tmpdir(), 'roadex-workflow-cleanup-post-run-'));
+    const executable = join(root, 'codex-cleanup-failure');
+    const rawToken = 'Q'.repeat(43);
+    writeFileSync(executable, [
+      '#!/bin/sh',
+      `printf '%s\\n' '{"type":"item.completed","item":{"text":"child completed"}}'`,
+    ].join('\n'));
+    chmodSync(executable, 0o700);
+    const runner = createCodexRunner({
+      executable,
+      approvalWorkflowTokenFileOperations: {
+        unlink: () => {
+          throw Object.assign(new Error(`unlink denied ${APPROVAL_WORKFLOW_TOKEN_DIRECTORY}`), {
+            code: 'EACCES',
+          });
+        },
+      },
+    });
+    const session = runner.createSession({
+      userId: 'owner',
+      workspace: { id: 'roadex', name: 'Roadex', root },
+    });
+    session.managedThreadId = 'thread-roadex';
+    session.codexThreadId = 'thread-roadex';
+    const previousEnabled = process.env.ROADEX_CONTROLLED_RUNNER_ENABLED;
+    process.env.ROADEX_CONTROLLED_RUNNER_ENABLED = 'true';
+    let createdFiles: string[] = [];
+    try {
+      const failure = await runner.runPrompt({
+        session,
+        prompt: 'human pause',
+        capabilityGrant: {
+          userId: 'owner',
+          workspaceId: 'roadex',
+          workspaceRoot: root,
+          managedThreadId: 'thread-roadex',
+          operationId: 'operation-roadex',
+          status: 'active',
+        },
+        approvalWorkflowToken: rawToken,
+        runId: 'run-roadex',
+      }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      createdFiles = readTokenFiles(APPROVAL_WORKFLOW_TOKEN_DIRECTORY)
+        .filter((file) => !workflowBefore.includes(file));
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toBe('approval_workflow_token_cleanup_failed');
+      expect((failure as Error).message).not.toContain(rawToken);
+      expect((failure as Error).message).not.toContain(APPROVAL_WORKFLOW_TOKEN_DIRECTORY);
+      expect(createdFiles).toHaveLength(1);
+    } finally {
+      for (const file of createdFiles) {
+        unlinkSync(join(APPROVAL_WORKFLOW_TOKEN_DIRECTORY, file));
+      }
+      if (previousEnabled === undefined) {
+        delete process.env.ROADEX_CONTROLLED_RUNNER_ENABLED;
+      } else {
+        process.env.ROADEX_CONTROLLED_RUNNER_ENABLED = previousEnabled;
+      }
+    }
+  });
+
   it('removes the approval workflow token file after one controlled execution', async () => {
     const tokenFiles = readTokenFiles(APPROVAL_WORKFLOW_TOKEN_DIRECTORY);
     const root = mkdtempSync(join(tmpdir(), 'roadex-workflow-token-run-'));

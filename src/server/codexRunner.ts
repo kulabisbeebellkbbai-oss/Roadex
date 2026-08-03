@@ -66,11 +66,15 @@ export type SessionRunner = {
 export type CodexRunnerOptions = {
   executable?: string;
   activityHeartbeatMs?: number;
+  spawnProcess?: typeof spawn;
+  approvalWorkflowTokenFileOperations?: ApprovalWorkflowTokenFileOperations;
 };
 
 export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunner {
   const executable = options.executable ?? process.env.ROADEX_CODEX_BIN ?? 'codex';
   const activityHeartbeatMs = options.activityHeartbeatMs ?? 30_000;
+  const spawnProcess = options.spawnProcess ?? spawn;
+  const approvalWorkflowTokenFileOperations = options.approvalWorkflowTokenFileOperations ?? {};
 
   return {
     createSession({ userId, workspace }) {
@@ -139,6 +143,8 @@ export function createCodexRunner(options: CodexRunnerOptions = {}): SessionRunn
         approvalWorkflowToken,
         runId,
         executable,
+        spawnProcess,
+        approvalWorkflowTokenFileOperations,
         activityHeartbeatMs,
         onActivity,
         onEvent,
@@ -158,6 +164,8 @@ type RunCodexPromptOptions = {
   approvalWorkflowToken?: string;
   runId?: string;
   executable: string;
+  spawnProcess: typeof spawn;
+  approvalWorkflowTokenFileOperations: ApprovalWorkflowTokenFileOperations;
   activityHeartbeatMs: number;
   onActivity?: () => void;
   onEvent?: (event: StreamEvent) => void;
@@ -192,9 +200,12 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
       && options.approvalWorkflowToken
       && options.runId
     )
-      ? createApprovalWorkflowTokenFile(options.approvalWorkflowToken)
+      ? createApprovalWorkflowTokenFile(
+          options.approvalWorkflowToken,
+          options.approvalWorkflowTokenFileOperations,
+        )
       : undefined;
-    child = spawn(
+    child = options.spawnProcess(
       options.executable,
       buildCodexExecArgs(
         options.workspaceRoot,
@@ -213,7 +224,10 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
     );
   } catch (error) {
     removeControlledOperationTokenFile(controlledOperationTokenFile);
-    removeApprovalWorkflowTokenFile(approvalWorkflowTokenFile);
+    removeApprovalWorkflowTokenFile(
+      approvalWorkflowTokenFile,
+      options.approvalWorkflowTokenFileOperations,
+    );
     throw error;
   }
 
@@ -253,7 +267,10 @@ async function runCodexPrompt(options: RunCodexPromptOptions): Promise<RunnerPro
     clearInterval(activityHeartbeat);
     options.signal?.removeEventListener('abort', abort);
     removeControlledOperationTokenFile(controlledOperationTokenFile);
-    removeApprovalWorkflowTokenFile(approvalWorkflowTokenFile);
+    removeApprovalWorkflowTokenFile(
+      approvalWorkflowTokenFile,
+      options.approvalWorkflowTokenFileOperations,
+    );
   });
 
   if (stdoutBuffer.trim()) {
@@ -372,6 +389,7 @@ export function createControlledOperationTokenFile(token: string): string {
 export type ApprovalWorkflowTokenFileOperations = {
   writeFile?: typeof writeFileSync;
   sync?: typeof fsyncSync;
+  unlink?: typeof unlinkSync;
 };
 
 export function createApprovalWorkflowTokenFile(
@@ -405,7 +423,7 @@ export function createApprovalWorkflowTokenFile(
   }
   if (failure !== undefined) {
     try {
-      unlinkSync(path);
+      (operations.unlink ?? unlinkSync)(path);
     } catch {
       throw new Error('approval_workflow_token_cleanup_failed');
     }
@@ -423,12 +441,22 @@ function removeControlledOperationTokenFile(path: string | undefined): void {
   }
 }
 
-function removeApprovalWorkflowTokenFile(path: string | undefined): void {
+function removeApprovalWorkflowTokenFile(
+  path: string | undefined,
+  operations: ApprovalWorkflowTokenFileOperations = {},
+): void {
   if (!path) return;
   try {
-    unlinkSync(path);
-  } catch {
-    // The MCP adapter normally removes the one-time file after reading it.
+    (operations.unlink ?? unlinkSync)(path);
+  } catch (error) {
+    if (
+      error instanceof Error
+      && 'code' in error
+      && (error as NodeJS.ErrnoException).code === 'ENOENT'
+    ) {
+      return;
+    }
+    throw new Error('approval_workflow_token_cleanup_failed');
   }
 }
 
