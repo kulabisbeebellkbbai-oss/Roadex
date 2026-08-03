@@ -267,4 +267,97 @@ describe('useRoadexSession approval transition refresh', () => {
 
     runner.unmount();
   });
+
+  it('restores the paused approval state after a typed prompt denial', async () => {
+    vi.stubGlobal('window', {
+      navigator: {},
+      confirm: () => false,
+      localStorage: {
+        getItem: () => null,
+        setItem: () => undefined,
+      },
+    });
+
+    vi.doMock('react', async () => {
+      const actual = await vi.importActual<typeof import('react')>('react');
+      return {
+        ...actual,
+        useCallback: <Value extends (...args: never[]) => unknown>(callback: Value, dependencies: DependencyList) => (
+          requireHookRunner().useMemo(() => callback, dependencies)
+        ),
+        useEffect: (effect: EffectCallback, dependencies: DependencyList) => (
+          requireHookRunner().useEffect(effect, dependencies)
+        ),
+        useMemo: <Value>(factory: () => Value, dependencies: DependencyList) => (
+          requireHookRunner().useMemo(factory, dependencies)
+        ),
+        useRef: <Value>(initial: Value) => requireHookRunner().useRef(initial),
+        useState: <Value>(initial: Value | (() => Value)) => requireHookRunner().useState(initial),
+      };
+    });
+
+    let resolvePrompt: ((value: {
+      accepted: false;
+      error: { code: 'human-approval-pending'; message: string };
+    }) => void) | undefined;
+    const submitPrompt = vi.fn(() => new Promise<{
+      accepted: false;
+      error: { code: 'human-approval-pending'; message: string };
+    }>((resolve) => {
+      resolvePrompt = resolve;
+    }));
+
+    vi.doMock('../src/client/sessionApi', async () => {
+      const actual = await vi.importActual<typeof import('../src/client/sessionApi')>('../src/client/sessionApi');
+      return {
+        ...actual,
+        listArchivedSessions: vi.fn(async () => ({ sessions: [] })),
+        loginAndBootstrap: vi.fn(async () => ({
+          token: 'stable-mock-token',
+          bootstrap: bootstrapWithApproval('pending'),
+        })),
+        readSessionStream: vi.fn(async () => [] as StreamEvent[]),
+        submitPrompt,
+        subscribeSessionStream: vi.fn(() => () => undefined),
+      };
+    });
+
+    const { useRoadexSession } = await import('../src/hooks/useRoadexSession');
+    const runner = new HookRunner(useRoadexSession);
+    runner.render();
+
+    await vi.waitFor(() => {
+      expect(runner.value?.session?.lifecycle).toBe('paused');
+      expect(runner.value?.approvalWait?.state).toBe('pending');
+    });
+
+    const sending = runner.value?.sendPrompt('continue before approval');
+    await vi.waitFor(() => {
+      expect(submitPrompt).toHaveBeenCalledTimes(1);
+      expect(runner.value?.connectionState).toBe('streaming');
+      expect(runner.value?.session?.lifecycle).toBe('streaming');
+    });
+
+    resolvePrompt?.({
+      accepted: false,
+      error: {
+        code: 'human-approval-pending',
+        message: 'Human approval is still pending.',
+      },
+    });
+    await sending;
+
+    await vi.waitFor(() => {
+      expect(runner.value?.connectionState).toBe('connected');
+      expect(runner.value?.session?.lifecycle).toBe('paused');
+      expect(runner.value?.approvalWait?.state).toBe('pending');
+      expect(runner.value?.sessions[0]?.lifecycle).toBe('paused');
+      expect(runner.value?.sessions[0]?.waitingApproval?.state).toBe('pending');
+      expect(runner.value?.approvalComposerBlocked).toBe(true);
+      expect(runner.value?.error).toBeUndefined();
+      expect(runner.value?.notice).toBe('Human approval is still pending.');
+    });
+
+    runner.unmount();
+  });
 });

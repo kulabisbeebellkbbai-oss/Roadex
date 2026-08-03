@@ -23,7 +23,7 @@ import type {
   DeviceDescriptorObservationPayload,
   DeviceDescriptorObservationResponse,
 } from '../shared/deviceBridgeContracts';
-import { isApiError } from '../shared/apiContracts';
+import { isApiError, isPromptApprovalPendingResponse } from '../shared/apiContracts';
 import type {
   ProjectCreationChallengeResponse,
   ProjectCreationConfirmPayload,
@@ -88,6 +88,9 @@ export async function submitPrompt(
     method: 'POST',
     token,
     body: { prompt },
+    acceptErrorResponse: (status, payload): payload is PromptResponse => (
+      status === 409 && isPromptApprovalPendingResponse(payload)
+    ),
   });
 }
 
@@ -394,14 +397,15 @@ async function readLiveSessionStream(
   }
 }
 
-type RequestOptions = {
+type RequestOptions<Response> = {
   method?: string;
   token?: string;
   body?: unknown;
   requestId?: string;
+  acceptErrorResponse?: (status: number, payload: unknown) => payload is Response;
 };
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+async function request<T>(path: string, options: RequestOptions<T> = {}): Promise<T> {
   const method = options.method ?? 'GET';
   const response = await fetch(path, {
     method,
@@ -419,7 +423,10 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   const payload = (await response.json()) as T | ApiError;
   if (!response.ok || isApiError(payload)) {
-    if (response.status === 409 && !isApiError(payload)) {
+    if (options.acceptErrorResponse?.(response.status, payload)) {
+      return payload;
+    }
+    if (response.status === 409 && !options.acceptErrorResponse && !isApiError(payload)) {
       return payload as T;
     }
     const message = isApiError(payload) ? payload.error.message : `Request failed with status ${response.status}`;
@@ -429,7 +436,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return payload;
 }
 
-async function requestOptional<T>(path: string, options: RequestOptions = {}): Promise<
+async function requestOptional<T>(path: string, options: RequestOptions<T> = {}): Promise<
   | {
       ok: true;
       payload: T;
