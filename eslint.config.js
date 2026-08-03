@@ -5,7 +5,7 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
 
 export default [
-  { ignores: ['dist', 'dist-server', 'local-secrets', 'playwright-report', 'test-results'] },
+  { ignores: ['dist', 'dist-server', 'local-secrets', 'playwright-report', 'test-results', '**/.worktrees/**'] },
   js.configs.recommended,
   {
     files: ['deployment/**/*.mjs'],
