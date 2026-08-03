@@ -328,4 +328,73 @@ describe('Roadex client CSRF contract', () => {
     }
     expect(calls.some((call) => /authorize-write|flash|erase|firmware/.test(call.path))).toBe(false);
   });
+
+  it('preserves approval-wait projection fields from bootstrap', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const path = String(input);
+      if (path === '/api/bootstrap') {
+        return new Response(JSON.stringify({
+          user: { id: 'owner', displayName: 'Owner', authMode: 'mock', roles: ['user', 'admin', 'security-reviewer'] },
+          workspaces: [{ id: 'roadex', name: 'Roadex', root: '/srv/roadex' }],
+          sessions: [{
+            id: 'session-approval',
+            userId: 'owner',
+            workspace: { id: 'roadex', name: 'Roadex', root: '/srv/roadex' },
+            lifecycle: 'ready',
+            runnerMode: 'codex',
+            transport: 'sse',
+            deviceBridge: 'disabled',
+            gates: [],
+            createdAt: new Date(0).toISOString(),
+            updatedAt: new Date(1).toISOString(),
+            waitingApproval: {
+              waitId: 'wait-readonly',
+              approvalRef: 'admin.roadex.approval',
+              subject: 'provisioning a protected operation',
+              consoleSurface: 'admin',
+              consolePath: '/Overseer/admin',
+              state: 'pending',
+              updatedAt: new Date(1).toISOString(),
+            },
+          }],
+          auditEvents: [],
+          streamPreview: [],
+          managedThreads: [],
+          deviceBridgePolicy: {
+            state: 'disabled',
+            approvedFoundation: true,
+            operations: ['esp32.flash'],
+            requestIntakeEnabled: false,
+            descriptorObservationEnabled: false,
+            operationsEnabled: false,
+            writeEnabled: false,
+            reason: 'disabled',
+          },
+          deviceInventoryBindingRefs: [],
+          serialVerificationProfiles: [],
+          bleVerificationProfiles: [],
+          usbDeviceProfiles: [],
+        }), {
+          status: 200,
+          headers: {
+            'content-type': 'application/json',
+            'x-roadex-csrf': 'private-test-value',
+          },
+        });
+      }
+      return new Response('{"ok":true}', { status: 404 });
+    }));
+
+    const { loginAndBootstrap } = await import('../src/client/sessionApi');
+    const bootstrap = await loginAndBootstrap();
+
+    expect(bootstrap.bootstrap.sessions[0].waitingApproval).toMatchObject({
+      waitId: 'wait-readonly',
+      approvalRef: 'admin.roadex.approval',
+      subject: 'provisioning a protected operation',
+      consoleSurface: 'admin',
+      consolePath: '/Overseer/admin',
+      state: 'pending',
+    });
+  });
 });
