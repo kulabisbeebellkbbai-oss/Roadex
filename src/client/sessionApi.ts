@@ -31,6 +31,11 @@ import type {
   ProjectCreationProposalPublic,
   ProjectCreationProposalResponse,
 } from '../shared/projectCreationContracts';
+import type {
+  AppPublicationRequestPublic,
+  AppPublicationRequestResponse,
+  AppPublicationRequestSpec,
+} from '../shared/appPublicationContracts';
 
 let csrfToken: string | undefined;
 
@@ -139,6 +144,35 @@ export async function revokeProjectProposal(
     { method: 'POST', token, body: {}, requestId: crypto.randomUUID() },
   );
   return response.proposal;
+}
+
+export async function createAppPublicationRequest(
+  token: string | undefined,
+  spec: AppPublicationRequestSpec,
+  idempotencyKey: string,
+): Promise<AppPublicationRequestPublic> {
+  const response = await request<AppPublicationRequestResponse>(
+    '/Roadex/api/app-publication/requests',
+    {
+      method: 'POST',
+      token,
+      body: spec,
+      requestId: crypto.randomUUID(),
+      headers: { 'idempotency-key': idempotencyKey },
+    },
+  );
+  return response.request;
+}
+
+export async function getAppPublicationRequest(
+  token: string | undefined,
+  requestId: string,
+): Promise<AppPublicationRequestPublic> {
+  const response = await request<AppPublicationRequestResponse>(
+    `/Roadex/api/app-publication/requests/${encodeURIComponent(requestId)}`,
+    { token },
+  );
+  return response.request;
 }
 
 export async function submitDeviceDescriptorObservation(
@@ -403,6 +437,7 @@ type RequestOptions<Response> = {
   body?: unknown;
   requestId?: string;
   acceptErrorResponse?: (status: number, payload: unknown) => payload is Response;
+  headers?: Record<string, string>;
 };
 
 async function request<T>(path: string, options: RequestOptions<T> = {}): Promise<T> {
@@ -414,6 +449,7 @@ async function request<T>(path: string, options: RequestOptions<T> = {}): Promis
       ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
       ...(method !== 'GET' && csrfToken ? { 'x-roadex-csrf': csrfToken } : {}),
       ...(options.requestId ? { 'x-roadex-request-id': options.requestId } : {}),
+      ...options.headers,
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
   });

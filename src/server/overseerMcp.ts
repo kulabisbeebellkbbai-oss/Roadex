@@ -12,6 +12,9 @@ export const OVERSEER_ALLOWED_TOOLS = [
   'service_status',
   'remote_testing_status',
   'record_crew_message',
+  'get_crew_request',
+  'list_crew_requests',
+  'resubmit_crew_request',
 ] as const;
 
 type OverseerToolResult = Record<string, unknown>;
@@ -94,9 +97,14 @@ export function createOverseerMcpServer(
         subject: z.string().trim().min(1).max(120),
         message: z.string().trim().min(1).max(2_000),
         priority: z.enum(['low', 'medium', 'high']).default('medium'),
+        relatedResourceId: z.string().trim().min(1).max(200).optional(),
+        relatedPlanId: z.string().trim().min(1).max(200).optional(),
+        acceptanceCriteria: z.array(z.string().trim().min(1).max(500)).max(12).default([]),
+        evidenceIds: z.array(z.string().trim().min(1).max(240)).max(24).default([]),
       },
     },
-    async ({ ownerDomain, subject, message, priority }) => jsonContent(execute([
+    async ({ ownerDomain, subject, message, priority, relatedResourceId, relatedPlanId, acceptanceCriteria, evidenceIds }) => {
+      const args = [
       'record-crew-message',
       '--store',
       OVERSEER_STORE,
@@ -110,9 +118,67 @@ export function createOverseerMcpServer(
       priority,
       '--requested-by',
       'Roadex-controlled-runner',
-      '--related-resource-id',
-      'roadex.controlled-runner',
+      ];
+      if (relatedResourceId) args.push('--related-resource-id', relatedResourceId);
+      if (relatedPlanId) args.push('--related-plan-id', relatedPlanId);
+      for (const criterion of acceptanceCriteria) args.push('--acceptance-criterion', criterion);
+      for (const evidenceId of evidenceIds) args.push('--request-evidence-id', evidenceId);
+      return jsonContent(execute(args));
+    },
+  );
+
+  server.registerTool(
+    'get_crew_request',
+    {
+      description: 'Read one Roadex-owned crew request and its review decision.',
+      inputSchema: { messageId: z.string().trim().min(1).max(240) },
+    },
+    async ({ messageId }) => jsonContent(execute([
+      'crew-messages', '--store', OVERSEER_STORE,
+      '--requested-by', 'Roadex-controlled-runner', '--message-id', messageId,
     ])),
+  );
+
+  server.registerTool(
+    'list_crew_requests',
+    {
+      description: 'List Roadex-owned crew requests with delivery and review decisions.',
+      inputSchema: {},
+    },
+    async () => jsonContent(execute([
+      'crew-messages', '--store', OVERSEER_STORE,
+      '--requested-by', 'Roadex-controlled-runner',
+    ])),
+  );
+
+  server.registerTool(
+    'resubmit_crew_request',
+    {
+      description: 'Submit a corrected revision of a Roadex-owned request after correction or rejection.',
+      inputSchema: {
+        messageId: z.string().trim().min(1).max(240),
+        subject: z.string().trim().min(1).max(120),
+        message: z.string().trim().min(1).max(2_000),
+        relatedResourceId: z.string().trim().min(1).max(200).optional(),
+        relatedPlanId: z.string().trim().min(1).max(200).optional(),
+        acceptanceCriteria: z.array(z.string().trim().min(1).max(500)).max(12).default([]),
+        evidenceIds: z.array(z.string().trim().min(1).max(240)).max(24).default([]),
+      },
+    },
+    async ({ messageId, subject, message, relatedResourceId, relatedPlanId, acceptanceCriteria, evidenceIds }) => {
+      const args = [
+      'resubmit-crew-message', '--store', OVERSEER_STORE,
+      '--message-id', messageId, '--subject', subject, '--message', message,
+      '--requested-by', 'Roadex-controlled-runner',
+      '--expected-requester', 'Roadex-controlled-runner',
+      '--expected-requester', 'Roadex',
+      ];
+      if (relatedResourceId) args.push('--related-resource-id', relatedResourceId);
+      if (relatedPlanId) args.push('--related-plan-id', relatedPlanId);
+      for (const criterion of acceptanceCriteria) args.push('--acceptance-criterion', criterion);
+      for (const evidenceId of evidenceIds) args.push('--request-evidence-id', evidenceId);
+      return jsonContent(execute(args));
+    },
   );
 
   return server;
