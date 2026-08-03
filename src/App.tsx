@@ -32,10 +32,17 @@ import type { ProjectCreationProposalPublic, ProjectVisibility } from './shared/
 import { useRoadexSession } from './hooks/useRoadexSession';
 import { navItems } from './roadexModel';
 import { isVisibleTranscriptEvent, shouldFollowTranscript } from './transcript';
-import { resolveLayoutMode, toggleLayoutMode } from './layoutMode';
+import {
+  cycleLayoutPreference,
+  effectiveLayoutMode,
+  resolveLayoutMode,
+  type LayoutPreference,
+} from './layoutMode';
 import { hasBleRuntimeVerification, verifyBleRuntime } from './client/bleRuntimeVerifier';
 import { hasSerialRuntimeVerification, verifySerialRuntime } from './client/serialRuntimeVerifier';
 import { allowsUsbOperation } from './shared/usbDeviceProfileContracts';
+import { ApprovalWaitCard } from './components/ApprovalWaitCard';
+import { approvalWaitStatusCopy } from './components/approvalWait';
 
 function App() {
   const roadex = useRoadexSession();
@@ -67,10 +74,12 @@ function App() {
   const mobileDrawer = useRef<HTMLElement>(null);
   const transcript = useRef<HTMLDivElement>(null);
   const followTranscript = useRef(true);
-  const [layoutMode, setLayoutMode] = useState(() => resolveLayoutMode(
+  const [layoutPreference, setLayoutPreference] = useState<LayoutPreference>(() => resolveLayoutMode(
     readLayoutPreference(),
-    window.matchMedia('(max-width: 720px)').matches,
-  ));
+    window.innerWidth,
+  ).preference);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const layoutMode = effectiveLayoutMode(layoutPreference, viewportWidth);
   const session = roadex.session;
   const serialVerificationProfile = roadex.serialVerificationProfiles.find(
     (profile) => profile.workspaceId === session?.workspace.id,
@@ -113,6 +122,7 @@ function App() {
     roadex.connectionState === 'loading' ||
     roadex.connectionState === 'streaming' ||
     roadex.connectionState === 'error' ||
+    roadex.approvalComposerBlocked ||
     !session ||
     session.lifecycle !== 'ready';
   const threadIsWorking = roadex.connectionState === 'streaming'
@@ -193,11 +203,18 @@ function App() {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem('roadex-layout-mode', layoutMode);
+      window.localStorage.setItem('roadex-layout-mode', layoutPreference);
     } catch {
       // Storage can be unavailable in privacy-restricted browser contexts.
     }
-  }, [layoutMode]);
+  }, [layoutPreference]);
+
+  useEffect(() => {
+    if (layoutPreference !== 'auto') return undefined;
+    const handleResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [layoutPreference]);
 
   useEffect(() => {
     if (session?.workspace.id) setSelectedProjectId(session.workspace.id);
@@ -263,6 +280,14 @@ function App() {
     if (restoreFocus) requestAnimationFrame(() => mobileMenuButton.current?.focus());
   }
 
+  function handleLayoutPreferenceCycle() {
+    setLayoutPreference((current) => {
+      const next = cycleLayoutPreference(current);
+      if (next === 'auto') setViewportWidth(window.innerWidth);
+      return next;
+    });
+  }
+
   function handleNavigation(label: string) {
     if (label === 'Projects') {
       setSidebarPanel('projects');
@@ -316,7 +341,10 @@ function App() {
   }
 
   return (
-    <main className={`app-shell layout-${layoutMode} mobile-view-${mobileView}`}>
+    <main
+      className={`app-shell layout-${layoutMode} mobile-view-${mobileView}`}
+      data-layout-preference={layoutPreference}
+    >
       <aside
         aria-hidden={layoutMode === 'mobile' && !mobileMenuOpen}
         className={`sidebar${mobileMenuOpen ? ' mobile-open' : ''}`}
@@ -559,16 +587,32 @@ function App() {
             <Activity size={16} />
             <span>{threadIsWorking ? 'Working' : roadex.connectionState}</span>
           </div>
+          {roadex.approvalWait ? (
+            <div
+              aria-label="Human approval status"
+              className={`approval-header-status ${roadex.approvalWait.state}`}
+              role="status"
+            >
+              <Clock3 aria-hidden="true" size={16} />
+              <span>{approvalWaitStatusCopy(roadex.approvalWait.state)}</span>
+            </div>
+          ) : null}
           <button
             data-testid="layout-toggle"
-            aria-label={`Switch to ${layoutMode === 'desktop' ? 'mobile' : 'desktop'} layout`}
-            aria-pressed={layoutMode === 'mobile'}
+            aria-label={`Layout preference ${layoutPreference}; effective layout ${layoutMode}. Activate for ${cycleLayoutPreference(layoutPreference)}.`}
             className="icon-button layout-toggle"
-            onClick={() => setLayoutMode((current) => toggleLayoutMode(current))}
-            title={`Switch to ${layoutMode === 'desktop' ? 'mobile' : 'desktop'} layout`}
+            onClick={handleLayoutPreferenceCycle}
+            title={`Saved: ${layoutPreference}. Effective: ${layoutMode}.`}
             type="button"
           >
-            {layoutMode === 'desktop' ? <Smartphone size={19} /> : <Monitor size={19} />}
+            {layoutPreference === 'auto' ? (
+              <MonitorSmartphone aria-hidden="true" size={19} />
+            ) : layoutMode === 'desktop' ? (
+              <Monitor aria-hidden="true" size={19} />
+            ) : (
+              <Smartphone aria-hidden="true" size={19} />
+            )}
+            <span className="sr-only">Saved {layoutPreference}; effective {layoutMode}</span>
           </button>
         </header>
 
@@ -634,6 +678,8 @@ function App() {
               ref={transcript}
               tabIndex={0}
             >
+              {roadex.approvalWait ? <ApprovalWaitCard wait={roadex.approvalWait} /> : null}
+
               {roadex.connectionState === 'loading' ? (
                 <>
                   <div className="message skeleton" />

@@ -5,10 +5,10 @@ import type {
   CancelResponse,
   CloseResponse,
   MockLoginResponse,
-  PromptResponse,
+  PromptResponse as AcceptedPromptResponse,
   ReopenResponse,
 } from '../shared/apiContracts';
-import type { CreateSessionRequest, RoadexSession, SessionResponse, StreamEvent } from '../shared/sessionContracts';
+import type { AuditEvent, CreateSessionRequest, RoadexSession, SessionResponse, StreamEvent } from '../shared/sessionContracts';
 import type {
   DeviceArtifactMetadataPublic,
   DeviceBridgeApprovalPublic,
@@ -38,6 +38,26 @@ export type RoadexApiSession = {
   token?: string;
   bootstrap: BootstrapResponse;
 };
+
+export type ClientPromptResponse = AcceptedPromptResponse | {
+  accepted: false;
+  code: 'human-approval-pending';
+};
+
+export type PromptResponseAction =
+  | { kind: 'refresh-approval' }
+  | { kind: 'accepted'; auditEvent: AuditEvent };
+
+export function isHumanApprovalPendingResponse(
+  response: ClientPromptResponse,
+): response is Extract<ClientPromptResponse, { accepted: false }> {
+  return response.accepted === false && response.code === 'human-approval-pending';
+}
+
+export function promptResponseAction(response: ClientPromptResponse): PromptResponseAction {
+  if (isHumanApprovalPendingResponse(response)) return { kind: 'refresh-approval' };
+  return { kind: 'accepted', auditEvent: response.auditEvent };
+}
 
 export async function loginAndBootstrap(): Promise<RoadexApiSession> {
   const protectedBootstrap = await requestOptional<BootstrapResponse>('/api/bootstrap');
@@ -83,8 +103,8 @@ export async function submitPrompt(
   token: string | undefined,
   sessionId: string,
   prompt: string,
-): Promise<PromptResponse> {
-  return request<PromptResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/prompts`, {
+): Promise<ClientPromptResponse> {
+  return request<ClientPromptResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/prompts`, {
     method: 'POST',
     token,
     body: { prompt },

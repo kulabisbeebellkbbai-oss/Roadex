@@ -41,7 +41,27 @@ button {
 .app-shell {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
+  width: 100%;
+  max-width: 100%;
   min-height: 100vh;
+  overflow-x: hidden;
+}
+
+.app-shell.layout-tablet {
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+.app-shell.layout-tablet .sidebar {
+  padding: 18px 14px;
+}
+
+.app-shell.layout-tablet .dashboard-grid,
+.app-shell.layout-tablet .lower-grid {
+  grid-template-columns: 1fr;
+}
+
+.app-shell.layout-tablet .side-stack {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .sidebar {
@@ -64,8 +84,8 @@ button {
 .icon-button {
   display: inline-grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
   border: 1px solid rgb(255 255 255 / 14%);
   border-radius: 8px;
   background: rgb(255 255 255 / 8%);
@@ -73,6 +93,16 @@ button {
 
 .layout-toggle {
   flex: 0 0 auto;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .brand strong,
@@ -402,6 +432,40 @@ button {
   margin-left: auto;
 }
 
+.approval-header-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 44px;
+  max-width: min(460px, 42vw);
+  padding: 6px 12px;
+  border: 1px solid #d5bd7c;
+  border-radius: 8px;
+  color: var(--warning);
+  background: #fff8e9;
+  font-size: 0.8rem;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.approval-header-status svg {
+  flex: 0 0 auto;
+}
+
+.approval-header-status.security-failure,
+.approval-header-status.resume-reconciliation-required {
+  color: #7a1f1f;
+  border-color: #e6b7b7;
+  background: #fff5f5;
+}
+
+.approval-header-status.approved-resume-queued,
+.approval-header-status.resume-dispatching {
+  color: var(--accent-strong);
+  border-color: #bcd7cd;
+  background: #e4f3ed;
+}
+
 .hero,
 .session-header {
   display: grid;
@@ -600,6 +664,95 @@ button {
   scrollbar-gutter: stable;
 }
 
+.approval-wait {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid #d5bd7c;
+  border-left-width: 5px;
+  border-radius: 8px;
+  color: var(--ink);
+  background: #fffaf0;
+}
+
+.approval-wait.security-failure,
+.approval-wait.resume-reconciliation-required {
+  border-color: #d9a4a4;
+  background: #fff5f5;
+}
+
+.approval-wait.approved-resume-queued,
+.approval-wait.resume-dispatching {
+  border-color: #91c0af;
+  background: #f1faf6;
+}
+
+.approval-wait-heading,
+.approval-wait-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.approval-wait-heading strong,
+.approval-wait-heading span {
+  display: block;
+}
+
+.approval-wait-state {
+  max-width: 440px;
+  color: var(--warning);
+  font-size: 0.85rem;
+  font-weight: 800;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.approval-wait.security-failure .approval-wait-state,
+.approval-wait.resume-reconciliation-required .approval-wait-state {
+  color: #7a1f1f;
+}
+
+.approval-wait.approved-resume-queued .approval-wait-state,
+.approval-wait.resume-dispatching .approval-wait-state {
+  color: var(--accent-strong);
+}
+
+.approval-wait p {
+  margin: 0;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.approval-wait code {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-strong);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.approval-wait a {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: #ffffff;
+  background: var(--accent);
+  font-weight: 800;
+  text-decoration: none;
+}
+
 .status-dot.working {
   color: #075f3f;
   border-color: #78b99d;
@@ -750,6 +903,12 @@ button {
   box-shadow: 0 4px 16px rgb(38 58 49 / 8%);
 }
 
+.app-shell.layout-mobile .approval-header-status {
+  order: 4;
+  width: 100%;
+  max-width: none;
+}
+
 .app-shell.layout-mobile .topbar-title {
   flex: 1 1 auto;
 }
@@ -818,6 +977,26 @@ button {
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   -webkit-overflow-scrolling: touch;
+}
+
+.app-shell.layout-mobile .approval-wait {
+  flex: 0 0 auto;
+  padding: 14px 12px;
+}
+
+.app-shell.layout-mobile .approval-wait-heading,
+.app-shell.layout-mobile .approval-wait-action {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.app-shell.layout-mobile .approval-wait-state {
+  max-width: none;
+  text-align: left;
+}
+
+.app-shell.layout-mobile .approval-wait a {
+  width: 100%;
 }
 
 .app-shell.layout-mobile .transcript:focus-visible {
@@ -1385,12 +1564,14 @@ button {
     justify-self: start;
   }
 
-  .app-shell.layout-desktop {
+  .app-shell.layout-desktop,
+  .app-shell.layout-tablet {
     display: grid;
     grid-template-columns: 64px minmax(0, 1fr);
   }
 
-  .app-shell.layout-desktop .sidebar {
+  .app-shell.layout-desktop .sidebar,
+  .app-shell.layout-tablet .sidebar {
     position: static;
     display: flex;
     align-items: center;
@@ -1398,24 +1579,30 @@ button {
   }
 
   .app-shell.layout-desktop .brand div:last-child,
+  .app-shell.layout-tablet .brand div:last-child,
   .app-shell.layout-desktop .nav-item span,
-  .app-shell.layout-desktop .trust-panel {
+  .app-shell.layout-tablet .nav-item span,
+  .app-shell.layout-desktop .trust-panel,
+  .app-shell.layout-tablet .trust-panel {
     display: none;
   }
 
-  .app-shell.layout-desktop .nav-list {
+  .app-shell.layout-desktop .nav-list,
+  .app-shell.layout-tablet .nav-list {
     display: grid;
     width: 100%;
     overflow: visible;
   }
 
-  .app-shell.layout-desktop .nav-item {
+  .app-shell.layout-desktop .nav-item,
+  .app-shell.layout-tablet .nav-item {
     justify-content: center;
     width: 44px;
     padding: 0;
   }
 
-  .app-shell.layout-desktop .sidebar-projects {
+  .app-shell.layout-desktop .sidebar-projects,
+  .app-shell.layout-tablet .sidebar-projects {
     position: fixed;
     top: 276px;
     left: 64px;
@@ -1427,6 +1614,10 @@ button {
   }
 
   .app-shell.layout-desktop .sidebar-projects > * {
+    grid-column: 1;
+  }
+
+  .app-shell.layout-tablet .sidebar-projects > * {
     grid-column: 1;
   }
 }
@@ -1454,5 +1645,16 @@ button {
 
   .topbar-title strong {
     max-width: 210px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

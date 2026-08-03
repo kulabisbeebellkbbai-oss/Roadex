@@ -6,6 +6,33 @@ describe('Roadex client CSRF contract', () => {
     vi.resetModules();
   });
 
+  it('submits the exact prompt request and returns typed human-approval-pending without an append action', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ path: String(input), init });
+      return new Response(JSON.stringify({
+        accepted: false,
+        code: 'human-approval-pending',
+      }), {
+        status: 202,
+        headers: { 'content-type': 'application/json' },
+      });
+    }));
+
+    const { promptResponseAction, submitPrompt } = await import('../src/client/sessionApi');
+    const response = await submitPrompt('owner-token', 'session/approval', 'do not append this prompt');
+
+    expect(response).toEqual({ accepted: false, code: 'human-approval-pending' });
+    expect(promptResponseAction(response)).toEqual({ kind: 'refresh-approval' });
+    expect(promptResponseAction(response)).not.toHaveProperty('auditEvent');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].path).toBe('/api/sessions/session%2Fapproval/prompts');
+    expect(calls[0].init?.method).toBe('POST');
+    expect(new Headers(calls[0].init?.headers).get('authorization')).toBe('Bearer owner-token');
+    expect(new Headers(calls[0].init?.headers).get('content-type')).toBe('application/json');
+    expect(calls[0].init?.body).toBe(JSON.stringify({ prompt: 'do not append this prompt' }));
+  });
+
   it('uses exact owner project proposal, challenge, confirmation, and revoke routes', async () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

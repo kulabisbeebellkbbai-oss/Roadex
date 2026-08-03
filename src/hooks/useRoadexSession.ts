@@ -14,6 +14,7 @@ import {
   confirmVerifiedDeviceProbe,
   loadVerifiedFirmware,
   reportVerifiedFirmwareWrite,
+  promptResponseAction,
   subscribeSessionStream,
   submitPrompt,
   submitDeviceDescriptorObservation,
@@ -46,6 +47,8 @@ import type {
 import type { SerialVerificationProfile } from '../shared/serialVerificationContracts';
 import type { BleVerificationProfile } from '../shared/bleVerificationContracts';
 import { allowsUsbOperation, type UsbDeviceProfile } from '../shared/usbDeviceProfileContracts';
+import type { WaitingApprovalSummary } from '../shared/approvalWorkflowContracts';
+import { createLatestRefreshSequence } from './latestRefreshSequence';
 
 export type ConnectionState = 'loading' | 'connected' | 'streaming' | 'error';
 
@@ -72,6 +75,8 @@ export type RoadexSessionState = {
   auditEvents: AuditEvent[];
   error?: string;
   notice?: string;
+  approvalWait?: WaitingApprovalSummary;
+  approvalComposerBlocked: boolean;
   sendPrompt: (prompt: string) => Promise<void>;
   cancelPrompt: () => Promise<void>;
   closeCurrentSession: () => Promise<void>;
@@ -119,6 +124,8 @@ export function useRoadexSession(): RoadexSessionState {
   const threadSelectionSequence = useRef(0);
   const activeStreamSessionId = useRef<string | undefined>(undefined);
   const verifiedDeviceMac = useRef<string | undefined>(undefined);
+  const attachRefreshSequence = useRef(createLatestRefreshSequence());
+  const { approvalWait, approvalComposerBlocked } = approvalProjectionForSession(session);
 
   const refreshStream = useCallback(
     async (targetSession: RoadexSession | undefined = session) => {
@@ -131,6 +138,7 @@ export function useRoadexSession(): RoadexSessionState {
   );
 
   const attach = useCallback(async () => {
+    const generation = attachRefreshSequence.current.begin();
     setConnectionState('loading');
     setError(undefined);
     setNotice(undefined);
@@ -140,31 +148,34 @@ export function useRoadexSession(): RoadexSessionState {
         result.bootstrap.sessions,
         readSelectedSessionPreference(),
       );
-      setToken(result.token);
-      setUser(result.bootstrap.user);
-      setWorkspaces(result.bootstrap.workspaces);
-      setSessions(result.bootstrap.sessions);
-      setManagedThreads(result.bootstrap.managedThreads);
-      setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
-      setSerialVerificationProfiles(result.bootstrap.serialVerificationProfiles);
-      setBleVerificationProfiles(result.bootstrap.bleVerificationProfiles);
-      setUsbDeviceProfiles(result.bootstrap.usbDeviceProfiles);
-      setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
-      setSession(activeSession);
-      const archived = await listArchivedSessions(result.token);
-      setArchivedSessions(archived.sessions);
-      setAuditEvents(result.bootstrap.auditEvents);
-      setTranscript(result.bootstrap.streamPreview.filter(
-        (event) => !activeSession || event.sessionId === activeSession.id,
-      ));
-      if (activeSession) {
-        const events = await readSessionStream(result.token, activeSession.id);
-        setTranscript(events);
-      }
-      setConnectionState('connected');
+      const [archived, events] = await Promise.all([
+        listArchivedSessions(result.token),
+        activeSession
+          ? readSessionStream(result.token, activeSession.id)
+          : Promise.resolve(result.bootstrap.streamPreview),
+      ]);
+      attachRefreshSequence.current.applyIfLatest(generation, () => {
+        setToken(result.token);
+        setUser(result.bootstrap.user);
+        setWorkspaces(result.bootstrap.workspaces);
+        setSessions(result.bootstrap.sessions);
+        setManagedThreads(result.bootstrap.managedThreads);
+        setDeviceBridgePolicy(result.bootstrap.deviceBridgePolicy);
+        setSerialVerificationProfiles(result.bootstrap.serialVerificationProfiles);
+        setBleVerificationProfiles(result.bootstrap.bleVerificationProfiles);
+        setUsbDeviceProfiles(result.bootstrap.usbDeviceProfiles);
+        setDeviceInventoryBindingRefs(result.bootstrap.deviceInventoryBindingRefs);
+        setSession(activeSession);
+        setArchivedSessions(archived.sessions);
+        setAuditEvents(result.bootstrap.auditEvents);
+        setTranscript(events.filter((event) => !activeSession || event.sessionId === activeSession.id));
+        setConnectionState('connected');
+      });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Roadex session attach failed.');
-      setConnectionState('error');
+      attachRefreshSequence.current.applyIfLatest(generation, () => {
+        setError(caught instanceof Error ? caught.message : 'Roadex session attach failed.');
+        setConnectionState('error');
+      });
     }
   }, []);
 
@@ -195,6 +206,9 @@ export function useRoadexSession(): RoadexSessionState {
       (event) => {
         if (activeStreamSessionId.current !== sessionId) return;
         setTranscript((existing) => mergeStreamEvents(existing, [event]));
+        if (isApprovalWaitTransitionEvent(event)) {
+          void attach();
+        }
         if (isRunnerTerminal(event)) {
           const lifecycle = lifecycleForTerminalEvent(event);
           if (!lifecycle) return;
@@ -209,7 +223,7 @@ export function useRoadexSession(): RoadexSessionState {
         setConnectionState('error');
       },
     );
-  }, [sessionId, token]);
+  }, [attach, sessionId, token]);
 
   const sendPrompt = useCallback(
     async (prompt: string) => {
@@ -222,7 +236,12 @@ export function useRoadexSession(): RoadexSessionState {
       setNotice(undefined);
       try {
         const response = await submitPrompt(token, session.id, prompt);
-        setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
+        const action = promptResponseAction(response);
+        if (action.kind === 'refresh-approval') {
+          await attach();
+          return;
+        }
+        setAuditEvents((existing) => [action.auditEvent, ...existing].slice(0, 8));
       } catch (caught) {
         setSessions((existing) => updateSessionLifecycle(existing, targetSessionId, 'ready'));
         if (activeStreamSessionId.current === targetSessionId) {
@@ -232,7 +251,7 @@ export function useRoadexSession(): RoadexSessionState {
         }
       }
     },
-    [session, token],
+    [attach, session, token],
   );
 
   const cancelPrompt = useCallback(async () => {
@@ -736,6 +755,8 @@ export function useRoadexSession(): RoadexSessionState {
       auditEvents,
       error,
       notice,
+      approvalWait,
+      approvalComposerBlocked,
       sendPrompt,
       cancelPrompt,
       closeCurrentSession,
@@ -766,6 +787,8 @@ export function useRoadexSession(): RoadexSessionState {
       createThread,
       error,
       notice,
+      approvalWait,
+      approvalComposerBlocked,
       managedThreads,
       deviceBridgePolicy,
       browserDeviceCapability,
@@ -798,6 +821,22 @@ export function useRoadexSession(): RoadexSessionState {
       workspaces,
     ],
   );
+}
+
+export function approvalProjectionForSession(session: RoadexSession | undefined): {
+  approvalWait: WaitingApprovalSummary | undefined;
+  approvalComposerBlocked: boolean;
+} {
+  return {
+    approvalWait: session?.waitingApproval,
+    approvalComposerBlocked: Boolean(session?.waitingApproval),
+  };
+}
+
+export function isApprovalWaitTransitionEvent(event: StreamEvent): boolean {
+  if (event.kind !== 'system') return false;
+  return event.message.startsWith('Roadex is waiting for human approval in ')
+    || event.message.startsWith('Roadex human approval result: ');
 }
 
 function mergeStreamEvents(existing: StreamEvent[], next: StreamEvent[]): StreamEvent[] {

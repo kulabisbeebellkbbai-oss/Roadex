@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page }, testInfo) => {
+  if (testInfo.title.includes('human approval')) return;
   await page.goto('/');
   await expect(page.locator('main.app-shell')).toHaveClass(/layout-mobile/);
 });
@@ -145,6 +146,180 @@ test('exposes controls and information views through the mobile drawer', async (
   await expect(page.locator('main.app-shell')).toHaveClass(/mobile-view-chat/);
   await expect(menu).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('.transcript')).toBeVisible();
+});
+
+test('human approval wait survives reconnect without invoking approval', async ({ page }) => {
+  const workspace = { id: 'roadex', name: 'Roadex', root: '/srv/roadex' };
+  const baseSession = {
+    id: 'session-approval',
+    userId: 'owner',
+    workspace,
+    runnerMode: 'codex',
+    transport: 'sse',
+    deviceBridge: 'disabled',
+    gates: [],
+    createdAt: '2026-08-02T20:00:00.000Z',
+    updatedAt: '2026-08-02T20:00:00.000Z',
+  };
+  const waitingApproval = {
+    waitId: 'wait-overview',
+    approvalRef: 'approval-overview-2026-08-02',
+    subject: 'Continue the reviewed project workflow',
+    consoleSurface: 'overview',
+    consolePath: '/Overseer/overview',
+    state: 'pending',
+    updatedAt: '2026-08-02T20:00:00.000Z',
+  };
+  let waitProjected = false;
+  const projectedSession = () => ({
+    ...baseSession,
+    lifecycle: waitProjected ? 'paused' : 'ready',
+    ...(waitProjected ? { waitingApproval } : {}),
+  });
+  let consoleNavigationCount = 0;
+  let promptCount = 0;
+  let historyStreamCount = 0;
+  let liveStreamCount = 0;
+
+  await page.route('**/api/bootstrap', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({
+      user: { id: 'owner', displayName: 'Owner', authMode: 'protected-gateway', roles: ['user'] },
+      workspaces: [workspace],
+      sessions: [projectedSession()],
+      auditEvents: [],
+      streamPreview: [],
+      managedThreads: [],
+      deviceBridgePolicy: {
+        state: 'disabled',
+        approvedFoundation: true,
+        operations: ['esp32.flash'],
+        requestIntakeEnabled: false,
+        descriptorObservationEnabled: false,
+        operationsEnabled: false,
+        writeEnabled: false,
+        reason: 'disabled',
+      },
+      deviceInventoryBindingRefs: [],
+      serialVerificationProfiles: [],
+      bleVerificationProfiles: [],
+      usbDeviceProfiles: [],
+    }),
+  }));
+  await page.route('**/api/sessions', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ sessions: [] }),
+  }));
+  await page.route('**/api/sessions/session-approval/prompts', async (route) => {
+    promptCount += 1;
+    expect(route.request().method()).toBe('POST');
+    expect(await route.request().postDataJSON()).toEqual({ prompt: 'continue reviewed work' });
+    waitProjected = true;
+    await route.fulfill({
+      contentType: 'application/json',
+      status: 202,
+      body: JSON.stringify({ accepted: false, code: 'human-approval-pending' }),
+    });
+  });
+  await page.route('**/api/sessions/session-approval/stream*', (route) => {
+    const isLive = new URL(route.request().url()).searchParams.get('live') === '1';
+    if (isLive) liveStreamCount += 1;
+    else historyStreamCount += 1;
+    return route.fulfill({
+      contentType: 'text/event-stream',
+      body: '',
+    });
+  });
+  await page.route('**/Overseer/overview', (route) => {
+    consoleNavigationCount += 1;
+    return route.fulfill({ contentType: 'text/html', body: 'not opened by this test' });
+  });
+
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('main.app-shell')).toHaveClass(/layout-mobile/);
+
+  const composer = page.getByRole('textbox', { name: 'Prompt' });
+  await expect(composer).toBeEnabled();
+  await composer.fill('continue reviewed work');
+  await page.locator('.prompt-row button[type="submit"]').click();
+
+  const card = page.getByRole('status', { name: 'Human approval required' });
+  await expect(card).toBeVisible();
+  await expect(card).toContainText('Overview Console');
+  await expect(card).toContainText('Roadex will continue automatically after approval is verified.');
+  await expect(composer).toBeDisabled();
+  await expect(page.locator('.prompt-row button[type="submit"]')).toBeDisabled();
+  await expect(page.locator('.message.user')).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Open Overview Console' })).toHaveAttribute(
+    'href',
+    '/Overseer/overview',
+  );
+  await expect(page.locator('.transcript')).toBeVisible();
+
+  const layoutToggle = page.getByTestId('layout-toggle');
+  const shell = page.locator('main.app-shell');
+  const expectLayout = async (preference: string, effective: string) => {
+    await expect(layoutToggle).toHaveAccessibleName(
+      new RegExp(`Layout preference ${preference}; effective layout ${effective}`),
+    );
+    await expect(shell).toHaveClass(new RegExp(`layout-${effective}`));
+    await expect(shell).toHaveAttribute('data-layout-preference', preference);
+  };
+  const expectNoHorizontalOverflow = async () => {
+    await expect.poll(() => page.evaluate(() => (
+      document.documentElement.scrollWidth - document.documentElement.clientWidth
+    ))).toBeLessThanOrEqual(0);
+  };
+
+  await expectLayout('auto', 'mobile');
+  await layoutToggle.click();
+  await expectLayout('desktop', 'desktop');
+  await expectNoHorizontalOverflow();
+  await layoutToggle.click();
+  await expectLayout('tablet', 'tablet');
+  await expectNoHorizontalOverflow();
+  await layoutToggle.click();
+  await expectLayout('mobile', 'mobile');
+  await expectNoHorizontalOverflow();
+  await layoutToggle.click();
+  await expectLayout('auto', 'mobile');
+
+  for (const viewport of [
+    { width: 390, height: 844, effective: 'mobile' },
+    { width: 820, height: 1180, effective: 'tablet' },
+    { width: 1440, height: 1000, effective: 'desktop' },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expectLayout('auto', viewport.effective);
+    await expectNoHorizontalOverflow();
+  }
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('roadex-layout-mode'))).toBe('auto');
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectLayout('auto', 'mobile');
+  const menu = page.getByRole('button', { name: 'Open navigation and controls' });
+  await menu.click();
+  await expect(page.getByRole('complementary', { name: 'Roadex navigation' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.locator('.transcript')).toBeVisible();
+
+  await page.setViewportSize({ width: 820, height: 1180 });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expectLayout('auto', 'tablet');
+  await expect(page.getByRole('status', { name: 'Human approval required' })).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeDisabled();
+
+  waitProjected = false;
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('status', { name: 'Human approval required' })).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeEnabled();
+  await expectLayout('auto', 'tablet');
+
+  expect(promptCount).toBe(1);
+  expect(historyStreamCount).toBeGreaterThanOrEqual(3);
+  expect(liveStreamCount).toBeGreaterThanOrEqual(3);
+  expect(consoleNavigationCount).toBe(0);
 });
 
 test('keeps desktop conversation history in a fixed scroll viewport', async ({ page }) => {
