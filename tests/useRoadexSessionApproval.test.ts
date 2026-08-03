@@ -539,4 +539,169 @@ describe('useRoadexSession approval transition refresh', () => {
 
     runner.unmount();
   });
+
+  it('does not apply a late denial after retry starts replacing the selected session', async () => {
+    stubHookWindow();
+    mockReactHooks();
+    const controlledPrompt = controlledPromptDenial();
+    const initialBootstrap = bootstrapWithApproval('pending');
+    const replacementSession = { ...initialBootstrap.sessions[0] };
+    delete replacementSession.waitingApproval;
+    replacementSession.id = 'session-after-retry';
+    replacementSession.lifecycle = 'ready';
+    const replacementBootstrap = { ...initialBootstrap, sessions: [replacementSession] };
+    let resolveRetry: ((value: { bootstrap: RoadexBootstrap; session: typeof replacementSession }) => void) | undefined;
+    const createSession = vi.fn(() => new Promise<{
+      bootstrap: RoadexBootstrap;
+      session: typeof replacementSession;
+    }>((resolve) => {
+      resolveRetry = resolve;
+    }));
+
+    vi.doMock('../src/client/sessionApi', async () => {
+      const actual = await vi.importActual<typeof import('../src/client/sessionApi')>('../src/client/sessionApi');
+      return {
+        ...actual,
+        createSession,
+        listArchivedSessions: vi.fn(async () => ({ sessions: [] })),
+        loginAndBootstrap: vi.fn(async () => ({ token: 'stable-mock-token', bootstrap: initialBootstrap })),
+        readSessionStream: vi.fn(async () => [] as StreamEvent[]),
+        submitPrompt: controlledPrompt.submitPrompt,
+        subscribeSessionStream: vi.fn(() => () => undefined),
+      };
+    });
+
+    const { useRoadexSession } = await import('../src/hooks/useRoadexSession');
+    const runner = new HookRunner(useRoadexSession);
+    runner.render();
+    await vi.waitFor(() => expect(runner.value?.session?.lifecycle).toBe('paused'));
+
+    const sending = runner.value?.sendPrompt('continue before approval');
+    await vi.waitFor(() => expect(runner.value?.connectionState).toBe('streaming'));
+    const retrying = runner.value?.retry();
+    await vi.waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+
+    controlledPrompt.resolve(pendingDenial);
+    await sending;
+    await vi.waitFor(() => {
+      expect(runner.value?.connectionState).toBe('streaming');
+      expect(runner.value?.notice).toBeUndefined();
+    });
+
+    if (!resolveRetry) throw new Error('Retry request has not started.');
+    resolveRetry({ bootstrap: replacementBootstrap, session: replacementSession });
+    await retrying;
+    await vi.waitFor(() => {
+      expect(runner.value?.connectionState).toBe('connected');
+      expect(runner.value?.session?.id).toBe('session-after-retry');
+      expect(runner.value?.session?.lifecycle).toBe('ready');
+      expect(runner.value?.notice).toBeUndefined();
+    });
+
+    runner.unmount();
+  });
+
+  it('does not clear a newer cancel failure when the prompt denial arrives late', async () => {
+    stubHookWindow();
+    mockReactHooks();
+    const controlledPrompt = controlledPromptDenial();
+
+    vi.doMock('../src/client/sessionApi', async () => {
+      const actual = await vi.importActual<typeof import('../src/client/sessionApi')>('../src/client/sessionApi');
+      return {
+        ...actual,
+        cancelSession: vi.fn(async () => { throw new Error('Newer cancel failure.'); }),
+        listArchivedSessions: vi.fn(async () => ({ sessions: [] })),
+        loginAndBootstrap: vi.fn(async () => ({
+          token: 'stable-mock-token',
+          bootstrap: bootstrapWithApproval('pending'),
+        })),
+        readSessionStream: vi.fn(async () => [] as StreamEvent[]),
+        submitPrompt: controlledPrompt.submitPrompt,
+        subscribeSessionStream: vi.fn(() => () => undefined),
+      };
+    });
+
+    const { useRoadexSession } = await import('../src/hooks/useRoadexSession');
+    const runner = new HookRunner(useRoadexSession);
+    runner.render();
+    await vi.waitFor(() => expect(runner.value?.session?.lifecycle).toBe('paused'));
+
+    const sending = runner.value?.sendPrompt('continue before approval');
+    await vi.waitFor(() => expect(runner.value?.connectionState).toBe('streaming'));
+    await runner.value?.cancelPrompt();
+    await vi.waitFor(() => {
+      expect(runner.value?.connectionState).toBe('error');
+      expect(runner.value?.error).toBe('Newer cancel failure.');
+    });
+
+    controlledPrompt.resolve(pendingDenial);
+    await sending;
+    await vi.waitFor(() => {
+      expect(runner.value?.connectionState).toBe('error');
+      expect(runner.value?.error).toBe('Newer cancel failure.');
+      expect(runner.value?.notice).toBeUndefined();
+    });
+
+    runner.unmount();
+  });
+
+  it('does not replace a newer successful cancel notice with a late denial', async () => {
+    stubHookWindow();
+    mockReactHooks();
+    const controlledPrompt = controlledPromptDenial();
+    const cancelSession = vi.fn(async () => ({
+      cancelled: true,
+      status: 'cancel-requested' as const,
+      auditEvent: {
+        id: 'audit-cancel',
+        at: '2026-08-02T00:00:03.000Z',
+        actorId: 'owner',
+        action: 'session.cancel' as const,
+        resource: 'session-approval-hook',
+        outcome: 'allowed' as const,
+        summary: 'Cancel requested.',
+      },
+    }));
+
+    vi.doMock('../src/client/sessionApi', async () => {
+      const actual = await vi.importActual<typeof import('../src/client/sessionApi')>('../src/client/sessionApi');
+      return {
+        ...actual,
+        cancelSession,
+        listArchivedSessions: vi.fn(async () => ({ sessions: [] })),
+        loginAndBootstrap: vi.fn(async () => ({
+          token: 'stable-mock-token',
+          bootstrap: bootstrapWithApproval('pending'),
+        })),
+        readSessionStream: vi.fn(async () => [] as StreamEvent[]),
+        submitPrompt: controlledPrompt.submitPrompt,
+        subscribeSessionStream: vi.fn(() => () => undefined),
+      };
+    });
+
+    const { useRoadexSession } = await import('../src/hooks/useRoadexSession');
+    const runner = new HookRunner(useRoadexSession);
+    runner.render();
+    await vi.waitFor(() => expect(runner.value?.session?.lifecycle).toBe('paused'));
+
+    const sending = runner.value?.sendPrompt('continue before approval');
+    await vi.waitFor(() => expect(runner.value?.connectionState).toBe('streaming'));
+    await runner.value?.cancelPrompt();
+    await vi.waitFor(() => {
+      expect(cancelSession).toHaveBeenCalledTimes(1);
+      expect(runner.value?.connectionState).toBe('connected');
+      expect(runner.value?.notice).toBe('Cancel requested for the active Codex run.');
+    });
+
+    controlledPrompt.resolve(pendingDenial);
+    await sending;
+    await vi.waitFor(() => {
+      expect(runner.value?.connectionState).toBe('connected');
+      expect(runner.value?.notice).toBe('Cancel requested for the active Codex run.');
+      expect(runner.value?.error).toBeUndefined();
+    });
+
+    runner.unmount();
+  });
 });
