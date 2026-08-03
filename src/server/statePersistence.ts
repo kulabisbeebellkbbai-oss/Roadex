@@ -568,6 +568,10 @@ function sanitizeApprovalWait(record: unknown): ApprovalWaitRecord | undefined {
   const resumedAt = Object.hasOwn(candidate, 'resumedAt')
     ? candidate.resumedAt
     : undefined;
+  const hasSuccessorOfWaitId = Object.hasOwn(candidate, 'successorOfWaitId');
+  const successorOfWaitId = hasSuccessorOfWaitId
+    ? cleanCanonicalOpaqueString(candidate.successorOfWaitId, 128)
+    : undefined;
   const checkAttempt = candidate.checkAttempt as number;
   const id = cleanCanonicalOpaqueString(candidate.id, 128);
   const sessionId = cleanCanonicalOpaqueString(candidate.sessionId, 128);
@@ -603,6 +607,7 @@ function sanitizeApprovalWait(record: unknown): ApprovalWaitRecord | undefined {
     validOptionalIsoDate(decisionObservedAt) &&
     validOptionalIsoDate(dispatchReservedAt) &&
     validOptionalBoundedString(runnerRunId, 256) &&
+    (!hasSuccessorOfWaitId || successorOfWaitId !== undefined) &&
     validOptionalIsoDate(resumedAt)
   )) return undefined;
   return {
@@ -633,6 +638,9 @@ function sanitizeApprovalWait(record: unknown): ApprovalWaitRecord | undefined {
       : {}),
     ...(Object.hasOwn(candidate, 'runnerRunId') && runnerRunId
       ? { runnerRunId: cleanOptionalString(runnerRunId)! }
+      : {}),
+    ...(hasSuccessorOfWaitId && successorOfWaitId
+      ? { successorOfWaitId }
       : {}),
     ...(Object.hasOwn(candidate, 'resumedAt') && resumedAt
       ? { resumedAt: cleanOptionalIsoDate(resumedAt) }
@@ -682,6 +690,7 @@ const APPROVAL_WAIT_ALLOWED_KEYS = new Set([
   'decisionObservedAt',
   'dispatchReservedAt',
   'runnerRunId',
+  'successorOfWaitId',
   'resumedAt',
 ]);
 

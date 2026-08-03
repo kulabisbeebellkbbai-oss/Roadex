@@ -194,6 +194,22 @@ function deriveContinuationId(sessionId: string, approvalRef: string, decisionVe
   return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
 }
 
+function deriveSuccessorContinuationId(
+  waitId: string,
+  sessionId: string,
+  approvalRef: string,
+  decisionVersion: string,
+): string {
+  const canonical = JSON.stringify([
+    'roadex-approval-successor-v1',
+    waitId,
+    sessionId,
+    approvalRef,
+    decisionVersion,
+  ]);
+  return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
+}
+
 describe('ApprovalCoordinator', () => {
   it('registers a pending approval and pauses the session with full wait result', async () => {
     const clock = clockWithState();
@@ -1323,7 +1339,7 @@ describe('ApprovalCoordinator', () => {
       [session],
       statusSequenceProvider([fixtureStatus({
         decision: 'approved',
-        decisionVersion: `sha256:${'e'.repeat(64)}`,
+        decisionVersion: closedWait.decisionVersion,
       })]),
       { ...callbacksBuilder().callbacks, queueContinuation },
       { clock, idSource: { generateWaitId: () => 'wait-reopened-approved' } },
@@ -1337,12 +1353,20 @@ describe('ApprovalCoordinator', () => {
       id: 'wait-reopened-approved',
       state: 'resume-dispatching',
       runnerRunId: 'runner-reopened',
-      decisionVersion: `sha256:${'e'.repeat(64)}`,
+      decisionVersion: closedWait.decisionVersion,
     });
+    expect(waits[1].continuationId).toBe(deriveSuccessorContinuationId(
+      'wait-reopened-approved',
+      session.id,
+      closedWait.approvalRef,
+      closedWait.decisionVersion,
+    ));
     expect(waits[1].continuationId).not.toBe(closedWait.continuationId);
+    expect(waits[1].continuationId).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(session.lifecycle).toBe('paused');
     expect(session.waitingApproval?.waitId).toBe('wait-reopened-approved');
     expect(queueContinuation).toHaveBeenCalledTimes(1);
+    expect(queueContinuation.mock.calls[0]?.[0].continuationId).toBe(waits[1].continuationId);
   });
 
   it('keeps a closed approval session closed when reopen provider verification fails', async () => {
@@ -1362,6 +1386,85 @@ describe('ApprovalCoordinator', () => {
     await expect(coordinator.reopenSessionWait(session.id)).resolves.toBe('denied');
     expect(session.lifecycle).toBe('closed');
     expect(waits).toEqual([closedWait]);
+  });
+
+  it('rolls back a failed successor persistence and permits one fresh retry', async () => {
+    const clock = clockWithState();
+    const closedWait = fixtureWait({ state: 'session-closed', updatedAt: clock.now() });
+    const session = fixtureSession({ lifecycle: 'closed' });
+    session.lifecycle = 'closed';
+    delete session.waitingApproval;
+    const waits = [closedWait];
+    const ids = ['wait-reopen-failed', 'wait-reopen-retry'];
+    let persistAttempt = 0;
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      [session],
+      statusSequenceProvider([
+        fixtureStatus({ decision: 'pending', decisionVersion: closedWait.decisionVersion }),
+        fixtureStatus({ decision: 'pending', decisionVersion: closedWait.decisionVersion }),
+      ]),
+      callbacksBuilder({
+        persist: async () => {
+          persistAttempt += 1;
+          if (persistAttempt === 1) throw new Error('durable write failed');
+        },
+      }).callbacks,
+      { clock, idSource: { generateWaitId: () => ids.shift() ?? 'unexpected-wait-id' } },
+    );
+
+    await expect(coordinator.reopenSessionWait(session.id)).resolves.toBe('denied');
+    expect(session.lifecycle).toBe('closed');
+    expect(waits).toEqual([closedWait]);
+
+    await expect(coordinator.reopenSessionWait(session.id)).resolves.toBe('waiting');
+    expect(waits).toHaveLength(2);
+    expect(waits[1]).toMatchObject({
+      id: 'wait-reopen-retry',
+      state: 'pending',
+      successorOfWaitId: closedWait.id,
+      decisionVersion: closedWait.decisionVersion,
+    });
+    expect(waits[1].continuationId).not.toBe(closedWait.continuationId);
+    expect(session.waitingApproval?.waitId).toBe('wait-reopen-retry');
+  });
+
+  it('linearizes concurrent reopen attempts to one fresh successor', async () => {
+    const clock = clockWithState();
+    const closedWait = fixtureWait({ state: 'session-closed', updatedAt: clock.now() });
+    const session = fixtureSession({ lifecycle: 'closed' });
+    session.lifecycle = 'closed';
+    delete session.waitingApproval;
+    const waits = [closedWait];
+    const ids = ['wait-reopen-first', 'wait-reopen-second'];
+    const persist = vi.fn(async () => {});
+    const getStatus = vi.fn(async () => fixtureStatus({
+      decision: 'pending',
+      decisionVersion: closedWait.decisionVersion,
+    }));
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      [session],
+      { getStatus },
+      callbacksBuilder({ persist }).callbacks,
+      { clock, idSource: { generateWaitId: () => ids.shift() ?? 'unexpected-wait-id' } },
+    );
+
+    await expect(Promise.all([
+      coordinator.reopenSessionWait(session.id),
+      coordinator.reopenSessionWait(session.id),
+    ])).resolves.toEqual(expect.arrayContaining(['waiting', 'denied']));
+
+    expect(waits).toHaveLength(2);
+    expect(waits[1]).toMatchObject({
+      id: 'wait-reopen-first',
+      state: 'pending',
+      successorOfWaitId: closedWait.id,
+    });
+    expect(session.waitingApproval?.waitId).toBe('wait-reopen-first');
+    expect(persist).toHaveBeenCalledTimes(1);
+    await expect(coordinator.reopenSessionWait(session.id)).resolves.toBe('denied');
+    expect(waits).toHaveLength(2);
   });
 
   it('transitions approved wait to resume-dispatching state with persistent dispatch reserve', async () => {
