@@ -397,4 +397,40 @@ describe('Roadex client CSRF contract', () => {
       state: 'pending',
     });
   });
+
+  it('returns only the exact human-approval-pending prompt conflict', async () => {
+    const pending = {
+      accepted: false,
+      error: {
+        code: 'human-approval-pending',
+        message: 'Human approval is still pending.',
+      },
+    } as const;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(pending), {
+      status: 409,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const { submitPrompt } = await import('../src/client/sessionApi');
+
+    await expect(submitPrompt('session-token', 'session-waiting', 'continue')).resolves.toEqual(pending);
+  });
+
+  it.each([
+    ['wrong code', { accepted: false, error: { code: 'other-conflict', message: 'Conflict.' } }],
+    ['missing accepted flag', { error: { code: 'human-approval-pending', message: 'Conflict.' } }],
+    ['extra response field', { accepted: false, error: { code: 'human-approval-pending', message: 'Conflict.' }, retry: true }],
+    ['extra error field', { accepted: false, error: { code: 'human-approval-pending', message: 'Conflict.', gate: 'approval' } }],
+    ['empty message', { accepted: false, error: { code: 'human-approval-pending', message: '' } }],
+    ['arbitrary conflict', { ok: false, reason: 'Conflict.' }],
+  ])('rejects an unrecognized prompt 409 payload: %s', async (_label, payload) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(payload), {
+      status: 409,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const { submitPrompt } = await import('../src/client/sessionApi');
+
+    await expect(submitPrompt('session-token', 'session-waiting', 'continue')).rejects.toThrow();
+  });
 });

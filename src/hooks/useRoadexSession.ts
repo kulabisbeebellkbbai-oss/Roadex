@@ -253,6 +253,22 @@ export function useRoadexSession(): RoadexSessionState {
       setNotice(undefined);
       try {
         const response = await submitPrompt(token, session.id, prompt);
+        if (!response.accepted) {
+          setSessions((existing) => existing.map((candidate) => candidate.id === targetSessionId
+            && candidate.lifecycle === 'streaming'
+            ? { ...candidate, lifecycle: candidate.waitingApproval ? 'paused' : session.lifecycle }
+            : candidate));
+          if (activeStreamSessionId.current === targetSessionId) {
+            setSession((existing) => existing?.id === targetSessionId
+              && existing.lifecycle === 'streaming'
+              ? { ...existing, lifecycle: existing.waitingApproval ? 'paused' : session.lifecycle }
+              : existing);
+            setError(undefined);
+            setNotice(response.error.message);
+            setConnectionState('connected');
+          }
+          return;
+        }
         setAuditEvents((existing) => [response.auditEvent, ...existing].slice(0, 8));
       } catch (caught) {
         setSessions((existing) => updateSessionLifecycle(existing, targetSessionId, 'ready'));
