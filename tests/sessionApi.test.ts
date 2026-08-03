@@ -6,6 +6,55 @@ describe('Roadex client CSRF contract', () => {
     vi.resetModules();
   });
 
+  it('creates and retrieves publication requests without exposing an activation call', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input);
+      calls.push({ path, init });
+      return new Response(JSON.stringify({
+        ok: true,
+        request: {
+          id: 'app-publication-1',
+          contractVersion: 'roadex.app-publication.v1',
+          spec,
+          status: 'submitted',
+          createdAt: new Date(0).toISOString(),
+          updatedAt: new Date(0).toISOString(),
+          gates: { gatewayReview: 'pending', idsReview: 'pending', activationApproval: 'pending' },
+          gateway: {},
+        },
+      }), { status: path.endsWith('/requests') ? 201 : 200, headers: { 'content-type': 'application/json' } });
+    }));
+    const spec = {
+      contractVersion: 'roadex.app-publication.v1',
+      project: { projectId: 'donuthole', projectName: 'DonutHole' },
+      workspace: { workspaceId: 'donuthole' },
+      app: { name: 'DonutHole' },
+      publication: {
+        routePrefix: '/Roadex/DonutHole',
+        backendUrl: 'http://127.0.0.1:8798',
+        allowedMethods: ['GET'],
+        healthPath: '/health',
+        routeSelection: 'longest-prefix',
+        preserveFullPath: true,
+        pathNeeds: { assets: [], apis: [] },
+      },
+      rollback: { mode: 'disable-route', healthPath: '/health' },
+    } as const;
+    const { createAppPublicationRequest, getAppPublicationRequest } = await import('../src/client/sessionApi');
+    const created = await createAppPublicationRequest(undefined, spec, 'request-key-00000001');
+    await getAppPublicationRequest(undefined, created.id);
+
+    expect(calls.map((call) => call.path)).toEqual([
+      '/Roadex/api/app-publication/requests',
+      '/Roadex/api/app-publication/requests/app-publication-1',
+    ]);
+    const headers = new Headers(calls[0].init?.headers);
+    expect(headers.get('idempotency-key')).toBe('request-key-00000001');
+    expect(headers.get('x-roadex-request-id')).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
+    expect(calls.some((call) => /activate|approve|deploy/.test(call.path))).toBe(false);
+  });
+
   it('uses exact owner project proposal, challenge, confirmation, and revoke routes', async () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -327,5 +376,110 @@ describe('Roadex client CSRF contract', () => {
       expect(headers.get('x-roadex-request-id')).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
     }
     expect(calls.some((call) => /authorize-write|flash|erase|firmware/.test(call.path))).toBe(false);
+  });
+
+  it('preserves approval-wait projection fields from bootstrap', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const path = String(input);
+      if (path === '/api/bootstrap') {
+        return new Response(JSON.stringify({
+          user: { id: 'owner', displayName: 'Owner', authMode: 'mock', roles: ['user', 'admin', 'security-reviewer'] },
+          workspaces: [{ id: 'roadex', name: 'Roadex', root: '/srv/roadex' }],
+          sessions: [{
+            id: 'session-approval',
+            userId: 'owner',
+            workspace: { id: 'roadex', name: 'Roadex', root: '/srv/roadex' },
+            lifecycle: 'ready',
+            runnerMode: 'codex',
+            transport: 'sse',
+            deviceBridge: 'disabled',
+            gates: [],
+            createdAt: new Date(0).toISOString(),
+            updatedAt: new Date(1).toISOString(),
+            waitingApproval: {
+              waitId: 'wait-readonly',
+              approvalRef: 'admin.roadex.approval',
+              subject: 'provisioning a protected operation',
+              consoleSurface: 'admin',
+              consolePath: '/Overseer/admin',
+              state: 'pending',
+              updatedAt: new Date(1).toISOString(),
+            },
+          }],
+          auditEvents: [],
+          streamPreview: [],
+          managedThreads: [],
+          deviceBridgePolicy: {
+            state: 'disabled',
+            approvedFoundation: true,
+            operations: ['esp32.flash'],
+            requestIntakeEnabled: false,
+            descriptorObservationEnabled: false,
+            operationsEnabled: false,
+            writeEnabled: false,
+            reason: 'disabled',
+          },
+          deviceInventoryBindingRefs: [],
+          serialVerificationProfiles: [],
+          bleVerificationProfiles: [],
+          usbDeviceProfiles: [],
+        }), {
+          status: 200,
+          headers: {
+            'content-type': 'application/json',
+            'x-roadex-csrf': 'private-test-value',
+          },
+        });
+      }
+      return new Response('{"ok":true}', { status: 404 });
+    }));
+
+    const { loginAndBootstrap } = await import('../src/client/sessionApi');
+    const bootstrap = await loginAndBootstrap();
+
+    expect(bootstrap.bootstrap.sessions[0].waitingApproval).toMatchObject({
+      waitId: 'wait-readonly',
+      approvalRef: 'admin.roadex.approval',
+      subject: 'provisioning a protected operation',
+      consoleSurface: 'admin',
+      consolePath: '/Overseer/admin',
+      state: 'pending',
+    });
+  });
+
+  it('returns only the exact human-approval-pending prompt conflict', async () => {
+    const pending = {
+      accepted: false,
+      error: {
+        code: 'human-approval-pending',
+        message: 'Human approval is still pending.',
+      },
+    } as const;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(pending), {
+      status: 409,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const { submitPrompt } = await import('../src/client/sessionApi');
+
+    await expect(submitPrompt('session-token', 'session-waiting', 'continue')).resolves.toEqual(pending);
+  });
+
+  it.each([
+    ['wrong code', { accepted: false, error: { code: 'other-conflict', message: 'Conflict.' } }],
+    ['missing accepted flag', { error: { code: 'human-approval-pending', message: 'Conflict.' } }],
+    ['extra response field', { accepted: false, error: { code: 'human-approval-pending', message: 'Conflict.' }, retry: true }],
+    ['extra error field', { accepted: false, error: { code: 'human-approval-pending', message: 'Conflict.', gate: 'approval' } }],
+    ['empty message', { accepted: false, error: { code: 'human-approval-pending', message: '' } }],
+    ['arbitrary conflict', { ok: false, reason: 'Conflict.' }],
+  ])('rejects an unrecognized prompt 409 payload: %s', async (_label, payload) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(payload), {
+      status: 409,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const { submitPrompt } = await import('../src/client/sessionApi');
+
+    await expect(submitPrompt('session-token', 'session-waiting', 'continue')).rejects.toThrow();
   });
 });

@@ -37,4 +37,8 @@ Roadex has completed the browser portal and real server-side Codex session miles
 - Complete a revised Security Architect review after artifact delivery, atomic start, identity assurance, operation leases, Android compatibility, and audit privacy are specified.
 - Implement capability detection, typed contracts, server-side grants, and denial tests with the feature disabled.
 - Review gateway and IDS routes before any external endpoint is exposed.
+- Permit Roadex-hosted development and test pages beneath `/Roadex`; design
+  completed applications for a dedicated protected-gateway prefix and page by
+  default, with any shared Roadex hosting directory treated as an explicit
+  fallback. Promotion to a dedicated route remains separately approval-gated.
 - Approve browser USB access and a controlled hardware test separately.

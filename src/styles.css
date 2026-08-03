@@ -38,6 +38,14 @@ button {
   cursor: pointer;
 }
 
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+a:focus-visible {
+  outline: 2px solid #174a91;
+  outline-offset: 2px;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
@@ -402,6 +410,12 @@ button {
   margin-left: auto;
 }
 
+.session-pill.approval {
+  border-color: #a9c1de;
+  color: #20456d;
+  background: #edf3fb;
+}
+
 .hero,
 .session-header {
   display: grid;
@@ -600,6 +614,97 @@ button {
   scrollbar-gutter: stable;
 }
 
+.approval-wait {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 14px;
+  border: 1px solid #a5b6ca;
+  border-radius: 8px;
+  background: #f3f8fc;
+}
+
+.approval-wait-heading {
+  display: grid;
+  gap: 4px;
+}
+
+.approval-wait strong {
+  color: var(--ink);
+  font-size: 1rem;
+}
+
+.approval-wait p {
+  margin: 0;
+  color: #2f3f47;
+  line-height: 1.4;
+}
+
+.approval-wait code {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgb(255 255 255 / 82%);
+}
+
+.approval-wait-link {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid #a0c2d4;
+  background: #ffffff;
+  color: #124f80;
+  text-decoration: none;
+  font-weight: 800;
+}
+
+.approval-wait-link:hover {
+  text-decoration: underline;
+}
+
+.approval-wait-link:focus-visible {
+  outline: 2px solid #174a91;
+  outline-offset: 2px;
+}
+
+.approval-pending {
+  border-color: #b8d4e8;
+  background: #f1f7fc;
+}
+
+.approval-verification-delayed {
+  border-color: #d2caa3;
+  background: #f7f4ea;
+}
+
+.approval-security-failure {
+  border-color: #e8c4c4;
+  background: #fdf0f0;
+}
+
+.approval-approved-resume-queued {
+  border-color: #b6d5bf;
+  background: #f2fbf3;
+}
+
+.approval-resume-dispatching {
+  border-color: #afcee7;
+  background: #edf4fb;
+}
+
+.approval-resume-reconciliation-required {
+  border-color: #d3bc8d;
+  background: #fff8ea;
+}
+
 .status-dot.working {
   color: #075f3f;
   border-color: #78b99d;
@@ -662,6 +767,8 @@ button {
 }
 
 .app-shell.layout-mobile {
+  --mobile-drawer-width: min(360px, calc(100vw - 44px));
+
   display: block;
   height: 100dvh;
   min-height: 0;
@@ -677,7 +784,7 @@ button {
   z-index: 40;
   display: flex;
   align-items: stretch;
-  width: min(88vw, 360px);
+  width: var(--mobile-drawer-width);
   padding: 20px;
   overflow-x: hidden;
   overflow-y: auto;
@@ -741,6 +848,7 @@ button {
   position: relative;
   z-index: 20;
   flex: 0 0 auto;
+  flex-wrap: wrap;
   align-items: center;
   min-height: 64px;
   margin: 0;
@@ -748,6 +856,19 @@ button {
   border-bottom: 1px solid var(--line);
   background: rgb(255 255 255 / 96%);
   box-shadow: 0 4px 16px rgb(38 58 49 / 8%);
+}
+
+.app-shell.layout-mobile .session-pill.approval {
+  display: inline-flex;
+  order: 4;
+  flex: 1 0 100%;
+  min-width: 0;
+  min-height: 44px;
+  margin-left: 0;
+}
+
+.app-shell.layout-mobile .session-pill.approval span {
+  overflow-wrap: anywhere;
 }
 
 .app-shell.layout-mobile .topbar-title {
@@ -900,7 +1021,7 @@ button {
 
 .app-shell.layout-mobile .mobile-drawer-backdrop {
   position: fixed;
-  inset: 0;
+  inset: 0 0 0 var(--mobile-drawer-width);
   z-index: 35;
   display: block;
   padding: 0;
@@ -1342,6 +1463,18 @@ button {
 
   .session-pill {
     display: none;
+  }
+
+  .approval-wait {
+    grid-template-columns: 1fr;
+  }
+
+  .approval-wait p {
+    font-size: 0.95rem;
+  }
+
+  .approval-wait-link {
+    width: 100%;
   }
 
   .hero,
