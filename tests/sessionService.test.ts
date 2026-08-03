@@ -1811,6 +1811,205 @@ describe('Roadex session service', () => {
     expect(receivedGrant).toBeUndefined();
   });
 
+  it('issues approval workflow grants for static controlled selections but not restricted no-grant runs', async () => {
+    const managedThreadId = '019f7337-df2e-75c1-b245-5e3588a6c5ae';
+    const restoreRegistry = installTestManagedThread(managedThreadId, mockUser.id);
+    const priorEnabled = process.env.ROADEX_CONTROLLED_RUNNER_ENABLED;
+    const priorUsers = process.env.ROADEX_CONTROLLED_RUNNER_AUTHORIZED_USERS;
+    const priorWorkspaces = process.env.ROADEX_CONTROLLED_RUNNER_WORKSPACE_IDS;
+    process.env.ROADEX_CONTROLLED_RUNNER_ENABLED = 'true';
+    process.env.ROADEX_CONTROLLED_RUNNER_AUTHORIZED_USERS = mockUser.id;
+    process.env.ROADEX_CONTROLLED_RUNNER_WORKSPACE_IDS = 'roadex';
+    try {
+      const requests: RunnerPromptRequest[] = [];
+      const runner = fakeRunner();
+      const originalRunPrompt = runner.runPrompt;
+      runner.runPrompt = (request) => {
+        requests.push(request);
+        return originalRunPrompt(request);
+      };
+      const state = createInitialState(runner, createMemoryPersistence());
+      const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex', managedThreadId });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+      const issuedCapabilities: Array<{ resourceRef: string; managedThreadId: string }> = [];
+      state.approvalWorkflowRuntime = {
+        beginRun: (capability) => {
+          issuedCapabilities.push(capability);
+          return { token: 'S'.repeat(43), runId: 'static-controlled-run' };
+        },
+        completeRun: () => {},
+        resolveRunContext: () => undefined,
+        revokeOutstanding: () => {},
+      };
+
+      expect(submitPrompt(state, mockUser, response.session.id, 'static controlled task')).toMatchObject({ accepted: true });
+      await flushRunner();
+      expect(issuedCapabilities).toEqual([expect.objectContaining({
+        resourceRef: 'roadex-controlled-project-manager',
+        managedThreadId,
+      })]);
+      expect(requests[0]).toMatchObject({
+        approvalWorkflowToken: 'S'.repeat(43),
+        runId: 'static-controlled-run',
+      });
+
+      process.env.ROADEX_CONTROLLED_RUNNER_AUTHORIZED_USERS = 'other-user';
+      const restrictedRequests: RunnerPromptRequest[] = [];
+      const restrictedRunner = fakeRunner();
+      const restrictedOriginal = restrictedRunner.runPrompt;
+      restrictedRunner.runPrompt = (request) => {
+        restrictedRequests.push(request);
+        return restrictedOriginal(request);
+      };
+      const restrictedState = createInitialState(restrictedRunner, createMemoryPersistence());
+      const restrictedSession = await createSessionFromApi(
+        restrictedState,
+        mockUser,
+        { workspaceId: 'roadex', managedThreadId },
+      );
+      expect(restrictedSession.ok).toBe(true);
+      if (!restrictedSession.ok) return;
+      let restrictedGrantCount = 0;
+      restrictedState.approvalWorkflowRuntime = {
+        beginRun: () => {
+          restrictedGrantCount += 1;
+          return { token: 'R'.repeat(43), runId: 'must-not-issue' };
+        },
+        completeRun: () => {},
+        resolveRunContext: () => undefined,
+        revokeOutstanding: () => {},
+      };
+
+      expect(submitPrompt(restrictedState, mockUser, restrictedSession.session.id, 'restricted task'))
+        .toMatchObject({ accepted: true });
+      await flushRunner();
+      expect(restrictedGrantCount).toBe(0);
+      expect(restrictedRequests[0].approvalWorkflowToken).toBeUndefined();
+      expect(restrictedRequests[0].runId).toBeUndefined();
+    } finally {
+      restoreRegistry();
+      restoreEnv('ROADEX_CONTROLLED_RUNNER_ENABLED', priorEnabled);
+      restoreEnv('ROADEX_CONTROLLED_RUNNER_AUTHORIZED_USERS', priorUsers);
+      restoreEnv('ROADEX_CONTROLLED_RUNNER_WORKSPACE_IDS', priorWorkspaces);
+    }
+  });
+
+  it('cleans up the exact approval workflow grant when the user runner throws synchronously', async () => {
+    const managedThreadId = '019f7337-df2e-75c1-b245-5e3588a6c5ab';
+    const restoreRegistry = installTestManagedThread(managedThreadId, mockUser.id);
+    const priorControlledRunner = process.env.ROADEX_CONTROLLED_RUNNER_ENABLED;
+    process.env.ROADEX_CONTROLLED_RUNNER_ENABLED = 'true';
+    try {
+    const runner = fakeRunner();
+    runner.runPrompt = () => {
+      throw new Error('synchronous runner failure');
+    };
+    const persistence = createMemoryPersistence();
+    const state = createInitialState(runner, persistence);
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex', managedThreadId });
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+    state.resolveControlledRunnerGrant = () => ({
+      userId: mockUser.id,
+      workspaceId: response.session.workspace.id,
+      workspaceRoot: response.session.workspace.root,
+      managedThreadId,
+      operationId: 'operation-sync-throw',
+      status: 'active',
+    });
+    const completedRuns: string[] = [];
+    state.approvalWorkflowRuntime = {
+      beginRun: () => ({ token: 'A'.repeat(43), runId: 'workflow-sync-throw' }),
+      completeRun: (runId) => { completedRuns.push(runId); },
+      resolveRunContext: () => undefined,
+      revokeOutstanding: () => {},
+    };
+
+    const result = submitPrompt(state, mockUser, response.session.id, 'start exact controlled operation');
+
+    expect(result).toMatchObject({ accepted: true });
+    expect(completedRuns).toEqual(['workflow-sync-throw']);
+    expect(state.activeRuns.has(response.session.id)).toBe(false);
+    expect(response.session.runActivity).toBeUndefined();
+    expect(response.session.lifecycle).toBe('blocked');
+    expect(state.audit.events.at(-1)).toMatchObject({
+      action: 'session.runner_failed',
+      outcome: 'denied',
+      summary: 'synchronous runner failure',
+    });
+    expect(state.sessions.streamEvents.at(-1)).toMatchObject({
+      kind: 'system',
+      message: 'Codex runner failed.',
+    });
+    const persistedSession = persistence.load().sessions.find((session) => session.id === response.session.id);
+    expect(persistedSession).toMatchObject({ lifecycle: 'blocked' });
+    expect(persistedSession?.runActivity).toBeUndefined();
+    } finally {
+      restoreRegistry();
+      restoreEnv('ROADEX_CONTROLLED_RUNNER_ENABLED', priorControlledRunner);
+    }
+  });
+
+  it('routes a post-registration managed-thread mismatch to coordinator security handling', async () => {
+    const managedThreadId = '019f7337-df2e-75c1-b245-5e3588a6c5b0';
+    const restoreRegistry = installTestManagedThread(managedThreadId, mockUser.id);
+    try {
+      let resolveRun: (result: Awaited<ReturnType<SessionRunner['runPrompt']>>) => void = () => {};
+      const runner = fakeRunner();
+      runner.runPrompt = () => new Promise((resolve) => { resolveRun = resolve; });
+      const state = createInitialState(runner, createMemoryPersistence());
+      const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex', managedThreadId });
+      expect(response.ok).toBe(true);
+      if (!response.ok) return;
+
+      expect(submitPrompt(state, mockUser, response.session.id, 'register then mismatch')).toMatchObject({ accepted: true });
+      const wait: ApprovalWaitRecord = {
+        id: 'wait-runner-mismatch',
+        sessionId: response.session.id,
+        userId: mockUser.id,
+        projectId: 'roadex',
+        workspaceId: 'roadex',
+        managedThreadId,
+        provider: 'overseer',
+        approvalRef: 'admin.roadex.runner-mismatch',
+        resourceRef: 'operation-mismatch',
+        authorityClass: 'privileged-operation',
+        consoleSurface: 'admin',
+        subject: 'Mismatch wait',
+        state: 'pending',
+        decisionVersion: `sha256:${'a'.repeat(64)}`,
+        continuationId: `sha256:${'b'.repeat(64)}`,
+        checkAttempt: 0,
+        nextCheckAt: '2026-08-02T18:00:02.000Z',
+        createdAt: '2026-08-02T18:00:00.000Z',
+        updatedAt: '2026-08-02T18:00:00.000Z',
+      };
+      state.approvalWaits.push(wait);
+      response.session.lifecycle = 'paused';
+      const failureCalls: string[] = [];
+      state.approvalLifecycleRuntime = {
+        closeSessionWait: async () => {},
+        reopenSessionWait: async () => 'ready',
+        failUserRun: async (sessionId, outcome) => {
+          failureCalls.push(`${sessionId}:${outcome}`);
+          wait.state = 'security-failure';
+          response.session.lifecycle = 'paused';
+          return true;
+        },
+      };
+
+      resolveRun({ ok: true, events: [], exitCode: 0, codexThreadId: 'different-managed-thread' });
+      await flushRunner();
+
+      expect(failureCalls).toEqual([`${response.session.id}:security-failure`]);
+      expect(wait.state).toBe('security-failure');
+      expect(response.session.lifecycle).toBe('paused');
+    } finally {
+      restoreRegistry();
+    }
+  });
+
   it('passes a server-issued controlled operation token without exposing it in audit records', async () => {
     const originalAuditKey = process.env.ROADEX_CONTROLLED_OPERATIONS_AUDIT_HMAC_KEY;
     process.env.ROADEX_CONTROLLED_OPERATIONS_AUDIT_HMAC_KEY = 'audit-key'.repeat(4);
@@ -2245,7 +2444,7 @@ describe('Roadex session service', () => {
 
     const subscription = subscribeToSessionStream(state, mockUser, response.session.id, () => undefined);
     expect(subscription).toBeDefined();
-    const close = closeSession(state, mockUser, response.session.id);
+    const close = await closeSession(state, mockUser, response.session.id);
     const bootstrapped = await bootstrap(state, mockUser);
 
     expect(close).toMatchObject({
@@ -2270,7 +2469,7 @@ describe('Roadex session service', () => {
     if (!response.ok) return;
 
     const intruder = { ...mockUser, id: 'other-user' };
-    expect(closeSession(state, intruder, response.session.id)).toBeUndefined();
+    expect(await closeSession(state, intruder, response.session.id)).toBeUndefined();
     expect(response.session.lifecycle).toBe('ready');
     expect(state.audit.events.at(-1)).toMatchObject({
       action: 'security.denied',
@@ -2313,7 +2512,7 @@ describe('Roadex session service', () => {
     response.session.codexThreadId = 'thread-roadex-reopen-recover';
     response.session.lifecycle = 'blocked';
 
-    const reopened = reopenSession(state, mockUser, response.session.id);
+    const reopened = await reopenSession(state, mockUser, response.session.id);
 
     expect(reopened).toMatchObject({
       reopened: true,
@@ -2356,7 +2555,7 @@ describe('Roadex session service', () => {
     response.session.lifecycle = 'blocked';
     state.activeRuns.set(response.session.id, new AbortController());
 
-    expect(reopenSession(state, mockUser, response.session.id)).toEqual({
+    expect(await reopenSession(state, mockUser, response.session.id)).toEqual({
       reopened: false,
       gate: 'session-state',
       reason: 'Active work must finish or be cancelled before recovery.',
@@ -2369,7 +2568,7 @@ describe('Roadex session service', () => {
     expect(response.ok).toBe(true);
     if (!response.ok) return;
 
-    const reopened = reopenSession(state, mockUser, response.session.id);
+    const reopened = await reopenSession(state, mockUser, response.session.id);
 
     expect(reopened).toMatchObject({
       reopened: true,
@@ -2393,8 +2592,8 @@ describe('Roadex session service', () => {
     expect(other.ok).toBe(true);
     if (!owned.ok || !other.ok) return;
 
-    closeSession(state, mockUser, owned.session.id);
-    closeSession(state, otherUser, other.session.id);
+    await closeSession(state, mockUser, owned.session.id);
+    await closeSession(state, otherUser, other.session.id);
 
     expect(listArchivedSessions(state, mockUser)).toEqual([owned.session]);
   });
@@ -2408,9 +2607,9 @@ describe('Roadex session service', () => {
 
     submitPrompt(state, mockUser, response.session.id, 'preserve this history');
     await flushRunner();
-    closeSession(state, mockUser, response.session.id);
+    await closeSession(state, mockUser, response.session.id);
 
-    const reopened = reopenSession(state, mockUser, response.session.id);
+    const reopened = await reopenSession(state, mockUser, response.session.id);
 
     expect(reopened).toMatchObject({
       reopened: true,
@@ -2435,10 +2634,10 @@ describe('Roadex session service', () => {
 
     expect(response.ok).toBe(true);
     if (!response.ok) return;
-    closeSession(state, mockUser, response.session.id);
+    await closeSession(state, mockUser, response.session.id);
 
     const intruder = { ...mockUser, id: 'other-user' };
-    expect(reopenSession(state, intruder, response.session.id)).toBeUndefined();
+    expect(await reopenSession(state, intruder, response.session.id)).toBeUndefined();
     expect(response.session.lifecycle).toBe('closed');
     expect(state.audit.events.at(-1)).toMatchObject({
       action: 'security.denied',
@@ -2456,15 +2655,15 @@ describe('Roadex session service', () => {
     expect(response.ok).toBe(true);
     if (!response.ok) return;
 
-    expect(reopenSession(state, mockUser, response.session.id)).toMatchObject({
+    expect(await reopenSession(state, mockUser, response.session.id)).toMatchObject({
       reopened: true,
       session: { lifecycle: 'ready' },
       auditEvent: { action: 'session.recover', outcome: 'allowed' },
     });
 
-    closeSession(state, mockUser, response.session.id);
+    await closeSession(state, mockUser, response.session.id);
     state.activeRuns.set(response.session.id, new AbortController());
-    expect(reopenSession(state, mockUser, response.session.id)).toBeUndefined();
+    expect(await reopenSession(state, mockUser, response.session.id)).toBeUndefined();
     expect(response.session.lifecycle).toBe('closed');
     expect(state.audit.events.at(-1)?.summary).toContain('active_runner_present');
   });
@@ -2475,14 +2674,14 @@ describe('Roadex session service', () => {
 
     expect(response.ok).toBe(true);
     if (!response.ok) return;
-    closeSession(state, mockUser, response.session.id);
+    await closeSession(state, mockUser, response.session.id);
 
     const original = process.env.ROADEX_WORKSPACES_JSON;
     process.env.ROADEX_WORKSPACES_JSON = JSON.stringify([
       { id: 'gateway', name: 'Gateway', root: '/srv/gateway' },
     ]);
     try {
-      expect(reopenSession(state, mockUser, response.session.id)).toBeUndefined();
+      expect(await reopenSession(state, mockUser, response.session.id)).toBeUndefined();
       expect(response.session.lifecycle).toBe('closed');
       expect(state.audit.events.at(-1)?.summary).toContain('workspace_no_longer_approved');
     } finally {
@@ -2497,11 +2696,11 @@ describe('Roadex session service', () => {
 
     expect(archived.ok).toBe(true);
     if (!archived.ok) return;
-    closeSession(state, mockUser, archived.session.id);
+    await closeSession(state, mockUser, archived.session.id);
     const active = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
     expect(active.ok).toBe(true);
 
-    expect(reopenSession(state, mockUser, archived.session.id)).toMatchObject({
+    expect(await reopenSession(state, mockUser, archived.session.id)).toMatchObject({
       reopened: true,
       session: { id: archived.session.id, lifecycle: 'ready' },
     });
@@ -2564,11 +2763,11 @@ describe('Roadex session service', () => {
     const archived = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
     expect(archived.ok).toBe(true);
     if (!archived.ok) return;
-    closeSession(state, mockUser, archived.session.id);
+    await closeSession(state, mockUser, archived.session.id);
     expect((await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' })).ok).toBe(true);
     state.maxActiveSessionsPerUser = 1;
 
-    expect(reopenSession(state, mockUser, archived.session.id)).toMatchObject({
+    expect(await reopenSession(state, mockUser, archived.session.id)).toMatchObject({
       reopened: false,
       gate: 'session-limit',
     });
@@ -2677,6 +2876,22 @@ describe('Roadex session service', () => {
 async function flushRunner(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function installTestManagedThread(threadId: string, userId: string): () => void {
+  const priorRegistry = process.env.ROADEX_CODEX_PROJECTS_REGISTRY;
+  const priorUsers = process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS;
+  const registry = join(mkdtempSync(join(tmpdir(), 'roadex-managed-approval-')), 'codex-projects.csv');
+  writeFileSync(
+    registry,
+    `conversation_id,label,project,created_at,updated_at\n${threadId},Approval thread,"${process.cwd()}",2026-08-02T18:00:00Z,2026-08-02T18:00:00Z\n`,
+  );
+  process.env.ROADEX_CODEX_PROJECTS_REGISTRY = registry;
+  process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS = userId;
+  return () => {
+    restoreEnv('ROADEX_CODEX_PROJECTS_REGISTRY', priorRegistry);
+    restoreEnv('ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS', priorUsers);
+  };
 }
 
 function protectedGatewayUser(): UserProfile {

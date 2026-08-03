@@ -218,7 +218,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (closeMatch && req.method === 'POST') {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const result = closeSession(state, auth.user, decodeURIComponent(closeMatch[1]));
+    const result = await closeSession(state, auth.user, decodeURIComponent(closeMatch[1]));
     if (!result) {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Session not found.' } });
       return;
@@ -231,7 +231,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (reopenMatch && req.method === 'POST') {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const result = reopenSession(state, auth.user, decodeURIComponent(reopenMatch[1]));
+    const result = await reopenSession(state, auth.user, decodeURIComponent(reopenMatch[1]));
     if (!result) {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Archived session not found.' } });
       return;
@@ -623,8 +623,28 @@ async function startRoadexApi(): Promise<void> {
     state.sessions.sessions,
     provider,
     createApprovalCoordinatorCallbacks(state, queueContinuation),
+    {
+      authorizeStreamingRegistration: (session, capability) => {
+        if (!capability.runnerRunId || !state.activeRuns.has(session.id)) {
+          return false;
+        }
+        const active = workflowRuntime.resolveRunContext(capability.runnerRunId);
+        return active?.runnerRunId === capability.runnerRunId
+          && active.sessionId === capability.sessionId
+          && active.userId === capability.userId
+          && active.projectId === capability.projectId
+          && active.workspaceId === capability.workspaceId
+          && active.resourceRef === capability.resourceRef
+          && active.managedThreadId === capability.managedThreadId;
+      },
+    },
   );
   coordinatorRef.current = coordinator;
+  state.approvalLifecycleRuntime = {
+    closeSessionWait: (sessionId) => coordinator.closeSessionWait(sessionId),
+    reopenSessionWait: (sessionId) => coordinator.reopenSessionWait(sessionId),
+    failUserRun: (sessionId, outcome) => coordinator.failUserRun(sessionId, outcome),
+  };
   const workflowHost = startApprovalWorkflowHost({
     consumeGrant: (token) => grantBroker.consume(token),
     resolveRunContext: (runId) => workflowRuntime.resolveRunContext(runId),
