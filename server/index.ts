@@ -63,6 +63,7 @@ import {
   type ApprovalWorkflowHostOptions,
 } from '../src/server/approvalWorkflowHost.js';
 import { verifyLinuxPeerCredentials } from '../src/server/controlledOperationsPeer.js';
+import { createApprovalStatusTokenReader } from '../src/server/approvalTokenFile.js';
 
 const DEFAULT_APPROVAL_POLL_MS = 2_000;
 const MIN_APPROVAL_POLL_MS = 250;
@@ -133,7 +134,7 @@ export async function startRoadexRuntime(
 
   const state = dependencies.state ?? createInitialState();
   const broker = new ApprovalWorkflowGrantBroker();
-  const createTokenReader = dependencies.createApprovalTokenReader ?? createRuntimeApprovalTokenReader;
+  const createTokenReader = dependencies.createApprovalTokenReader ?? createApprovalStatusTokenReader;
   const createProvider = dependencies.createApprovalProvider ?? createOverseerApprovalStatusProvider;
   let workflowHost: RuntimeCloseable | undefined;
   let httpHost: RuntimeCloseable | undefined;
@@ -763,10 +764,6 @@ function contentType(path: string): string {
     default:
       return 'application/octet-stream';
   }
-}
-
-function createRuntimeApprovalTokenReader(env: NodeJS.ProcessEnv): () => string {
-  return () => env.ROADEX_OVERSEER_APPROVAL_STATUS_TOKEN ?? '';
 }
 
 function resolvePort(value: string | undefined): number {

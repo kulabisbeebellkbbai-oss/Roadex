@@ -1,7 +1,10 @@
 import { EventEmitter } from 'node:events';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockAuthToken, mockUser } from '../src/server/authService';
 import { createInitialState } from '../src/server/sessionService';
 import { createMemoryPersistence } from '../src/server/statePersistence';
@@ -14,6 +17,24 @@ const autoHttpServer = vi.hoisted(() => ({
   listen: vi.fn((_port: number, _host: string, callback?: () => void) => callback?.()),
   close: vi.fn((callback?: () => void) => callback?.()),
 }));
+
+const runtimeTokenDirectories: string[] = [];
+
+async function createRuntimeTokenFile(token: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), 'roadex-runtime-token-'));
+  runtimeTokenDirectories.push(directory);
+  await chmod(directory, 0o700);
+  const path = join(directory, 'approval-status.token');
+  await writeFile(path, token, { mode: 0o600 });
+  await chmod(path, 0o600);
+  return path;
+}
+
+afterEach(async () => {
+  for (const directory of runtimeTokenDirectories.splice(0)) {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 vi.mock('node:http', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:http')>()),
@@ -79,10 +100,14 @@ describe('Roadex approval runtime', () => {
     target.lifecycle = 'ready';
     state.sessions.sessions.push(target);
     const secret = 'runtime_callback_secret_1234567890';
+    const secretPath = await createRuntimeTokenFile(secret);
 
     const runtime = await startRoadexRuntime({
       state,
-      env: { ROADEX_OVERSEER_APPROVAL_STATUS_TOKEN: secret },
+      env: {
+        ROADEX_OVERSEER_APPROVAL_STATUS_TOKEN_FILE: secretPath,
+        ROADEX_OVERSEER_APPROVAL_STATUS_TOKEN: 'legacy_direct_secret_must_not_be_used',
+      },
       createApprovalProvider: (options) => ({
         getStatus: async (approvalRef, scope) => {
           expect(options.readToken()).toBe(secret);
@@ -129,6 +154,9 @@ describe('Roadex approval runtime', () => {
     });
     expect(persistence.load().approvalWaits).toHaveLength(1);
     expect(JSON.stringify(persistence.load())).not.toContain(secret);
+    expect(JSON.stringify(persistence.load())).not.toContain(secretPath);
+    expect(JSON.stringify(runtime)).not.toContain(secret);
+    expect(JSON.stringify(runtime)).not.toContain(secretPath);
     await runtime.shutdown();
   });
 
@@ -150,7 +178,8 @@ describe('Roadex approval runtime', () => {
     let scheduled!: () => void;
     let hostOptions: ApprovalWorkflowHostOptions | undefined;
     let tokenReader!: () => string;
-    const secret = 'runtime_secret_token_1234567890';
+    const secret = 'runtime_secret_token_123456789012';
+    const secretPath = await createRuntimeTokenFile(secret);
 
     const runtime = await startRoadexRuntime({
       state,
@@ -158,7 +187,7 @@ describe('Roadex approval runtime', () => {
         HOST: '127.0.0.1',
         PORT: '8780',
         ROADEX_APPROVAL_POLL_MS: '2500',
-        ROADEX_OVERSEER_APPROVAL_STATUS_TOKEN: secret,
+        ROADEX_OVERSEER_APPROVAL_STATUS_TOKEN_FILE: secretPath,
       },
       createApprovalProvider(options) {
         order.push('provider');
@@ -195,6 +224,7 @@ describe('Roadex approval runtime', () => {
     expect(timer.unref).toHaveBeenCalledTimes(1);
     expect(tokenReader()).toBe(secret);
     expect(JSON.stringify(runtime)).not.toContain(secret);
+    expect(JSON.stringify(runtime)).not.toContain(secretPath);
 
     scheduled();
     scheduled();
@@ -235,6 +265,7 @@ describe('Roadex approval runtime', () => {
     const runtime = await startRoadexRuntime({
       state,
       env: {},
+      createApprovalTokenReader: () => () => 'runtime_test_token_123456789012345',
       coordinator,
       createApprovalProvider: () => ({ getStatus: vi.fn() }),
       startWorkflowHost(options) {
@@ -295,6 +326,7 @@ describe('Roadex approval runtime', () => {
     const runtime = await startRoadexRuntime({
       state,
       env: {},
+      createApprovalTokenReader: () => () => 'runtime_test_token_123456789012345',
       coordinator,
       createApprovalProvider: () => ({ getStatus: vi.fn() }),
       startWorkflowHost: () => ({ close: vi.fn(async () => { order.push('workflow:close'); }) }),
@@ -325,6 +357,7 @@ describe('Roadex approval runtime', () => {
     const base = {
       state: createInitialState(undefined, createMemoryPersistence()),
       env: {}, startHttp,
+      createApprovalTokenReader: () => () => 'runtime_test_token_123456789012345',
       setInterval: () => ({ unref: vi.fn() }), clearInterval: vi.fn(),
       addSignalListener: vi.fn(), removeSignalListener: vi.fn(), log: vi.fn(),
     };
@@ -346,6 +379,31 @@ describe('Roadex approval runtime', () => {
       },
     })).rejects.toThrow('approval_runtime_start_failed');
     expect(startHttp).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when only the legacy direct secret environment value is configured', async () => {
+    const startHttp = vi.fn();
+
+    await expect(startRoadexRuntime({
+      state: createInitialState(undefined, createMemoryPersistence()),
+      env: { ROADEX_OVERSEER_APPROVAL_STATUS_TOKEN: 'legacy_direct_secret_123456789012345' },
+      createApprovalProvider: () => ({ getStatus: vi.fn() }),
+      startWorkflowHost: () => ({ close: vi.fn(async () => undefined) }),
+      startHttp,
+      setInterval: () => ({ unref: vi.fn() }),
+      clearInterval: vi.fn(),
+      addSignalListener: vi.fn(),
+      removeSignalListener: vi.fn(),
+      log: vi.fn(),
+    })).rejects.toThrow('approval_runtime_start_failed');
+
+    expect(startHttp).not.toHaveBeenCalled();
+  });
+
+  it('contains no production fallback to a direct secret environment value', async () => {
+    const source = await readFile(new URL('../server/index.ts', import.meta.url), 'utf8');
+
+    expect(source).not.toMatch(/ROADEX_OVERSEER_APPROVAL_STATUS_TOKEN(?!_FILE)/);
   });
 
   it('parses only bounded positive polling intervals', () => {
