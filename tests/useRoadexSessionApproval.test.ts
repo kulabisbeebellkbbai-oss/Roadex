@@ -175,6 +175,67 @@ function bootstrapWithApproval(state: 'pending' | 'approved-resume-queued'): Roa
   };
 }
 
+function stubHookWindow(): void {
+  vi.stubGlobal('window', {
+    navigator: {},
+    confirm: () => false,
+    localStorage: {
+      getItem: () => null,
+      setItem: () => undefined,
+    },
+  });
+}
+
+function mockReactHooks(): void {
+  vi.doMock('react', async () => {
+    const actual = await vi.importActual<typeof import('react')>('react');
+    return {
+      ...actual,
+      useCallback: <Value extends (...args: never[]) => unknown>(callback: Value, dependencies: DependencyList) => (
+        requireHookRunner().useMemo(() => callback, dependencies)
+      ),
+      useEffect: (effect: EffectCallback, dependencies: DependencyList) => (
+        requireHookRunner().useEffect(effect, dependencies)
+      ),
+      useMemo: <Value>(factory: () => Value, dependencies: DependencyList) => (
+        requireHookRunner().useMemo(factory, dependencies)
+      ),
+      useRef: <Value>(initial: Value) => requireHookRunner().useRef(initial),
+      useState: <Value>(initial: Value | (() => Value)) => requireHookRunner().useState(initial),
+    };
+  });
+}
+
+type PendingPromptDenial = {
+  accepted: false;
+  error: { code: 'human-approval-pending'; message: string };
+};
+
+function controlledPromptDenial(): {
+  resolve: (value: PendingPromptDenial) => void;
+  submitPrompt: ReturnType<typeof vi.fn<() => Promise<PendingPromptDenial>>>;
+} {
+  let resolvePrompt: ((value: PendingPromptDenial) => void) | undefined;
+  const submitPrompt = vi.fn(() => new Promise<PendingPromptDenial>((resolve) => {
+    resolvePrompt = resolve;
+  }));
+  return {
+    resolve: (value) => {
+      if (!resolvePrompt) throw new Error('Prompt request has not started.');
+      resolvePrompt(value);
+    },
+    submitPrompt,
+  };
+}
+
+const pendingDenial: PendingPromptDenial = {
+  accepted: false,
+  error: {
+    code: 'human-approval-pending',
+    message: 'Human approval is still pending.',
+  },
+};
+
 afterEach(() => {
   vi.doUnmock('react');
   vi.doUnmock('../src/client/sessionApi');
@@ -356,6 +417,124 @@ describe('useRoadexSession approval transition refresh', () => {
       expect(runner.value?.approvalComposerBlocked).toBe(true);
       expect(runner.value?.error).toBeUndefined();
       expect(runner.value?.notice).toBe('Human approval is still pending.');
+    });
+
+    runner.unmount();
+  });
+
+  it('does not overwrite a newer SSE error with a late prompt denial', async () => {
+    stubHookWindow();
+    mockReactHooks();
+    const controlledPrompt = controlledPromptDenial();
+    let streamError: ((error: Error) => void) | undefined;
+
+    vi.doMock('../src/client/sessionApi', async () => {
+      const actual = await vi.importActual<typeof import('../src/client/sessionApi')>('../src/client/sessionApi');
+      return {
+        ...actual,
+        listArchivedSessions: vi.fn(async () => ({ sessions: [] })),
+        loginAndBootstrap: vi.fn(async () => ({
+          token: 'stable-mock-token',
+          bootstrap: bootstrapWithApproval('pending'),
+        })),
+        readSessionStream: vi.fn(async () => [] as StreamEvent[]),
+        submitPrompt: controlledPrompt.submitPrompt,
+        subscribeSessionStream: vi.fn((
+          _token: string | undefined,
+          _sessionId: string,
+          _onEvent: (event: StreamEvent) => void,
+          onError: (error: Error) => void,
+        ) => {
+          streamError = onError;
+          return () => undefined;
+        }),
+      };
+    });
+
+    const { useRoadexSession } = await import('../src/hooks/useRoadexSession');
+    const runner = new HookRunner(useRoadexSession);
+    runner.render();
+    await vi.waitFor(() => expect(runner.value?.session?.lifecycle).toBe('paused'));
+
+    const sending = runner.value?.sendPrompt('continue before approval');
+    await vi.waitFor(() => expect(runner.value?.connectionState).toBe('streaming'));
+    streamError?.(new Error('Newer SSE failure.'));
+    await vi.waitFor(() => {
+      expect(runner.value?.connectionState).toBe('error');
+      expect(runner.value?.error).toBe('Newer SSE failure.');
+    });
+
+    controlledPrompt.resolve(pendingDenial);
+    await sending;
+    await vi.waitFor(() => {
+      expect(runner.value?.connectionState).toBe('error');
+      expect(runner.value?.error).toBe('Newer SSE failure.');
+      expect(runner.value?.notice).toBeUndefined();
+    });
+
+    runner.unmount();
+  });
+
+  it('does not restore a session cleared by newer approval bootstrap state', async () => {
+    stubHookWindow();
+    mockReactHooks();
+    const controlledPrompt = controlledPromptDenial();
+    let streamListener: ((event: StreamEvent) => void) | undefined;
+    let bootstrapCalls = 0;
+    const clearedBootstrap = { ...bootstrapWithApproval('pending'), sessions: [], streamPreview: [] };
+
+    vi.doMock('../src/client/sessionApi', async () => {
+      const actual = await vi.importActual<typeof import('../src/client/sessionApi')>('../src/client/sessionApi');
+      return {
+        ...actual,
+        listArchivedSessions: vi.fn(async () => ({ sessions: [] })),
+        loginAndBootstrap: vi.fn(async () => {
+          bootstrapCalls += 1;
+          return {
+            token: 'stable-mock-token',
+            bootstrap: bootstrapCalls === 1 ? bootstrapWithApproval('pending') : clearedBootstrap,
+          };
+        }),
+        readSessionStream: vi.fn(async () => [] as StreamEvent[]),
+        submitPrompt: controlledPrompt.submitPrompt,
+        subscribeSessionStream: vi.fn((
+          _token: string | undefined,
+          _sessionId: string,
+          onEvent: (event: StreamEvent) => void,
+        ) => {
+          streamListener = onEvent;
+          return () => undefined;
+        }),
+      };
+    });
+
+    const { useRoadexSession } = await import('../src/hooks/useRoadexSession');
+    const runner = new HookRunner(useRoadexSession);
+    runner.render();
+    await vi.waitFor(() => expect(runner.value?.session?.lifecycle).toBe('paused'));
+
+    const sending = runner.value?.sendPrompt('continue before approval');
+    await vi.waitFor(() => expect(runner.value?.connectionState).toBe('streaming'));
+    streamListener?.({
+      id: 'event-session-closed',
+      sessionId: 'session-approval-hook',
+      kind: 'system',
+      message: 'Roadex human approval result: session-closed',
+      at: '2026-08-02T00:00:02.000Z',
+    });
+    await vi.waitFor(() => {
+      expect(bootstrapCalls).toBe(2);
+      expect(runner.value?.session).toBeUndefined();
+      expect(runner.value?.sessions).toEqual([]);
+      expect(runner.value?.notice).toBeUndefined();
+    });
+
+    controlledPrompt.resolve(pendingDenial);
+    await sending;
+    await vi.waitFor(() => {
+      expect(runner.value?.session).toBeUndefined();
+      expect(runner.value?.sessions).toEqual([]);
+      expect(runner.value?.notice).toBeUndefined();
     });
 
     runner.unmount();
