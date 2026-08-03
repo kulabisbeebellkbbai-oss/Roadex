@@ -1,8 +1,12 @@
 export const CONTROLLED_RUNNER_PROFILE = 'roadex-controlled-project-manager';
 export const CONTROLLED_OVERSEER_MCP = '/home/god/Documents/Codex Workspace/Roadex/dist-server/src/server/overseerMcp.js';
 export const CONTROLLED_OPERATIONS_MCP = '/home/god/Documents/Codex Workspace/Roadex/dist-server/src/server/controlledOperationsMcp.js';
+export const APPROVAL_WORKFLOW_MCP = '/home/god/Documents/Codex Workspace/Roadex/dist-server/src/server/approvalWorkflowMcp.js';
 export const CONTROLLED_OPERATIONS_SOCKET = '/run/user/1000/roadex-controlled-operations.sock';
+export const APPROVAL_WORKFLOW_SOCKET = '/run/user/1000/roadex-approval-workflow.sock';
 export const CONTROLLED_OPERATION_TOKEN_DIRECTORY = '/run/user/1000/roadex-controlled-operation-tokens';
+export const APPROVAL_WORKFLOW_TOKEN_DIRECTORY = '/run/user/1000/roadex-approval-workflow-tokens';
+const UUID_V4_BASENAME = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 export const CONTROLLED_RUNNER_CONFIG_OVERRIDES = [
   'approval_policy="never"',
   'sandbox_mode="workspace-write"',
@@ -25,7 +29,7 @@ export const CONTROLLED_RUNNER_CONFIG_OVERRIDES = [
 export function controlledOperationConfigOverrides(tokenFile: string | undefined): string[] {
   if (
     !tokenFile
-    || !new RegExp(`^${CONTROLLED_OPERATION_TOKEN_DIRECTORY}/[0-9a-f-]{36}$`).test(tokenFile)
+    || !new RegExp(`^${CONTROLLED_OPERATION_TOKEN_DIRECTORY}/${UUID_V4_BASENAME}$`).test(tokenFile)
   ) return [];
   return [
     'mcp_servers.roadex-operations.command="node"',
@@ -34,6 +38,21 @@ export function controlledOperationConfigOverrides(tokenFile: string | undefined
     'mcp_servers.roadex-operations.required=true',
     'mcp_servers.roadex-operations.enabled_tools=["install_and_verify_workspace","publish_git_changes"]',
     'mcp_servers.roadex-operations.default_tools_approval_mode="approve"',
+  ];
+}
+
+export function approvalWorkflowConfigOverrides(tokenFile: string | undefined): string[] {
+  if (
+    !tokenFile
+    || !new RegExp(`^${APPROVAL_WORKFLOW_TOKEN_DIRECTORY}/${UUID_V4_BASENAME}$`).test(tokenFile)
+  ) return [];
+  return [
+    'mcp_servers.roadex-workflow.command="node"',
+    `mcp_servers.roadex-workflow.args=["${APPROVAL_WORKFLOW_MCP}"]`,
+    `mcp_servers.roadex-workflow.env={ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE="${tokenFile}",ROADEX_APPROVAL_WORKFLOW_SOCKET="${APPROVAL_WORKFLOW_SOCKET}"}`,
+    'mcp_servers.roadex-workflow.required=true',
+    'mcp_servers.roadex-workflow.enabled_tools=["await_human_approval"]',
+    'mcp_servers.roadex-workflow.default_tools_approval_mode="approve"',
   ];
 }
 

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   CONTROLLED_RUNNER_PROFILE,
+  APPROVAL_WORKFLOW_TOKEN_DIRECTORY,
+  approvalWorkflowConfigOverrides,
   resolveRunnerCapabilityProfile,
 } from '../src/server/runnerCapabilityProfile';
 
@@ -129,5 +131,24 @@ describe('resolveRunnerCapabilityProfile', () => {
         status: 'active',
       },
     })).toEqual({ mode: 'restricted' });
+  });
+});
+
+describe('approval workflow runner overrides', () => {
+  it('injects approval workflow MCP only for bounded token paths', () => {
+    const tokenFile = `${APPROVAL_WORKFLOW_TOKEN_DIRECTORY}/123e4567-e89b-42d3-a456-426614174000`;
+    expect(approvalWorkflowConfigOverrides(tokenFile)).toEqual([
+      'mcp_servers.roadex-workflow.command="node"',
+      `mcp_servers.roadex-workflow.args=["/home/god/Documents/Codex Workspace/Roadex/dist-server/src/server/approvalWorkflowMcp.js"]`,
+      `mcp_servers.roadex-workflow.env={ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE="${tokenFile}",ROADEX_APPROVAL_WORKFLOW_SOCKET="/run/user/1000/roadex-approval-workflow.sock"}`,
+      'mcp_servers.roadex-workflow.required=true',
+      'mcp_servers.roadex-workflow.enabled_tools=["await_human_approval"]',
+      'mcp_servers.roadex-workflow.default_tools_approval_mode="approve"',
+    ]);
+  });
+
+  it('returns no approval workflow MCP overrides for malformed token paths', () => {
+    expect(approvalWorkflowConfigOverrides('bad-workflow-token')).toEqual([]);
+    expect(approvalWorkflowConfigOverrides(`${APPROVAL_WORKFLOW_TOKEN_DIRECTORY}/11111111-1111-1111-1111-111111111111`)).toEqual([]);
   });
 });
