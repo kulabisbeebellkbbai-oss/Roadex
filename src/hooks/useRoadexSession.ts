@@ -297,6 +297,7 @@ export function useRoadexSession(): RoadexSessionState {
 
   const cancelPrompt = useCallback(async () => {
     if (!session) return;
+    promptTransitionGeneration.current += 1;
     const targetSession = session;
     try {
       const response = await cancelSession(token, targetSession.id);
@@ -375,6 +376,9 @@ export function useRoadexSession(): RoadexSessionState {
   }, [closeCurrentSession, session?.id, token]);
 
   const recoverThread = useCallback(async (sessionId: string) => {
+    if (session?.id === sessionId) {
+      promptTransitionGeneration.current += 1;
+    }
     setError(undefined);
     setNotice(undefined);
     try {
@@ -538,6 +542,8 @@ export function useRoadexSession(): RoadexSessionState {
   );
 
   const retry = useCallback(async () => {
+    promptTransitionGeneration.current += 1;
+    activeStreamSessionId.current = undefined;
     if (!workspaces[0]) {
       await attach();
       return;
