@@ -767,6 +767,8 @@ a:focus-visible {
 }
 
 .app-shell.layout-mobile {
+  --mobile-drawer-width: min(360px, calc(100vw - 44px));
+
   display: block;
   height: 100dvh;
   min-height: 0;
@@ -782,7 +784,7 @@ a:focus-visible {
   z-index: 40;
   display: flex;
   align-items: stretch;
-  width: min(88vw, 360px);
+  width: var(--mobile-drawer-width);
   padding: 20px;
   overflow-x: hidden;
   overflow-y: auto;
@@ -1019,7 +1021,7 @@ a:focus-visible {
 
 .app-shell.layout-mobile .mobile-drawer-backdrop {
   position: fixed;
-  inset: 0;
+  inset: 0 0 0 var(--mobile-drawer-width);
   z-index: 35;
   display: block;
   padding: 0;
