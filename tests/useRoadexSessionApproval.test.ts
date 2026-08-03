@@ -550,6 +550,15 @@ describe('useRoadexSession approval transition refresh', () => {
     replacementSession.id = 'session-after-retry';
     replacementSession.lifecycle = 'ready';
     const replacementBootstrap = { ...initialBootstrap, sessions: [replacementSession] };
+    const streamListeners = new Map<string, (event: StreamEvent) => void>();
+    const subscribeSessionStream = vi.fn((
+      _token: string | undefined,
+      sessionId: string,
+      onEvent: (event: StreamEvent) => void,
+    ) => {
+      streamListeners.set(sessionId, onEvent);
+      return () => streamListeners.delete(sessionId);
+    });
     let resolveRetry: ((value: { bootstrap: RoadexBootstrap; session: typeof replacementSession }) => void) | undefined;
     const createSession = vi.fn(() => new Promise<{
       bootstrap: RoadexBootstrap;
@@ -567,7 +576,7 @@ describe('useRoadexSession approval transition refresh', () => {
         loginAndBootstrap: vi.fn(async () => ({ token: 'stable-mock-token', bootstrap: initialBootstrap })),
         readSessionStream: vi.fn(async () => [] as StreamEvent[]),
         submitPrompt: controlledPrompt.submitPrompt,
-        subscribeSessionStream: vi.fn(() => () => undefined),
+        subscribeSessionStream,
       };
     });
 
@@ -596,6 +605,84 @@ describe('useRoadexSession approval transition refresh', () => {
       expect(runner.value?.session?.id).toBe('session-after-retry');
       expect(runner.value?.session?.lifecycle).toBe('ready');
       expect(runner.value?.notice).toBeUndefined();
+    });
+    await vi.waitFor(() => expect(subscribeSessionStream).toHaveBeenCalledTimes(2));
+    streamListeners.get('session-after-retry')?.({
+      id: 'event-after-different-session-retry',
+      sessionId: 'session-after-retry',
+      kind: 'assistant',
+      message: 'SSE is bound to the replacement session.',
+      at: '2026-08-02T00:00:04.000Z',
+    });
+    await vi.waitFor(() => {
+      expect(runner.value?.transcript).toContainEqual(expect.objectContaining({
+        id: 'event-after-different-session-retry',
+      }));
+    });
+
+    runner.unmount();
+  });
+
+  it('continues handling SSE when retry reattaches the same selected session', async () => {
+    stubHookWindow();
+    mockReactHooks();
+    const initialBootstrap = bootstrapWithApproval('pending');
+    const reattachedSession = { ...initialBootstrap.sessions[0] };
+    delete reattachedSession.waitingApproval;
+    reattachedSession.lifecycle = 'ready';
+    const reattachedBootstrap = { ...initialBootstrap, sessions: [reattachedSession] };
+    let streamListener: ((event: StreamEvent) => void) | undefined;
+    const subscribeSessionStream = vi.fn((
+      _token: string | undefined,
+      _sessionId: string,
+      onEvent: (event: StreamEvent) => void,
+    ) => {
+      streamListener = onEvent;
+      return () => undefined;
+    });
+
+    vi.doMock('../src/client/sessionApi', async () => {
+      const actual = await vi.importActual<typeof import('../src/client/sessionApi')>('../src/client/sessionApi');
+      return {
+        ...actual,
+        createSession: vi.fn(async () => ({
+          bootstrap: reattachedBootstrap,
+          session: reattachedSession,
+        })),
+        listArchivedSessions: vi.fn(async () => ({ sessions: [] })),
+        loginAndBootstrap: vi.fn(async () => ({ token: 'stable-mock-token', bootstrap: initialBootstrap })),
+        readSessionStream: vi.fn(async () => [] as StreamEvent[]),
+        subscribeSessionStream,
+      };
+    });
+
+    const { useRoadexSession } = await import('../src/hooks/useRoadexSession');
+    const runner = new HookRunner(useRoadexSession);
+    runner.render();
+    await vi.waitFor(() => {
+      expect(runner.value?.session?.lifecycle).toBe('paused');
+      expect(subscribeSessionStream).toHaveBeenCalledTimes(1);
+    });
+
+    await runner.value?.retry();
+    await vi.waitFor(() => {
+      expect(runner.value?.session?.id).toBe('session-approval-hook');
+      expect(runner.value?.session?.lifecycle).toBe('ready');
+      expect(runner.value?.connectionState).toBe('connected');
+    });
+    expect(subscribeSessionStream).toHaveBeenCalledTimes(1);
+
+    streamListener?.({
+      id: 'event-after-same-session-retry',
+      sessionId: 'session-approval-hook',
+      kind: 'assistant',
+      message: 'SSE remains active after retry.',
+      at: '2026-08-02T00:00:04.000Z',
+    });
+    await vi.waitFor(() => {
+      expect(runner.value?.transcript).toContainEqual(expect.objectContaining({
+        id: 'event-after-same-session-retry',
+      }));
     });
 
     runner.unmount();
