@@ -344,8 +344,8 @@ Status: deployed and locally verified; live DonutHole mutation not authorized
 
 ## Human-Approval Continuation Workflow
 
-Status: design and limited source expansion approved; implementation plan
-ready for execution selection
+Status: source implementation and security review complete; independent
+verification environment-blocked; deployment pending separate approval
 
 - Approved design:
   `docs/superpowers/specs/2026-08-02-human-approval-continuation-design.md`
@@ -359,6 +359,20 @@ ready for execution selection
   review.
 - Murdock owns focused, restart, idempotency, responsive, integration, and
   harmless managed-thread smoke verification.
+- B.A.'s backend is committed in `8b333d2` and `6692106`; Face's approval-wait
+  and responsive UI is committed in `3f5160f`; the owner-only Overseer
+  credential-file repair is committed in `dcaf56c`.
+- Stockwell's independent source review passes with no unresolved Critical,
+  Important, or Minor finding. Roadex now reads the Overseer status bearer only
+  from a configured absolute owner-owned `0600` regular file, revalidating it
+  on every request; the legacy raw-token environment fallback is absent.
+- Murdock's post-repair focused approval tests and serialized full Roadex suite
+  pass, as do the production build and diff check. Strict lint, dependency
+  audit, and responsive Playwright execution remain unverified because their
+  bounded processes entered the host kernel filesystem wait. The broader
+  Overseer selection also retains one unrelated panel-matrix harness timeout.
+- Murdock therefore remains `in_progress`; no responsive-browser pass,
+  dependency-audit result, or complete Task 7 claim is made.
 - Roadex may observe an exact authoritative approval but cannot create, alter,
   infer, dispatch, or grant it.
 - Privileged operational approvals identify the Admin Console; project and
@@ -380,3 +394,8 @@ ready for execution selection
 - This approval covers source changes and local tests only. It does not cover
   an Overseer or Roadex service rebuild/restart, deployment, live approval
   mutation, provisioning, protected smoke, gateway, firewall, or IDS change.
+- Security and verification evidence is recorded in
+  `docs/human-approval-continuation-security-review.md` and
+  `docs/human-approval-continuation-verification.md`. The deployment checklist
+  is prepared but unexecuted and contains placeholders that require a separate
+  exact Overseer admin plan.
