@@ -42,6 +42,7 @@ import type {
   DeviceInventoryBindingRecord,
 } from '../src/shared/deviceBridgeContracts';
 import type { RunnerPromptRequest, SessionRunner } from '../src/server/codexRunner';
+import type { ApprovalWaitRecord, ApprovalWaitState } from '../src/shared/approvalWorkflowContracts';
 import { storeDeviceArtifact } from '../src/server/deviceArtifactVault';
 import type { SerialVerificationProfile } from '../src/shared/serialVerificationContracts';
 import type { BleVerificationProfile } from '../src/shared/bleVerificationContracts';
@@ -1711,6 +1712,70 @@ describe('Roadex session service', () => {
 
     const intruder = { ...mockUser, id: 'other-user' };
     expect(streamEventsForSession(state, intruder, response.session.id)).toBeUndefined();
+  });
+
+  it.each<ApprovalWaitState>([
+    'pending',
+    'verification-delayed',
+    'security-failure',
+    'approved-resume-queued',
+    'resume-dispatching',
+    'resume-reconciliation-required',
+  ])('rejects a user prompt while approval state %s is active without a user event', async (waitState) => {
+    const state = createInitialState(fakeRunner(), createMemoryPersistence());
+    const response = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+
+    const wait: ApprovalWaitRecord = {
+      id: `wait-${waitState}`,
+      sessionId: response.session.id,
+      userId: mockUser.id,
+      projectId: 'roadex',
+      workspaceId: response.session.workspace.id,
+      managedThreadId: 'thread-roadex',
+      provider: 'overseer',
+      approvalRef: 'admin.roadex.test',
+      resourceRef: 'resource.roadex',
+      authorityClass: 'privileged-operation',
+      consoleSurface: 'admin',
+      subject: 'Approve test operation',
+      state: waitState,
+      decisionVersion: `sha256:${'a'.repeat(64)}`,
+      continuationId: `sha256:${'b'.repeat(64)}`,
+      checkAttempt: 0,
+      nextCheckAt: '2026-08-02T18:00:00.000Z',
+      createdAt: '2026-08-02T18:00:00.000Z',
+      updatedAt: '2026-08-02T18:00:00.000Z',
+    };
+    state.approvalWaits = [wait];
+    response.session.lifecycle = 'paused';
+    response.session.waitingApproval = {
+      waitId: wait.id,
+      approvalRef: wait.approvalRef,
+      subject: wait.subject,
+      consoleSurface: wait.consoleSurface,
+      state: wait.state,
+      updatedAt: wait.updatedAt,
+    };
+    const userEventCount = state.sessions.streamEvents.filter((event) => event.kind === 'user').length;
+
+    const result = submitPrompt(state, mockUser, response.session.id, 'must not be accepted');
+
+    expect(result).toEqual({
+      accepted: false,
+      error: {
+        code: 'human-approval-pending',
+        message: 'This session is waiting for human approval.',
+      },
+    });
+    expect(state.sessions.streamEvents.filter((event) => event.kind === 'user')).toHaveLength(userEventCount);
+    expect(state.audit.events.at(-1)).toMatchObject({
+      actorId: mockUser.id,
+      action: 'security.denied',
+      outcome: 'denied',
+      summary: 'Prompt denied while human approval is pending.',
+    });
   });
 
   it('resolves a server-only capability grant before prompt dispatch and fails restricted on lookup error', async () => {
