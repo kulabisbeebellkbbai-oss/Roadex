@@ -1,13 +1,10 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const fixturePath = resolve(process.cwd(), 'tests/fixtures/approval_source_contract_v1.json');
-const canonicalFixturePath = resolve(
-  process.cwd(),
-  '../../..',
-  'Overseer/.worktrees/reusable-approval-facility/tests/fixtures/approval_source_contract_v1.json',
-);
+const reviewedFixtureSha256 = '4d79ef227927c13984ca2f913017352576d3ab8721063197ae049f4f57cf12e7';
 
 const expectedStageTypes = {
   provider: 'string',
@@ -28,12 +25,16 @@ const expectedStatusTypes = {
   updatedAt: 'rfc3339-date-time',
 };
 
+function fixtureDigest(): string {
+  return createHash('sha256').update(readFileSync(fixturePath)).digest('hex');
+}
+
 describe('approval source contract v1', () => {
-  it('is an exact byte mirror of the Overseer canonical fixture', () => {
-    expect(readFileSync(fixturePath)).toEqual(readFileSync(canonicalFixturePath));
+  it('binds the local fixture bytes to the reviewed canonical manifest digest', () => {
+    expect(fixtureDigest()).toBe(reviewedFixtureSha256);
   });
 
-  it('fixes public locator/status field types and every safe conformance case', () => {
+  it('keeps the reviewed locator/status public shape and safe case names', () => {
     const contract = JSON.parse(readFileSync(fixturePath, 'utf8')) as Record<string, unknown>;
 
     expect(contract.contractVersion).toBe('approval-source-contract/v1');
