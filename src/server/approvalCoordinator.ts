@@ -60,6 +60,27 @@ export type ApprovalCoordinatorCallbacks = {
   queueContinuation: (wait: ApprovalWaitRecord, prompt: string) => Promise<ApprovalContinuationDispatchResult>;
 };
 
+export type ApprovalRegistrationCommitFence = {
+  tryCommit: () => boolean;
+  isCommitted: () => boolean;
+  cancel: () => void;
+};
+
+export function createApprovalRegistrationCommitFence(): ApprovalRegistrationCommitFence {
+  let state: 'open' | 'committed' | 'cancelled' = 'open';
+  return {
+    tryCommit: () => {
+      if (state !== 'open') return false;
+      state = 'committed';
+      return true;
+    },
+    isCommitted: () => state === 'committed',
+    cancel: () => {
+      if (state === 'open') state = 'cancelled';
+    },
+  };
+}
+
 type ApprovalCoordinatorOptions = {
   clock?: ApprovalCoordinatorStateClock;
   idSource?: { generateWaitId: () => string };
@@ -353,8 +374,9 @@ export class ApprovalCoordinator {
     capability: ApprovalSessionCapability,
     input: RegisterApprovalWaitInput,
     signal?: AbortSignal,
+    registrationFence: ApprovalRegistrationCommitFence = createApprovalRegistrationCommitFence(),
   ): Promise<RegisterApprovalWaitResult> {
-    const cancelled = (): boolean => signal?.aborted === true;
+    const cancelled = (): boolean => signal?.aborted === true && !registrationFence.isCommitted();
     if (cancelled()) {
       return { ok: false, code: 'provider-unavailable' };
     }
@@ -523,18 +545,12 @@ export class ApprovalCoordinator {
             this.#audit('approval_wait.register', 'allowed', this.#auditSummary(record), record.sessionId);
           },
           signal,
+          registrationFence,
         );
         if (!persisted) {
           const inserted = this.#waits.indexOf(record);
           if (inserted >= 0) {
             this.#waits.splice(inserted, 1);
-          }
-          if (cancelled()) {
-            try {
-              await Promise.resolve(this.#callbacks.persist());
-            } catch {
-              // Registration remains denied even if rollback persistence fails.
-            }
           }
           return { ok: false, code: 'provider-unavailable' } as const;
         }
@@ -1618,21 +1634,28 @@ export class ApprovalCoordinator {
     transition: () => void | Promise<void>,
     publish: () => void | Promise<void> = () => {},
     signal?: AbortSignal,
+    registrationFence?: ApprovalRegistrationCommitFence,
   ): Promise<boolean> {
     const cancelled = (): boolean => signal?.aborted === true;
-    if (cancelled()) {
+    const cancelledBeforeCommit = (): boolean => cancelled() && !registrationFence?.isCommitted();
+    if (cancelledBeforeCommit()) {
       return false;
     }
 
     try {
       await Promise.resolve(transition());
-      if (cancelled()) {
+      if (cancelledBeforeCommit()) {
+        this.restoreSession(session, sessionBefore);
+        this.restoreWait(wait, waitBefore);
+        return false;
+      }
+      if (registrationFence && !registrationFence.tryCommit()) {
         this.restoreSession(session, sessionBefore);
         this.restoreWait(wait, waitBefore);
         return false;
       }
       await Promise.resolve(this.#callbacks.persist());
-      if (cancelled()) {
+      if (!registrationFence?.isCommitted() && cancelled()) {
         this.restoreSession(session, sessionBefore);
         this.restoreWait(wait, waitBefore);
         try {
@@ -1648,7 +1671,7 @@ export class ApprovalCoordinator {
       return false;
     }
 
-    if (cancelled()) {
+    if (!registrationFence?.isCommitted() && cancelled()) {
       this.restoreSession(session, sessionBefore);
       this.restoreWait(wait, waitBefore);
       try {
@@ -1665,7 +1688,7 @@ export class ApprovalCoordinator {
       // Persisted state is canonical; callback exceptions must not roll back memory.
     }
 
-    if (cancelled()) {
+    if (!registrationFence?.isCommitted() && cancelled()) {
       this.restoreSession(session, sessionBefore);
       this.restoreWait(wait, waitBefore);
       try {

@@ -10,9 +10,11 @@ import {
 import { dirname } from 'node:path';
 import type {
   ApprovalSessionCapability,
+  ApprovalRegistrationCommitFence,
   RegisterApprovalWaitInput,
   RegisterApprovalWaitResult,
 } from './approvalCoordinator.js';
+import { createApprovalRegistrationCommitFence } from './approvalCoordinator.js';
 import {
   type ApprovalStageLocator,
   type ApprovalTypedIntent,
@@ -45,6 +47,7 @@ export type ApprovalWorkflowHostDependencies = {
     capability: ApprovalSessionCapability,
     input: RegisterApprovalWaitInput,
     signal: AbortSignal,
+    registrationFence: ApprovalRegistrationCommitFence,
   ) => Promise<RegisterApprovalWaitResult>;
   socketPath?: string;
   verifyPeer?: (socket: Socket) => Promise<boolean>;
@@ -83,6 +86,7 @@ export function startApprovalWorkflowHost(
     let inputEnded = false;
     let timedOut = false;
     const requestController = new AbortController();
+    const registrationFence = createApprovalRegistrationCommitFence();
     const respond = (response: ApprovalWorkflowResponse): void => {
       if (responded) return;
       responded = true;
@@ -98,7 +102,9 @@ export function startApprovalWorkflowHost(
       respond({ ok: false, reason });
     };
     const timer = setTimeout(() => {
+      if (registrationFence.isCommitted()) return;
       timedOut = true;
+      registrationFence.cancel();
       requestController.abort(new DOMException('Approval workflow request timed out.', 'TimeoutError'));
       deny('request_timeout');
     }, requestTimeoutMs);
@@ -165,6 +171,7 @@ export function startApprovalWorkflowHost(
           approvalRef: locator.approvalRef,
         },
         signal,
+        registrationFence,
       );
       return publicResult(coordinatorResult);
     };
@@ -194,7 +201,13 @@ export function startApprovalWorkflowHost(
       inputEnded = true;
       processInput();
     });
-    socket.once('close', () => clearTimeout(timer));
+    socket.once('close', () => {
+      clearTimeout(timer);
+      if (!responded) {
+        registrationFence.cancel();
+        requestController.abort(new DOMException('Approval workflow socket closed.', 'AbortError'));
+      }
+    });
     socket.once('error', () => clearTimeout(timer));
   });
   server.once('listening', () => {

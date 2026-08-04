@@ -274,7 +274,7 @@ describe('ApprovalCoordinator', () => {
     expect(firstSession.waitingApproval?.waitId).toBe(waits[0].id);
   });
 
-  it('rolls back in-memory and durable state when persistence completes after cancellation', async () => {
+  it('keeps the durable registration when cancellation arrives after the commit fence', async () => {
     const persistGate = deferred<void>();
     const persisted: Array<{ waits: number; lifecycle: RoadexSession['lifecycle']; waiting: boolean }> = [];
     const session = fixtureSession();
@@ -290,6 +290,7 @@ describe('ApprovalCoordinator', () => {
           persistCalls += 1;
           persisted.push({ waits: waits.length, lifecycle: session.lifecycle, waiting: session.waitingApproval !== undefined });
           if (persistCalls === 1) await persistGate.promise;
+          if (persistCalls > 1) throw new Error('compensating-persist-must-not-run');
         },
       },
       { clock: clockWithState(), idSource: { generateWaitId: () => 'wait-persist-cancelled' } },
@@ -304,11 +305,12 @@ describe('ApprovalCoordinator', () => {
     controller.abort();
     persistGate.resolve();
 
-    await expect(registration).resolves.toEqual({ ok: false, code: 'provider-unavailable' });
-    expect(waits).toHaveLength(0);
-    expect(session.lifecycle).toBe('ready');
-    expect(session.waitingApproval).toBeUndefined();
-    expect(persisted.at(-1)).toEqual({ waits: 0, lifecycle: 'ready', waiting: false });
+    await expect(registration).resolves.toMatchObject({ ok: true, wait: { waitId: 'wait-persist-cancelled' } });
+    expect(waits).toHaveLength(1);
+    expect(session.lifecycle).toBe('paused');
+    expect(session.waitingApproval).toMatchObject({ waitId: 'wait-persist-cancelled', state: 'pending' });
+    expect(persistCalls).toBe(1);
+    expect(persisted).toEqual([{ waits: 1, lifecycle: 'paused', waiting: true }]);
   });
 
   it('registers a pending approval and pauses the session with full wait result', async () => {

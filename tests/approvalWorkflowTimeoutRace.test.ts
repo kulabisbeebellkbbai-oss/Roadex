@@ -124,11 +124,21 @@ describe('approval workflow timeout race', () => {
       broker,
       runtime,
       socketPath,
-      registerApprovalWait: (run, input, signal) => coordinator.register(run, input, signal),
+      registerApprovalWait: (run, input, signal, registrationFence) => coordinator.register(
+        run,
+        input,
+        signal,
+        registrationFence,
+      ),
     });
     const host = startApprovalWorkflowHost({
       ...dependencies,
-      registerApprovalWait: (run, input, signal) => coordinator.register(run, input, signal),
+      registerApprovalWait: (run, input, signal, registrationFence) => coordinator.register(
+        run,
+        input,
+        signal,
+        registrationFence,
+      ),
       verifyPeer: async () => true,
       requestTimeoutMs: 25,
     });
@@ -143,6 +153,164 @@ describe('approval workflow timeout race', () => {
       expect(session.lifecycle).toBe('ready');
       expect(session.waitingApproval).toBeUndefined();
     } finally {
+      await closeServer(host);
+    }
+  });
+
+  it('does not report request_timeout after registration crosses the durable commit fence', async () => {
+    const broker = new ApprovalWorkflowGrantBroker({ now: () => 1_000 });
+    const capability: ApprovalSessionCapability = {
+      sessionId: 'session-1',
+      userId: 'owner',
+      projectId: 'roadex',
+      workspaceId: 'roadex',
+      resourceRef: 'resource-1',
+      managedThreadId: 'thread-1',
+    };
+    const session = fixtureSession();
+    const waits: ApprovalWaitRecord[] = [];
+    const persistGate = deferred<void>();
+    const durableSnapshots: Array<{ waits: ApprovalWaitRecord[]; session: RoadexSession }> = [];
+    let persistCalls = 0;
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      [session],
+      { getStatus: vi.fn(async () => fixtureStatus()) },
+      callbacks(async () => {
+        persistCalls += 1;
+        if (persistCalls === 1) {
+          durableSnapshots.push({
+            waits: structuredClone(waits),
+            session: structuredClone(session),
+          });
+          await persistGate.promise;
+          return;
+        }
+        throw new Error('compensating-persist-must-not-run');
+      }),
+      { idSource: { generateWaitId: () => 'wait-fenced' } },
+    );
+    const runtime = createApprovalWorkflowRunRuntime(broker, {
+      stageTypedIntent: async () => fixtureLocator(),
+    });
+    const grant = runtime.beginRun(capability);
+    const dependencies = createProductionApprovalWorkflowHostDependencies({
+      broker,
+      runtime,
+      socketPath,
+      registerApprovalWait: (run, input, signal, registrationFence) => coordinator.register(
+        run,
+        input,
+        signal,
+        registrationFence,
+      ),
+    });
+    const host = startApprovalWorkflowHost({
+      ...dependencies,
+      registerApprovalWait: (run, input, signal, registrationFence) => coordinator.register(
+        run,
+        input,
+        signal,
+        registrationFence,
+      ),
+      verifyPeer: async () => true,
+      requestTimeoutMs: 25,
+    });
+    await waitForListening(host);
+    const responsePromise = sendRequest(socketPath, { token: grant.token });
+    try {
+      await vi.waitFor(() => expect(persistCalls).toBe(1));
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      let responseSettled = false;
+      void responsePromise.then(() => { responseSettled = true; });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(responseSettled).toBe(false);
+
+      persistGate.resolve();
+      await expect(responsePromise).resolves.toMatchObject({
+        ok: true,
+        waitId: 'wait-fenced',
+        waitState: 'pending',
+      });
+      expect(persistCalls).toBe(1);
+      expect(durableSnapshots).toHaveLength(1);
+      expect(durableSnapshots[0].waits).toHaveLength(1);
+      expect(durableSnapshots[0].session).toMatchObject({
+        lifecycle: 'paused',
+        waitingApproval: { waitId: 'wait-fenced', state: 'pending' },
+      });
+    } finally {
+      persistGate.resolve();
+      await closeServer(host);
+    }
+  });
+
+  it('cancels before registration commit when the client socket closes', async () => {
+    const broker = new ApprovalWorkflowGrantBroker({ now: () => 1_000 });
+    const capability: ApprovalSessionCapability = {
+      sessionId: 'session-1',
+      userId: 'owner',
+      projectId: 'roadex',
+      workspaceId: 'roadex',
+      resourceRef: 'resource-1',
+      managedThreadId: 'thread-1',
+    };
+    const stageStarted = deferred<void>();
+    const stageAborted = deferred<void>();
+    const stageGate = deferred<ApprovalStageLocator>();
+    let registrations = 0;
+    const runtime = createApprovalWorkflowRunRuntime(broker, {
+      stageTypedIntent: async (_capability, _intent, signal) => {
+        stageStarted.resolve();
+        signal?.addEventListener('abort', () => stageAborted.resolve(), { once: true });
+        return stageGate.promise;
+      },
+    });
+    const grant = runtime.beginRun(capability);
+    const dependencies = createProductionApprovalWorkflowHostDependencies({
+      broker,
+      runtime,
+      socketPath,
+      registerApprovalWait: async () => {
+        registrations += 1;
+        return {
+          ok: false,
+          code: 'provider-unavailable',
+        };
+      },
+    });
+    const host = startApprovalWorkflowHost({
+      ...dependencies,
+      verifyPeer: async () => true,
+      requestTimeoutMs: 1_000,
+    });
+    await waitForListening(host);
+    const socket = createConnection(socketPath);
+    socket.on('error', () => {});
+    try {
+      await new Promise<void>((resolve) => {
+        socket.once('connect', () => {
+          socket.end(JSON.stringify({
+            token: grant.token,
+            provider: 'overseer',
+            intent: validProvisioningIntent(),
+          }) + '\n');
+          resolve();
+        });
+      });
+      await stageStarted.promise;
+      const closed = new Promise<void>((resolve) => socket.once('close', () => resolve()));
+      socket.destroy();
+      await closed;
+      await stageAborted.promise;
+      stageGate.resolve(fixtureLocator());
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(registrations).toBe(0);
+    } finally {
+      stageGate.resolve(fixtureLocator());
+      socket.destroy();
       await closeServer(host);
     }
   });
