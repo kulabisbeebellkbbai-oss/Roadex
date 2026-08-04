@@ -17,6 +17,79 @@ import {
 import { createApprovalWorkflowTokenFile } from '../src/server/codexRunner';
 
 describe('approval workflow MCP adapter', () => {
+  it('submits typed intent without exposing approval or execution fields', async () => {
+    const token = 'A'.repeat(43);
+    const tokenFile = createApprovalWorkflowTokenFile(token);
+    const original = process.env.ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE;
+    process.env.ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE = tokenFile;
+    const calls: unknown[] = [];
+    const { client, close } = await connectedClient(async (request) => {
+      calls.push(request);
+      return { ok: true, waitId: 'wait-1', waitState: 'pending' };
+    });
+    try {
+      const response = await client.callTool({
+        name: 'await_human_approval',
+        arguments: {
+          provider: 'overseer',
+          intent: {
+            operation: 'typed-operation',
+            projectId: 'roadex',
+            workspaceId: 'roadex',
+            resourceRef: 'resource-1',
+          },
+        },
+      });
+      expect(JSON.parse(response.content[0]?.text ?? '{}')).toMatchObject({ ok: true });
+      expect(calls).toEqual([{
+        token,
+        provider: 'overseer',
+        intent: {
+          operation: 'typed-operation',
+          projectId: 'roadex',
+          workspaceId: 'roadex',
+          resourceRef: 'resource-1',
+        },
+      }]);
+    } finally {
+      if (original === undefined) delete process.env.ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE;
+      else process.env.ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE = original;
+      await close();
+    }
+  });
+
+  it('rejects caller-supplied approval and execution fields before transport', async () => {
+    const token = 'A'.repeat(43);
+    const tokenFile = createApprovalWorkflowTokenFile(token);
+    const original = process.env.ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE;
+    process.env.ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE = tokenFile;
+    const calls: unknown[] = [];
+    const { client, close } = await connectedClient(async (request) => {
+      calls.push(request);
+      return { ok: true, waitId: 'wait-1', waitState: 'pending' };
+    });
+    try {
+      const response = await client.callTool({
+        name: 'await_human_approval',
+        arguments: {
+          provider: 'overseer',
+          intent: {
+            operation: 'typed-operation',
+            approvalRef: 'caller.override',
+            executionId: 'caller.override',
+          },
+        },
+      });
+      expect(response.isError).toBe(true);
+      expect(calls).toEqual([]);
+    } finally {
+      if (original === undefined) delete process.env.ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE;
+      else process.env.ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE = original;
+      try { unlinkSync(tokenFile); } catch { /* consumed or already removed */ }
+      await close();
+    }
+  });
+
   it('exposes only await_human_approval', async () => {
     const { client, close } = await connectedClient();
     try {
@@ -45,18 +118,18 @@ describe('approval workflow MCP adapter', () => {
     try {
       const response = await client.callTool({
         name: 'await_human_approval',
-        arguments: { provider: 'overseer', approvalRef: 'admin.roadex.test' },
+        arguments: { provider: 'overseer', intent: { operation: 'typed-test' } },
       });
       expect(JSON.parse(response.content[0]?.text ?? '{}')).toMatchObject({
         ok: true,
         waitId: 'wait-1',
         waitState: 'pending',
       });
-      expect(calls).toEqual([{ token, provider: 'overseer', approvalRef: 'admin.roadex.test' }]);
+      expect(calls).toEqual([{ token, provider: 'overseer', intent: { operation: 'typed-test' } }]);
       expect(() => readFileSync(tokenFile, 'utf8')).toThrow();
       const second = await client.callTool({
         name: 'await_human_approval',
-        arguments: { provider: 'overseer', approvalRef: 'admin.roadex.test' },
+        arguments: { provider: 'overseer', intent: { operation: 'typed-test' } },
       });
       expect(second.isError).toBe(true);
       expect(calls).toHaveLength(1);
@@ -83,7 +156,7 @@ describe('approval workflow MCP adapter', () => {
       expect((await client.callTool({ name: 'publish_git_changes', arguments: {} })).isError).toBe(true);
       expect((await client.callTool({
         name: 'await_human_approval',
-        arguments: { provider: 'overseer', approvalRef: 'bad token' },
+        arguments: { provider: 'overseer', intent: { approvalRef: 'bad token' } },
       })).isError).toBe(true);
       expect(calls).toEqual([]);
     } finally {
@@ -113,7 +186,7 @@ describe('approval workflow MCP adapter', () => {
     try {
       const socketResponse = await client.callTool({
         name: 'await_human_approval',
-        arguments: { provider: 'overseer', approvalRef: 'admin.roadex.test' },
+        arguments: { provider: 'overseer', intent: { operation: 'typed-test' } },
       });
       expect(socketResponse.isError).toBe(true);
       const socketError = String(socketResponse.content[0]?.text ?? '');
@@ -161,7 +234,7 @@ describe('approval workflow MCP adapter', () => {
       await expect(executeBrokerRequest({
         token: 'Q'.repeat(43),
         provider: 'overseer',
-        approvalRef: 'admin.roadex.test',
+        intent: { operation: 'typed-test' },
       })).rejects.toThrow('Approval workflow broker is unavailable.');
     } finally {
       if (originalSocket !== undefined) {

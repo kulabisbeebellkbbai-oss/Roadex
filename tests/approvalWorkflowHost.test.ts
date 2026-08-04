@@ -43,6 +43,129 @@ afterEach(() => {
 });
 
 describe('approval workflow host listener', () => {
+  it('stages typed intent, validates the returned locator, and registers only its approval reference', async () => {
+    const broker = new ApprovalWorkflowGrantBroker({ now: () => 1_000 });
+    const grant = broker.issue({
+      userId: 'owner',
+      sessionId: 'session-1',
+      workspaceId: 'roadex',
+      managedThreadId: 'thread-1',
+      runId: 'run-1',
+    });
+    const runContext: ApprovalSessionCapability = {
+      sessionId: 'session-1',
+      userId: 'owner',
+      projectId: 'roadex',
+      workspaceId: 'roadex',
+      resourceRef: 'resource-1',
+      managedThreadId: 'thread-1',
+    };
+    const staged: unknown[] = [];
+    const registered: unknown[] = [];
+    const locator = {
+      provider: 'overseer',
+      approvalRef: 'approval.fixture.v1',
+      projectId: 'roadex',
+      workspaceId: 'roadex',
+      resourceRef: 'resource-1',
+      authorityClass: 'project-workflow',
+      scopeDigest: `sha256:${'a'.repeat(64)}`,
+    };
+    const host = startApprovalWorkflowHost({
+      socketPath,
+      consumeGrant: (token) => broker.consume(token),
+      resolveRunContext: (runId) => runId === 'run-1' ? runContext : undefined,
+      stageTypedIntent: async (capability, intent) => {
+        staged.push({ capability, intent });
+        return locator;
+      },
+      registerApprovalWait: async (capability, input) => {
+        registered.push({ capability, input });
+        return WAIT;
+      },
+      verifyPeer: async () => true,
+    });
+    await waitForListening(host);
+    try {
+      const response = await sendApprovalWorkflowRequest({
+        token: grant.token,
+        provider: 'overseer',
+        intent: {
+          operation: 'typed-operation',
+          projectId: 'roadex',
+          workspaceId: 'roadex',
+          resourceRef: 'resource-1',
+        },
+      });
+      expect(response).toEqual({ ok: true, waitId: 'wait-1', waitState: 'pending' });
+      expect(staged).toEqual([{
+        capability: runContext,
+        intent: {
+          operation: 'typed-operation',
+          projectId: 'roadex',
+          workspaceId: 'roadex',
+          resourceRef: 'resource-1',
+        },
+      }]);
+      expect(registered).toEqual([{
+        capability: runContext,
+        input: { provider: 'overseer', approvalRef: 'approval.fixture.v1' },
+      }]);
+    } finally {
+      await closeServer(host);
+    }
+  });
+
+  it('fails closed when the authoritative locator scope differs from the managed run', async () => {
+    const broker = new ApprovalWorkflowGrantBroker({ now: () => 1_000 });
+    const grant = broker.issue({
+      userId: 'owner',
+      sessionId: 'session-1',
+      workspaceId: 'roadex',
+      managedThreadId: 'thread-1',
+      runId: 'run-1',
+    });
+    const runContext: ApprovalSessionCapability = {
+      sessionId: 'session-1',
+      userId: 'owner',
+      projectId: 'roadex',
+      workspaceId: 'roadex',
+      resourceRef: 'resource-1',
+      managedThreadId: 'thread-1',
+    };
+    let registrations = 0;
+    const host = startApprovalWorkflowHost({
+      socketPath,
+      consumeGrant: (token) => broker.consume(token),
+      resolveRunContext: () => runContext,
+      stageTypedIntent: async () => ({
+        provider: 'overseer',
+        approvalRef: 'approval.fixture.mismatch',
+        projectId: 'other-project',
+        workspaceId: 'roadex',
+        resourceRef: 'resource-1',
+        authorityClass: 'project-workflow',
+        scopeDigest: `sha256:${'b'.repeat(64)}`,
+      }),
+      registerApprovalWait: async () => {
+        registrations += 1;
+        return WAIT;
+      },
+      verifyPeer: async () => true,
+    });
+    await waitForListening(host);
+    try {
+      await expect(sendApprovalWorkflowRequest({
+        token: grant.token,
+        provider: 'overseer',
+        intent: { operation: 'typed-operation' },
+      })).resolves.toEqual({ ok: false, reason: 'scope_mismatch' });
+      expect(registrations).toBe(0);
+    } finally {
+      await closeServer(host);
+    }
+  });
+
   it('registers waits only for exact scope and run binding', async () => {
     const broker = new ApprovalWorkflowGrantBroker({ now: () => 1_000 });
     const grant = broker.issue({
@@ -65,6 +188,11 @@ describe('approval workflow host listener', () => {
       socketPath,
       consumeGrant: (token) => broker.consume(token),
       resolveRunContext: (runId) => runId === 'run-1' ? runContext : undefined,
+      stageTypedIntent: async () => ({
+        provider: 'overseer', approvalRef: 'admin.roadex.test', projectId: 'roadex',
+        workspaceId: 'roadex', resourceRef: 'resource-1', authorityClass: 'privileged-operation',
+        scopeDigest: `sha256:${'a'.repeat(64)}`,
+      }),
       registerApprovalWait: async (capability, input) => {
         requested.push({ capability, input });
         return WAIT;
@@ -76,7 +204,7 @@ describe('approval workflow host listener', () => {
       const response = await sendApprovalWorkflowRequest({
         token: grant.token,
         provider: 'overseer',
-        approvalRef: 'admin.roadex.test',
+        intent: { operation: 'typed-test' },
       });
       expect(response).toEqual({ ok: true, waitId: 'wait-1', waitState: 'pending' });
       expect(requested).toHaveLength(1);
@@ -114,7 +242,7 @@ describe('approval workflow host listener', () => {
       const response = await sendApprovalWorkflowRequest({
         token: grant.token,
         provider: 'overseer',
-        approvalRef: 'admin.roadex.test',
+        intent: { operation: 'typed-test' },
       });
       expect(response).toEqual({ ok: false, reason: 'peer_denied' });
       expect(consumed).toBe(0);
@@ -149,18 +277,18 @@ describe('approval workflow host listener', () => {
         .toEqual({ ok: false, reason: 'request_invalid' });
       expect(consumed).toBe(0);
 
-      expect(await sendApprovalWorkflowRequest({ token: 'a'.repeat(42), provider: 'overseer', approvalRef: 'admin.roadex.test' }))
+      expect(await sendApprovalWorkflowRequest({ token: 'a'.repeat(42), provider: 'overseer', intent: { operation: 'typed-test' } }))
         .toEqual({ ok: false, reason: 'request_invalid' });
-      expect(await sendApprovalWorkflowRequest({ token: `${'a'.repeat(42)}.`, provider: 'overseer', approvalRef: 'admin.roadex.test' }))
+      expect(await sendApprovalWorkflowRequest({ token: `${'a'.repeat(42)}.`, provider: 'overseer', intent: { operation: 'typed-test' } }))
         .toEqual({ ok: false, reason: 'request_invalid' });
-      expect(await sendApprovalWorkflowRequest({ token: `${'A'.repeat(42)}B`, provider: 'overseer', approvalRef: 'admin.roadex.test' }))
+      expect(await sendApprovalWorkflowRequest({ token: `${'A'.repeat(42)}B`, provider: 'overseer', intent: { operation: 'typed-test' } }))
         .toEqual({ ok: false, reason: 'request_invalid' });
       expect(consumed).toBe(0);
 
       expect(await sendApprovalWorkflowRequest({
         token: grant.token,
         provider: 'overseer',
-        approvalRef: 'admin.roadex.test',
+        intent: { operation: 'typed-test' },
         extra: 'field',
       } as never)).toEqual({ ok: false, reason: 'request_invalid' });
       expect(consumed).toBe(0);
@@ -168,7 +296,7 @@ describe('approval workflow host listener', () => {
       expect(await sendApprovalWorkflowRequest({
         token: grant.token,
         provider: 'overseer',
-        approvalRef: 'admin.roadex.test',
+        intent: { operation: 'typed-test' },
       })).toEqual({ ok: false, reason: 'scope_mismatch' });
       expect(consumed).toBe(1);
     } finally {
@@ -195,7 +323,7 @@ describe('approval workflow host listener', () => {
       expect(await sendRawApprovalWorkflowRequest(`${JSON.stringify({
         token: 'A'.repeat(43),
         provider: 'overseer',
-        approvalRef: 'admin.roadex.test',
+        intent: { operation: 'typed-test' },
       })}\n{}\n`)).toEqual({ ok: false, reason: 'request_invalid' });
       expect(consumed).toBe(0);
     } finally {
@@ -224,6 +352,11 @@ describe('approval workflow host listener', () => {
       socketPath,
       consumeGrant: (token) => broker.consume(token),
       resolveRunContext: () => runContext,
+      stageTypedIntent: async () => ({
+        provider: 'overseer', approvalRef: 'admin.roadex.test', projectId: 'roadex',
+        workspaceId: 'roadex', resourceRef: 'resource-1', authorityClass: 'privileged-operation',
+        scopeDigest: `sha256:${'a'.repeat(64)}`,
+      }),
       registerApprovalWait: async () => {
         throw new Error(`private ${grant.token}`);
       },
@@ -234,7 +367,7 @@ describe('approval workflow host listener', () => {
       const response = await sendApprovalWorkflowRequest({
         token: grant.token,
         provider: 'overseer',
-        approvalRef: 'admin.roadex.test',
+        intent: { operation: 'typed-test' },
       });
       expect(response).toEqual({ ok: false, reason: 'workflow_request_failed' });
       expect(JSON.stringify(response)).not.toContain(grant.token);
@@ -264,6 +397,11 @@ describe('approval workflow host listener', () => {
         resourceRef: 'resource-1',
         managedThreadId: 'thread-1',
       }),
+      stageTypedIntent: async () => ({
+        provider: 'overseer', approvalRef: 'admin.roadex.test', projectId: 'roadex',
+        workspaceId: 'roadex', resourceRef: 'resource-1', authorityClass: 'privileged-operation',
+        scopeDigest: `sha256:${'a'.repeat(64)}`,
+      }),
       registerApprovalWait: async () => new Promise<RegisterApprovalWaitResult>(() => {}),
       verifyPeer: async () => true,
       requestTimeoutMs: 25,
@@ -273,7 +411,7 @@ describe('approval workflow host listener', () => {
       expect(await sendApprovalWorkflowRequest({
         token: grant.token,
         provider: 'overseer',
-        approvalRef: 'admin.roadex.test',
+        intent: { operation: 'typed-test' },
       })).toEqual({ ok: false, reason: 'request_timeout' });
     } finally {
       await closeServer(host);

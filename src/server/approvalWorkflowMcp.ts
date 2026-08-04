@@ -41,10 +41,22 @@ const BROKER_DENIAL_REASONS = new Set([
   'response_invalid',
 ]);
 
-type BrokerRequest = {
-  token: string;
+export type ApprovalTypedIntent = Readonly<Record<string, unknown>>;
+
+export type ApprovalStageLocator = {
   provider: 'overseer';
   approvalRef: string;
+  projectId: string;
+  workspaceId: string;
+  resourceRef: string;
+  authorityClass: 'privileged-operation' | 'project-workflow';
+  scopeDigest: string;
+};
+
+export type BrokerRequest = {
+  token: string;
+  provider: 'overseer';
+  intent: ApprovalTypedIntent;
 };
 
 type BrokerResult = {
@@ -59,7 +71,29 @@ function jsonContent(value: unknown) {
 }
 
 export const APPROVAL_WORKFLOW_TOOLS = ['await_human_approval'] as const;
-const APPROVAL_REFERENCE_PATTERN = /^(admin|roadex-human-decision)\.[A-Za-z0-9._:-]{1,220}$/;
+const FORBIDDEN_INTENT_KEYS = new Set([
+  'approvalId', 'approvalRef', 'approvalStatus', 'approval_id', 'approval_ref', 'approval_status',
+  'authorizationId', 'authorizationRef', 'authorization_id', 'authorization_ref',
+  'crewId', 'crewIds', 'crew_id', 'crew_ids',
+  'decision', 'decisionVersion', 'decision_version',
+  'evidenceDigest', 'evidenceDigests', 'evidence_digest', 'evidence_digests',
+  'executionId', 'executionStatus', 'execution_id', 'execution_status',
+  'runnerRunId', 'runner_run_id', 'sourceStatus', 'source_status',
+]);
+
+export function isTypedApprovalIntent(value: unknown, depth = 0): value is ApprovalTypedIntent {
+  if (depth > 4 || value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length === 0 || keys.some((key) => FORBIDDEN_INTENT_KEYS.has(key))) return false;
+  return keys.every((key) => {
+    const child = record[key];
+    if (child === null || typeof child === 'string' || typeof child === 'boolean') return true;
+    if (typeof child === 'number') return Number.isFinite(child);
+    if (Array.isArray(child)) return child.every((entry) => isTypedApprovalIntent({ value: entry }, depth + 1));
+    return isTypedApprovalIntent(child, depth + 1);
+  });
+}
 
 export function createApprovalWorkflowMcpServer(
   execute: (request: BrokerRequest) => Promise<BrokerResult> = executeBrokerRequest,
@@ -70,14 +104,14 @@ export function createApprovalWorkflowMcpServer(
   });
   server.registerTool('await_human_approval', {
     description: 'Pause this exact Roadex managed thread for one existing authoritative human approval. This tool cannot grant approval.',
-    inputSchema: {
+    inputSchema: z.object({
       provider: z.literal('overseer'),
-      approvalRef: z.string().regex(APPROVAL_REFERENCE_PATTERN),
-    },
-  }, async ({ provider, approvalRef }) => jsonContent(await execute({
+      intent: z.record(z.unknown()).refine((value) => isTypedApprovalIntent(value), 'typed intent is invalid'),
+    }).strict(),
+  }, async ({ provider, intent }) => jsonContent(await execute({
     token: requiredToken(),
     provider,
-    approvalRef,
+    intent,
   })));
   return server;
 }
@@ -88,14 +122,14 @@ export async function executeBrokerRequest(request: BrokerRequest): Promise<Brok
     socketPath !== APPROVAL_WORKFLOW_SOCKET
     || !isApprovalWorkflowToken(request.token)
     || request.provider !== 'overseer'
-    || !APPROVAL_REFERENCE_PATTERN.test(request.approvalRef)
+    || !isTypedApprovalIntent(request.intent)
   ) {
     throw new Error('Approval workflow broker is unavailable.');
   }
   const boundedRequest: BrokerRequest = {
     token: request.token,
     provider: 'overseer',
-    approvalRef: request.approvalRef,
+    intent: request.intent,
   };
   return new Promise<BrokerResult>((resolveResult, reject) => {
     const socket = createConnection(socketPath);

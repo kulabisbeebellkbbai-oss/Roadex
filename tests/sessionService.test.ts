@@ -13,6 +13,7 @@ import {
   closeSession,
   createDeviceInventoryBinding,
   createInitialState,
+  createApprovalWorkflowRunRuntime,
   createMockSession,
   createSessionFromApi,
   cancelSessionRun,
@@ -282,6 +283,51 @@ describe('createMockSession', () => {
 });
 
 describe('Roadex session service', () => {
+  it('keeps typed staging as an injected transport and does not persist approval state', async () => {
+    const calls: unknown[] = [];
+    const runtime = createApprovalWorkflowRunRuntime(
+      {
+        issue: () => ({
+          token: 'A'.repeat(43),
+          userId: 'user-1',
+          sessionId: 'session-1',
+          workspaceId: 'roadex',
+          managedThreadId: 'thread-1',
+          runId: 'run-1',
+          expiresAt: '2026-08-04T00:00:00.000Z',
+        }),
+        revokeRun: () => {},
+      },
+      {
+        stageTypedIntent: async (capability, intent) => {
+          calls.push({ capability, intent });
+          return {
+            provider: 'overseer',
+            approvalRef: 'approval.fixture.v1',
+            projectId: 'roadex',
+            workspaceId: 'roadex',
+            resourceRef: 'resource-1',
+            authorityClass: 'project-workflow',
+            scopeDigest: `sha256:${'a'.repeat(64)}`,
+          };
+        },
+      },
+    );
+
+    const capability = {
+      sessionId: 'session-1',
+      userId: 'user-1',
+      projectId: 'roadex',
+      workspaceId: 'roadex',
+      resourceRef: 'resource-1',
+      managedThreadId: 'thread-1',
+    };
+    const locator = await runtime.stageTypedIntent!(capability, { operation: 'typed-only' });
+
+    expect(locator.approvalRef).toBe('approval.fixture.v1');
+    expect(calls).toEqual([{ capability, intent: { operation: 'typed-only' } }]);
+  });
+
   it('observes an allowlisted USB descriptor without persisting or returning the raw serial', async () => {
     const enabled = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_OBSERVATION_ENABLED;
     const descriptorKey = process.env.ROADEX_DEVICE_BRIDGE_DESCRIPTOR_HMAC_KEY;

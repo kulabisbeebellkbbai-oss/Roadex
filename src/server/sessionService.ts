@@ -99,6 +99,7 @@ import type {
 } from './approvalCoordinator.js';
 import { buildApprovalContinuation } from './approvalContinuation.js';
 import type { ApprovalWorkflowGrantBroker } from './approvalWorkflowGrantBroker.js';
+import type { ApprovalStageLocator, ApprovalTypedIntent } from './approvalWorkflowMcp.js';
 import {
   isActiveApprovalWait,
   type ApprovalWaitRecord,
@@ -109,6 +110,10 @@ export type ApprovalWorkflowRunRuntime = {
   beginRun: (capability: ApprovalSessionCapability) => { token: string; runId: string };
   completeRun: (runId: string) => void;
   resolveRunContext: (runId: string) => ApprovalSessionCapability | undefined;
+  stageTypedIntent?: (
+    capability: ApprovalSessionCapability,
+    intent: ApprovalTypedIntent,
+  ) => Promise<ApprovalStageLocator>;
   revokeOutstanding: () => void;
 };
 
@@ -253,7 +258,13 @@ type ApprovalWorkflowGrantBrokerPort = Pick<ApprovalWorkflowGrantBroker, 'issue'
 
 export function createApprovalWorkflowRunRuntime(
   broker: ApprovalWorkflowGrantBrokerPort,
-  options: { runIdSource?: () => string } = {},
+  options: {
+    runIdSource?: () => string;
+    stageTypedIntent?: (
+      capability: ApprovalSessionCapability,
+      intent: ApprovalTypedIntent,
+    ) => Promise<ApprovalStageLocator>;
+  } = {},
 ): ApprovalWorkflowRunRuntime {
   const contexts = new Map<string, ApprovalSessionCapability>();
   const runIdSource = options.runIdSource ?? (() => `approval-run-${randomUUID()}`);
@@ -284,6 +295,7 @@ export function createApprovalWorkflowRunRuntime(
       const context = contexts.get(runId);
       return context ? { ...context } : undefined;
     },
+    ...(options.stageTypedIntent ? { stageTypedIntent: options.stageTypedIntent } : {}),
     revokeOutstanding() {
       for (const runId of [...contexts.keys()]) {
         try {
