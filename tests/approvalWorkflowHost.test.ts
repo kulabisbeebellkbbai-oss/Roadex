@@ -126,19 +126,23 @@ describe('approval workflow host listener', () => {
       managedThreadId: 'thread-1',
     };
     let registrations = 0;
+    let stages = 0;
     const host = startApprovalWorkflowHost({
       socketPath,
       consumeGrant: (token) => broker.consume(token),
       resolveRunContext: () => runContext,
-      stageTypedIntent: async () => ({
-        provider: 'overseer',
-        approvalRef: 'approval.fixture.mismatch',
-        projectId: 'other-project',
-        workspaceId: 'roadex',
-        resourceRef: 'resource-1',
-        authorityClass: 'project-workflow',
-        scopeDigest: `sha256:${'b'.repeat(64)}`,
-      }),
+      stageTypedIntent: async () => {
+        stages += 1;
+        return {
+          provider: 'overseer',
+          approvalRef: 'approval.fixture.mismatch',
+          projectId: 'other-project',
+          workspaceId: 'roadex',
+          resourceRef: 'resource-1',
+          authorityClass: 'project-workflow',
+          scopeDigest: `sha256:${'b'.repeat(64)}`,
+        };
+      },
       registerApprovalWait: async () => {
         registrations += 1;
         return WAIT;
@@ -150,9 +154,10 @@ describe('approval workflow host listener', () => {
       await expect(sendApprovalWorkflowRequest({
         token: grant.token,
         provider: 'overseer',
-        intent: validProvisioningIntent(),
+        intent: validProvisioningIntent({ project_id: 'other-project' }),
       })).resolves.toEqual({ ok: false, reason: 'scope_mismatch' });
       expect(registrations).toBe(0);
+      expect(stages).toBe(0);
     } finally {
       await closeServer(host);
     }

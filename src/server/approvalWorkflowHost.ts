@@ -143,6 +143,9 @@ export function startApprovalWorkflowHost(
       ) {
         return { ok: false, reason: 'scope_mismatch' };
       }
+      if (!intentMatchesRun(request.intent, run)) {
+        return { ok: false, reason: 'scope_mismatch' };
+      }
       let locator: ApprovalStageLocator;
       try {
         if (!dependencies.stageTypedIntent) return { ok: false, reason: 'workflow_request_failed' };
@@ -223,6 +226,10 @@ function locatorMatchesRun(locator: ApprovalStageLocator, run: ApprovalSessionCa
     && locator.workspaceId === run.workspaceId
     && locator.resourceRef === run.resourceRef
   );
+}
+
+function intentMatchesRun(intent: ApprovalTypedIntent, run: ApprovalSessionCapability): boolean {
+  return intent.project_id === run.projectId && intent.resource_id === run.resourceRef;
 }
 
 function publicResult(result: RegisterApprovalWaitResult): ApprovalWorkflowResponse {

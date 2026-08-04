@@ -102,4 +102,23 @@ describe('Overseer approval staging transport', () => {
     await expect(stage(capability, validProvisioningIntent())).rejects.toThrow('Overseer approval staging is unavailable.');
     expect(observedSignal?.aborted).toBe(true);
   });
+
+  it('propagates workflow-host cancellation to the HTTP request', async () => {
+    const parent = new AbortController();
+    let observedSignal: AbortSignal | undefined;
+    const stage = createOverseerApprovalStageTransport({
+      readToken: () => 'root-owned-token',
+      fetchImpl: async (_input, init) => {
+        observedSignal = init?.signal as AbortSignal;
+        return new Promise<Response>((_resolve, reject) => {
+          observedSignal?.addEventListener('abort', () => reject(new Error('request aborted')), { once: true });
+        });
+      },
+    });
+    const pending = stage(capability, validProvisioningIntent(), parent.signal);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    parent.abort();
+    await expect(pending).rejects.toThrow('Overseer approval staging is unavailable.');
+    expect(observedSignal?.aborted).toBe(true);
+  });
 });
