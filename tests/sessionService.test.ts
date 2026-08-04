@@ -48,6 +48,7 @@ import { storeDeviceArtifact } from '../src/server/deviceArtifactVault';
 import type { SerialVerificationProfile } from '../src/shared/serialVerificationContracts';
 import type { BleVerificationProfile } from '../src/shared/bleVerificationContracts';
 import type { UsbDeviceProfile } from '../src/shared/usbDeviceProfileContracts';
+import { validProvisioningIntent } from './approvalFixtures';
 
 const workspace: WorkspaceRef = {
   id: 'roadex',
@@ -322,10 +323,10 @@ describe('Roadex session service', () => {
       resourceRef: 'resource-1',
       managedThreadId: 'thread-1',
     };
-    const locator = await runtime.stageTypedIntent!(capability, { operation: 'typed-only' });
+    const locator = await runtime.stageTypedIntent!(capability, validProvisioningIntent());
 
     expect(locator.approvalRef).toBe('approval.fixture.v1');
-    expect(calls).toEqual([{ capability, intent: { operation: 'typed-only' } }]);
+    expect(calls).toEqual([{ capability, intent: validProvisioningIntent() }]);
   });
 
   it('observes an allowlisted USB descriptor without persisting or returning the raw serial', async () => {

@@ -12,11 +12,25 @@ import {
   APPROVAL_WORKFLOW_TOOLS,
   createApprovalWorkflowMcpServer,
   executeBrokerRequest,
+  isTypedApprovalIntent,
   requiredToken,
 } from '../src/server/approvalWorkflowMcp';
 import { createApprovalWorkflowTokenFile } from '../src/server/codexRunner';
+import { validProvisioningIntent } from './approvalFixtures';
 
 describe('approval workflow MCP adapter', () => {
+  it('accepts only the exact ProvisioningIntentV1 wire schema', () => {
+    const valid = validProvisioningIntent();
+    expect(isTypedApprovalIntent(valid)).toBe(true);
+    expect(isTypedApprovalIntent({ ...valid, extra: 'field' })).toBe(false);
+    expect(isTypedApprovalIntent({ ...valid, request_id: 42 })).toBe(false);
+    expect(isTypedApprovalIntent({ ...valid, schema_version: '2' })).toBe(false);
+    expect(isTypedApprovalIntent({ ...valid, kind: 'other' })).toBe(false);
+    expect(isTypedApprovalIntent({ ...valid, source_commit: 'A'.repeat(40) })).toBe(false);
+    expect(isTypedApprovalIntent({ ...valid, reason: ' padded ' })).toBe(false);
+    expect(isTypedApprovalIntent({ ...valid, supersedes_plan_id: ' padded ' })).toBe(false);
+  });
+
   it('submits typed intent without exposing approval or execution fields', async () => {
     const token = 'A'.repeat(43);
     const tokenFile = createApprovalWorkflowTokenFile(token);
@@ -32,24 +46,14 @@ describe('approval workflow MCP adapter', () => {
         name: 'await_human_approval',
         arguments: {
           provider: 'overseer',
-          intent: {
-            operation: 'typed-operation',
-            projectId: 'roadex',
-            workspaceId: 'roadex',
-            resourceRef: 'resource-1',
-          },
+          intent: validProvisioningIntent(),
         },
       });
       expect(JSON.parse(response.content[0]?.text ?? '{}')).toMatchObject({ ok: true });
       expect(calls).toEqual([{
         token,
         provider: 'overseer',
-        intent: {
-          operation: 'typed-operation',
-          projectId: 'roadex',
-          workspaceId: 'roadex',
-          resourceRef: 'resource-1',
-        },
+        intent: validProvisioningIntent(),
       }]);
     } finally {
       if (original === undefined) delete process.env.ROADEX_APPROVAL_WORKFLOW_TOKEN_FILE;
@@ -118,18 +122,18 @@ describe('approval workflow MCP adapter', () => {
     try {
       const response = await client.callTool({
         name: 'await_human_approval',
-        arguments: { provider: 'overseer', intent: { operation: 'typed-test' } },
+        arguments: { provider: 'overseer', intent: validProvisioningIntent() },
       });
       expect(JSON.parse(response.content[0]?.text ?? '{}')).toMatchObject({
         ok: true,
         waitId: 'wait-1',
         waitState: 'pending',
       });
-      expect(calls).toEqual([{ token, provider: 'overseer', intent: { operation: 'typed-test' } }]);
+      expect(calls).toEqual([{ token, provider: 'overseer', intent: validProvisioningIntent() }]);
       expect(() => readFileSync(tokenFile, 'utf8')).toThrow();
       const second = await client.callTool({
         name: 'await_human_approval',
-        arguments: { provider: 'overseer', intent: { operation: 'typed-test' } },
+        arguments: { provider: 'overseer', intent: validProvisioningIntent() },
       });
       expect(second.isError).toBe(true);
       expect(calls).toHaveLength(1);
@@ -186,7 +190,7 @@ describe('approval workflow MCP adapter', () => {
     try {
       const socketResponse = await client.callTool({
         name: 'await_human_approval',
-        arguments: { provider: 'overseer', intent: { operation: 'typed-test' } },
+        arguments: { provider: 'overseer', intent: validProvisioningIntent() },
       });
       expect(socketResponse.isError).toBe(true);
       const socketError = String(socketResponse.content[0]?.text ?? '');
@@ -234,7 +238,7 @@ describe('approval workflow MCP adapter', () => {
       await expect(executeBrokerRequest({
         token: 'Q'.repeat(43),
         provider: 'overseer',
-        intent: { operation: 'typed-test' },
+        intent: validProvisioningIntent(),
       })).rejects.toThrow('Approval workflow broker is unavailable.');
     } finally {
       if (originalSocket !== undefined) {

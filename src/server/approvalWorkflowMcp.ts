@@ -41,7 +41,29 @@ const BROKER_DENIAL_REASONS = new Set([
   'response_invalid',
 ]);
 
-export type ApprovalTypedIntent = Readonly<Record<string, unknown>>;
+const PROVISIONING_INTENT_FIELDS = [
+  'schema_version', 'request_id', 'plan_id', 'kind', 'project_id', 'resource_id',
+  'root_id', 'policy_revision', 'source_commit', 'requested_by', 'reason',
+  'supersedes_plan_id',
+] as const;
+const PROVISIONING_SOURCE_COMMIT_PATTERN = /^[0-9a-f]{40}$/;
+
+export type ProvisioningIntentV1 = Readonly<{
+  schema_version: '1';
+  request_id: string;
+  plan_id: string;
+  kind: 'donuthole_encrypted_backup_provisioning_v1';
+  project_id: string;
+  resource_id: string;
+  root_id: string;
+  policy_revision: string;
+  source_commit: string;
+  requested_by: string;
+  reason: string;
+  supersedes_plan_id: string;
+}>;
+
+export type ApprovalTypedIntent = ProvisioningIntentV1;
 
 export type ApprovalStageLocator = {
   provider: 'overseer';
@@ -71,29 +93,45 @@ function jsonContent(value: unknown) {
 }
 
 export const APPROVAL_WORKFLOW_TOOLS = ['await_human_approval'] as const;
-const FORBIDDEN_INTENT_KEYS = new Set([
-  'approvalId', 'approvalRef', 'approvalStatus', 'approval_id', 'approval_ref', 'approval_status',
-  'authorizationId', 'authorizationRef', 'authorization_id', 'authorization_ref',
-  'crewId', 'crewIds', 'crew_id', 'crew_ids',
-  'decision', 'decisionVersion', 'decision_version',
-  'evidenceDigest', 'evidenceDigests', 'evidence_digest', 'evidence_digests',
-  'executionId', 'executionStatus', 'execution_id', 'execution_status',
-  'runnerRunId', 'runner_run_id', 'sourceStatus', 'source_status',
-]);
-
-export function isTypedApprovalIntent(value: unknown, depth = 0): value is ApprovalTypedIntent {
-  if (depth > 4 || value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+export function isTypedApprovalIntent(value: unknown): value is ApprovalTypedIntent {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  const keys = Object.keys(record);
-  if (keys.length === 0 || keys.some((key) => FORBIDDEN_INTENT_KEYS.has(key))) return false;
-  return keys.every((key) => {
-    const child = record[key];
-    if (child === null || typeof child === 'string' || typeof child === 'boolean') return true;
-    if (typeof child === 'number') return Number.isFinite(child);
-    if (Array.isArray(child)) return child.every((entry) => isTypedApprovalIntent({ value: entry }, depth + 1));
-    return isTypedApprovalIntent(child, depth + 1);
-  });
+  if (Object.keys(record).sort().join(',') !== [...PROVISIONING_INTENT_FIELDS].sort().join(',')) {
+    return false;
+  }
+  if (PROVISIONING_INTENT_FIELDS.some((field) => typeof record[field] !== 'string')) {
+    return false;
+  }
+  const requiredFields = PROVISIONING_INTENT_FIELDS.filter((field) => field !== 'supersedes_plan_id');
+  if (requiredFields.some((field) => {
+    const value = record[field] as string;
+    return value.length === 0 || value !== value.trim();
+  })) {
+    return false;
+  }
+  const supersedes = record.supersedes_plan_id as string;
+  return (
+    record.schema_version === '1'
+    && record.kind === 'donuthole_encrypted_backup_provisioning_v1'
+    && PROVISIONING_SOURCE_COMMIT_PATTERN.test(record.source_commit as string)
+    && supersedes === supersedes.trim()
+  );
 }
+
+const provisioningIntentSchema = z.object({
+  schema_version: z.literal('1'),
+  request_id: z.string().min(1).refine((value) => value === value.trim()),
+  plan_id: z.string().min(1).refine((value) => value === value.trim()),
+  kind: z.literal('donuthole_encrypted_backup_provisioning_v1'),
+  project_id: z.string().min(1).refine((value) => value === value.trim()),
+  resource_id: z.string().min(1).refine((value) => value === value.trim()),
+  root_id: z.string().min(1).refine((value) => value === value.trim()),
+  policy_revision: z.string().min(1).refine((value) => value === value.trim()),
+  source_commit: z.string().regex(PROVISIONING_SOURCE_COMMIT_PATTERN),
+  requested_by: z.string().min(1).refine((value) => value === value.trim()),
+  reason: z.string().min(1).refine((value) => value === value.trim()),
+  supersedes_plan_id: z.string().refine((value) => value === value.trim()),
+}).strict();
 
 export function createApprovalWorkflowMcpServer(
   execute: (request: BrokerRequest) => Promise<BrokerResult> = executeBrokerRequest,
@@ -106,7 +144,7 @@ export function createApprovalWorkflowMcpServer(
     description: 'Pause this exact Roadex managed thread for one existing authoritative human approval. This tool cannot grant approval.',
     inputSchema: z.object({
       provider: z.literal('overseer'),
-      intent: z.record(z.unknown()).refine((value) => isTypedApprovalIntent(value), 'typed intent is invalid'),
+      intent: provisioningIntentSchema,
     }).strict(),
   }, async ({ provider, intent }) => jsonContent(await execute({
     token: requiredToken(),

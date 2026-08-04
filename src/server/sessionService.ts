@@ -113,6 +113,7 @@ export type ApprovalWorkflowRunRuntime = {
   stageTypedIntent?: (
     capability: ApprovalSessionCapability,
     intent: ApprovalTypedIntent,
+    signal?: AbortSignal,
   ) => Promise<ApprovalStageLocator>;
   revokeOutstanding: () => void;
 };
@@ -263,6 +264,7 @@ export function createApprovalWorkflowRunRuntime(
     stageTypedIntent?: (
       capability: ApprovalSessionCapability,
       intent: ApprovalTypedIntent,
+      signal?: AbortSignal,
     ) => Promise<ApprovalStageLocator>;
   } = {},
 ): ApprovalWorkflowRunRuntime {

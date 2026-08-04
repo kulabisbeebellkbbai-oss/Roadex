@@ -22,7 +22,6 @@ import {
   createApprovalContinuationDispatcher,
   createApprovalCoordinatorCallbacks,
   createApprovalShutdown,
-  createApprovalWorkflowRunRuntime,
   createSessionFromApi,
   listDeviceArtifactMetadata,
   listArchivedSessions,
@@ -61,6 +60,10 @@ import { createOverseerApprovalStatusProvider } from '../src/server/approvalStat
 import { ApprovalCoordinator } from '../src/server/approvalCoordinator.js';
 import { ApprovalWorkflowGrantBroker } from '../src/server/approvalWorkflowGrantBroker.js';
 import { startApprovalWorkflowHost } from '../src/server/approvalWorkflowHost.js';
+import {
+  createProductionApprovalWorkflowHostDependencies,
+  createProductionApprovalWorkflowRuntime,
+} from '../src/server/approvalWorkflowComposition.js';
 import { AppPublicationRequester } from '../src/server/appPublicationRequester.js';
 import { isAvailableAppPublicationRoute } from '../src/server/appPublicationPolicy.js';
 
@@ -671,7 +674,9 @@ function contentType(path: string): string {
 
 async function startRoadexApi(): Promise<void> {
   const grantBroker = new ApprovalWorkflowGrantBroker();
-  const workflowRuntime = createApprovalWorkflowRunRuntime(grantBroker);
+  const workflowRuntime = createProductionApprovalWorkflowRuntime(grantBroker, {
+    readToken: readApprovalStatusToken,
+  });
   state.approvalWorkflowRuntime = workflowRuntime;
   const provider = createOverseerApprovalStatusProvider({
     readToken: readApprovalStatusToken,
@@ -712,11 +717,11 @@ async function startRoadexApi(): Promise<void> {
     reopenSessionWait: (sessionId) => coordinator.reopenSessionWait(sessionId),
     failUserRun: (sessionId, outcome) => coordinator.failUserRun(sessionId, outcome),
   };
-  const workflowHost = startApprovalWorkflowHost({
-    consumeGrant: (token) => grantBroker.consume(token),
-    resolveRunContext: (runId) => workflowRuntime.resolveRunContext(runId),
+  const workflowHost = startApprovalWorkflowHost(createProductionApprovalWorkflowHostDependencies({
+    broker: grantBroker,
+    runtime: workflowRuntime,
     registerApprovalWait: (capability, input) => coordinator.register(capability, input),
-  });
+  }));
   await once(workflowHost, 'listening');
   await coordinator.recover();
 

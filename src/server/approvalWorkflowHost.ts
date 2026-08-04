@@ -18,6 +18,7 @@ import {
   type ApprovalTypedIntent,
   isTypedApprovalIntent,
 } from './approvalWorkflowMcp.js';
+import { isExactApprovalStageLocator } from './overseerApprovalStageTransport.js';
 import {
   APPROVAL_WORKFLOW_SOCKET,
 } from './runnerCapabilityProfile.js';
@@ -29,9 +30,6 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_REQUEST_BYTES = 4_096;
 const MAX_RESPONSE_BYTES = 4_096;
 const REQUEST_KEYS = ['intent', 'provider', 'token'];
-const APPROVAL_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
-const SCOPE_FIELD_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const WAIT_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 type SocketIdentity = { dev: number; ino: number };
 
@@ -41,6 +39,7 @@ export type ApprovalWorkflowHostDependencies = {
   stageTypedIntent?: (
     capability: ApprovalSessionCapability,
     intent: ApprovalTypedIntent,
+    signal: AbortSignal,
   ) => Promise<ApprovalStageLocator>;
   registerApprovalWait: (
     capability: ApprovalSessionCapability,
@@ -81,6 +80,8 @@ export function startApprovalWorkflowHost(
     let responded = false;
     let peerAllowed = false;
     let inputEnded = false;
+    let timedOut = false;
+    const requestController = new AbortController();
     const respond = (response: ApprovalWorkflowResponse): void => {
       if (responded) return;
       responded = true;
@@ -96,6 +97,8 @@ export function startApprovalWorkflowHost(
       respond({ ok: false, reason });
     };
     const timer = setTimeout(() => {
+      timedOut = true;
+      requestController.abort(new DOMException('Approval workflow request timed out.', 'TimeoutError'));
       deny('request_timeout');
     }, requestTimeoutMs);
     timer.unref();
@@ -115,7 +118,7 @@ export function startApprovalWorkflowHost(
         return;
       }
       processing = true;
-      void executeRequest(request)
+      void executeRequest(request, requestController.signal)
         .then((response) => {
           respond(response);
         })
@@ -124,7 +127,10 @@ export function startApprovalWorkflowHost(
         });
     };
 
-    const executeRequest = async (request: ApprovalWorkflowRequest): Promise<ApprovalWorkflowResponse> => {
+    const executeRequest = async (
+      request: ApprovalWorkflowRequest,
+      signal: AbortSignal,
+    ): Promise<ApprovalWorkflowResponse> => {
       const grant = dependencies.consumeGrant(request.token);
       if (!grant) return { ok: false, reason: 'grant_denied' };
       const run = dependencies.resolveRunContext(grant.runId);
@@ -140,10 +146,11 @@ export function startApprovalWorkflowHost(
       let locator: ApprovalStageLocator;
       try {
         if (!dependencies.stageTypedIntent) return { ok: false, reason: 'workflow_request_failed' };
-        locator = await dependencies.stageTypedIntent(run, request.intent);
+        locator = await dependencies.stageTypedIntent(run, request.intent, signal);
       } catch {
         return { ok: false, reason: 'workflow_request_failed' };
       }
+      if (timedOut || responded || signal.aborted) return { ok: false, reason: 'request_timeout' };
       if (!isExactApprovalStageLocator(locator) || !locatorMatchesRun(locator, run)) {
         return { ok: false, reason: 'scope_mismatch' };
       }
@@ -208,29 +215,6 @@ function parseRequest(value: string): ApprovalWorkflowRequest {
   if (parsed.provider !== 'overseer') throw new Error('request_invalid');
   if (!isTypedApprovalIntent(parsed.intent)) throw new Error('request_invalid');
   return parsed as ApprovalWorkflowRequest;
-}
-
-function isExactApprovalStageLocator(value: unknown): value is ApprovalStageLocator {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  if (keys.join(',') !== [
-    'approvalRef', 'authorityClass', 'projectId', 'provider', 'resourceRef', 'scopeDigest', 'workspaceId',
-  ].join(',')) return false;
-  return (
-    record.provider === 'overseer'
-    && typeof record.approvalRef === 'string'
-    && APPROVAL_REFERENCE_PATTERN.test(record.approvalRef)
-    && typeof record.projectId === 'string'
-    && SCOPE_FIELD_PATTERN.test(record.projectId)
-    && typeof record.workspaceId === 'string'
-    && SCOPE_FIELD_PATTERN.test(record.workspaceId)
-    && typeof record.resourceRef === 'string'
-    && SCOPE_FIELD_PATTERN.test(record.resourceRef)
-    && (record.authorityClass === 'privileged-operation' || record.authorityClass === 'project-workflow')
-    && typeof record.scopeDigest === 'string'
-    && SHA256_PATTERN.test(record.scopeDigest)
-  );
 }
 
 function locatorMatchesRun(locator: ApprovalStageLocator, run: ApprovalSessionCapability): boolean {
