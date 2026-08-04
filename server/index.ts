@@ -720,7 +720,7 @@ async function startRoadexApi(): Promise<void> {
   const workflowHost = startApprovalWorkflowHost(createProductionApprovalWorkflowHostDependencies({
     broker: grantBroker,
     runtime: workflowRuntime,
-    registerApprovalWait: (capability, input) => coordinator.register(capability, input),
+    registerApprovalWait: (capability, input, signal) => coordinator.register(capability, input, signal),
   }));
   await once(workflowHost, 'listening');
   await coordinator.recover();

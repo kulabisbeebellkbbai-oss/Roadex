@@ -349,7 +349,16 @@ export class ApprovalCoordinator {
     return this.hasActiveWait(sessionId);
   }
 
-  async register(capability: ApprovalSessionCapability, input: RegisterApprovalWaitInput): Promise<RegisterApprovalWaitResult> {
+  async register(
+    capability: ApprovalSessionCapability,
+    input: RegisterApprovalWaitInput,
+    signal?: AbortSignal,
+  ): Promise<RegisterApprovalWaitResult> {
+    const cancelled = (): boolean => signal?.aborted === true;
+    if (cancelled()) {
+      return { ok: false, code: 'provider-unavailable' };
+    }
+
     if (!this.#isExactObject(input, ['provider', 'approvalRef'])) {
       return { ok: false, code: 'scope-mismatch' };
     }
@@ -383,6 +392,10 @@ export class ApprovalCoordinator {
       return { ok: false, code: 'provider-unavailable' };
     }
 
+    if (cancelled()) {
+      return { ok: false, code: 'provider-unavailable' };
+    }
+
     if (
       status.provider !== 'overseer'
       || status.approvalRef !== input.approvalRef
@@ -411,9 +424,16 @@ export class ApprovalCoordinator {
       return { ok: false, code: 'scope-mismatch' };
     }
 
-    let waitId: string;
+    if (cancelled()) {
+      return { ok: false, code: 'provider-unavailable' };
+    }
+
+    let waitId: string | undefined;
     try {
       waitId = await this.#withGlobalWaitIdReservation(async () => {
+        if (cancelled()) {
+          return undefined;
+        }
         const reservedId = this.#nextWaitId();
         this.#waitIdReservations.add(reservedId);
         return reservedId;
@@ -422,8 +442,17 @@ export class ApprovalCoordinator {
       return { ok: false, code: 'scope-mismatch' };
     }
 
+    if (!waitId || cancelled()) {
+      if (waitId) this.#releaseWaitIdReservation(waitId);
+      return { ok: false, code: 'provider-unavailable' };
+    }
+
     try {
       return await this.#withSessionLock(snapshotSessionId, async () => {
+        if (cancelled()) {
+          return { ok: false, code: 'provider-unavailable' } as const;
+        }
+
         const session = this.#sessions.find((entry) => entry.id === snapshotSessionId);
         if (
           !session
@@ -442,6 +471,10 @@ export class ApprovalCoordinator {
 
         if (this.#hasActiveWait(session.id)) {
           return { ok: false, code: 'active-wait-exists' } as const;
+        }
+
+        if (cancelled()) {
+          return { ok: false, code: 'provider-unavailable' } as const;
         }
 
         const now = this.#clock.now();
@@ -470,6 +503,10 @@ export class ApprovalCoordinator {
         const sessionBefore = this.snapshotSession(session);
         const waitBefore = this.snapshotWait(record);
 
+        if (cancelled()) {
+          return { ok: false, code: 'provider-unavailable' } as const;
+        }
+
         this.#waits.push(record);
         this.projectSessionForWait(session);
 
@@ -485,11 +522,19 @@ export class ApprovalCoordinator {
             this.#publish(session.id, this.#waitingCopy(record));
             this.#audit('approval_wait.register', 'allowed', this.#auditSummary(record), record.sessionId);
           },
+          signal,
         );
         if (!persisted) {
           const inserted = this.#waits.indexOf(record);
           if (inserted >= 0) {
             this.#waits.splice(inserted, 1);
+          }
+          if (cancelled()) {
+            try {
+              await Promise.resolve(this.#callbacks.persist());
+            } catch {
+              // Registration remains denied even if rollback persistence fails.
+            }
           }
           return { ok: false, code: 'provider-unavailable' } as const;
         }
@@ -1572,13 +1617,45 @@ export class ApprovalCoordinator {
     waitBefore: ApprovalWaitRecord,
     transition: () => void | Promise<void>,
     publish: () => void | Promise<void> = () => {},
+    signal?: AbortSignal,
   ): Promise<boolean> {
+    const cancelled = (): boolean => signal?.aborted === true;
+    if (cancelled()) {
+      return false;
+    }
+
     try {
       await Promise.resolve(transition());
+      if (cancelled()) {
+        this.restoreSession(session, sessionBefore);
+        this.restoreWait(wait, waitBefore);
+        return false;
+      }
       await Promise.resolve(this.#callbacks.persist());
+      if (cancelled()) {
+        this.restoreSession(session, sessionBefore);
+        this.restoreWait(wait, waitBefore);
+        try {
+          await Promise.resolve(this.#callbacks.persist());
+        } catch {
+          return false;
+        }
+        return false;
+      }
     } catch {
       this.restoreSession(session, sessionBefore);
       this.restoreWait(wait, waitBefore);
+      return false;
+    }
+
+    if (cancelled()) {
+      this.restoreSession(session, sessionBefore);
+      this.restoreWait(wait, waitBefore);
+      try {
+        await Promise.resolve(this.#callbacks.persist());
+      } catch {
+        return false;
+      }
       return false;
     }
 
@@ -1586,6 +1663,17 @@ export class ApprovalCoordinator {
       await Promise.resolve(publish());
     } catch {
       // Persisted state is canonical; callback exceptions must not roll back memory.
+    }
+
+    if (cancelled()) {
+      this.restoreSession(session, sessionBefore);
+      this.restoreWait(wait, waitBefore);
+      try {
+        await Promise.resolve(this.#callbacks.persist());
+      } catch {
+        return false;
+      }
+      return false;
     }
 
     return true;

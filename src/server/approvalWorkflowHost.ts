@@ -44,6 +44,7 @@ export type ApprovalWorkflowHostDependencies = {
   registerApprovalWait: (
     capability: ApprovalSessionCapability,
     input: RegisterApprovalWaitInput,
+    signal: AbortSignal,
   ) => Promise<RegisterApprovalWaitResult>;
   socketPath?: string;
   verifyPeer?: (socket: Socket) => Promise<boolean>;
@@ -157,10 +158,14 @@ export function startApprovalWorkflowHost(
       if (!isExactApprovalStageLocator(locator) || !locatorMatchesRun(locator, run)) {
         return { ok: false, reason: 'scope_mismatch' };
       }
-      const coordinatorResult = await dependencies.registerApprovalWait(run, {
-        provider: locator.provider,
-        approvalRef: locator.approvalRef,
-      });
+      const coordinatorResult = await dependencies.registerApprovalWait(
+        run,
+        {
+          provider: locator.provider,
+          approvalRef: locator.approvalRef,
+        },
+        signal,
+      );
       return publicResult(coordinatorResult);
     };
 
