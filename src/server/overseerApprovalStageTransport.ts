@@ -50,14 +50,45 @@ export function createOverseerApprovalStageTransport(
     const body = JSON.stringify({ intent });
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const abortFromParent = (): void => controller.abort(parentSignal?.reason);
+    let responseHeadersReceived = false;
+    let responseSucceeded = false;
+    let responseBody: ReadableStream<Uint8Array> | null = null;
+    let responseReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let bodyCancellation: Promise<void> | undefined;
+    const cancelResponseBody = (): Promise<void> => {
+      if (bodyCancellation !== undefined) return bodyCancellation;
+      try {
+        const cancellation = responseReader !== undefined
+          ? responseReader.cancel()
+          : responseBody !== null && !responseBody.locked
+            ? responseBody.cancel()
+            : Promise.resolve();
+        bodyCancellation = Promise.resolve(cancellation).then(() => undefined, () => undefined);
+      } catch {
+        bodyCancellation = Promise.resolve();
+      }
+      return bodyCancellation;
+    };
+    const abortTransport = (reason?: unknown): void => {
+      try {
+        if (!controller.signal.aborted) controller.abort(reason);
+      } catch {
+        // The transport remains fail-closed even if abort bookkeeping fails.
+      }
+      void cancelResponseBody();
+    };
+    const abortFromParent = (): void => abortTransport(parentSignal?.reason);
+    const cancelBodyOnAbort = (): void => {
+      void cancelResponseBody();
+    };
     try {
+      controller.signal.addEventListener('abort', cancelBodyOnAbort, { once: true });
       if (parentSignal?.aborted) {
-        controller.abort(parentSignal.reason);
+        abortTransport(parentSignal.reason);
       } else {
         parentSignal?.addEventListener('abort', abortFromParent, { once: true });
       }
-      timer = setTimeout(() => controller.abort(new DOMException('request timed out', 'TimeoutError')), timeoutMs);
+      timer = setTimeout(() => abortTransport(new DOMException('request timed out', 'TimeoutError')), timeoutMs);
       const response = await fetchImpl(OVERSEER_STAGE_URL, {
         method: 'POST',
         headers: {
@@ -70,8 +101,17 @@ export function createOverseerApprovalStageTransport(
         cache: 'no-store',
         signal: controller.signal,
       });
+      responseHeadersReceived = true;
+      responseBody = response.body;
+      if (controller.signal.aborted) throw new Error('stage_aborted');
       if (response.status !== 200 || !response.ok) {
         throw new Error('stage_status_invalid');
+      }
+      if (response.headers.has('content-encoding')) {
+        throw new Error('response_encoding_invalid');
+      }
+      if (response.headers.has('transfer-encoding')) {
+        throw new Error('response_framing_invalid');
       }
       const declaredLength = response.headers.get('content-length');
       if (!declaredLength || !CONTENT_LENGTH_PATTERN.test(declaredLength)) {
@@ -81,22 +121,37 @@ export function createOverseerApprovalStageTransport(
       if (!Number.isSafeInteger(length) || length > MAX_RESPONSE_BYTES) {
         throw new Error('response_oversized');
       }
-      if (response.headers.get('transfer-encoding')) {
-        throw new Error('response_framing_invalid');
+      if (responseBody === null) throw new Error('response_body_missing');
+      responseReader = responseBody.getReader();
+      const decoder = new TextDecoder('utf-8', { fatal: true });
+      let text = '';
+      let totalBytes = 0;
+      while (true) {
+        const result = await responseReader.read();
+        if (controller.signal.aborted) throw new Error('stage_aborted');
+        if (result.done) break;
+        if (result.value === undefined || result.value.byteLength === 0) continue;
+        totalBytes += result.value.byteLength;
+        if (totalBytes > length || totalBytes > MAX_RESPONSE_BYTES) {
+          throw new Error('response_oversized');
+        }
+        text += decoder.decode(result.value, { stream: true });
       }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength !== length) throw new Error('content_length_mismatch');
-      const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      text += decoder.decode();
+      if (totalBytes !== length) throw new Error('content_length_mismatch');
       const parsed: unknown = JSON.parse(text);
       if (!isExactApprovalStageLocator(parsed) || !locatorMatchesCapability(parsed, capability)) {
         throw new Error('locator_invalid');
       }
+      responseSucceeded = true;
       return parsed;
     } catch {
+      if (responseHeadersReceived && !responseSucceeded) abortTransport();
       throw new Error('Overseer approval staging is unavailable.');
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       parentSignal?.removeEventListener('abort', abortFromParent);
+      controller.signal.removeEventListener('abort', cancelBodyOnAbort);
     }
   };
 }

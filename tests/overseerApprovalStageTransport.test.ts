@@ -32,6 +32,30 @@ function responseFor(value: unknown, status = 200, includeLength = true): Respon
   });
 }
 
+function streamedResponse(
+  stream: ReadableStream<Uint8Array>,
+  headers: Record<string, string>,
+  status = 200,
+): Response {
+  return new Response(stream, { status, headers });
+}
+
+function responseBodyStream(
+  body: string,
+  onCancel: () => void,
+): ReadableStream<Uint8Array> {
+  const bytes = new TextEncoder().encode(body);
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+    cancel() {
+      onCancel();
+    },
+  });
+}
+
 describe('Overseer approval staging transport', () => {
   it('POSTs exactly the intent to the fixed authenticated stage endpoint and validates the locator', async () => {
     const calls: Array<{ input: string; init: RequestInit }> = [];
@@ -84,6 +108,150 @@ describe('Overseer approval staging transport', () => {
       fetchImpl: async () => responseFor(locator, 200, false),
     });
     await expect(withoutLength(capability, validProvisioningIntent())).rejects.toThrow('Overseer approval staging is unavailable.');
+  });
+
+  it('cancels the response body for an invalid status after headers are received', async () => {
+    let cancelled = false;
+    let observedSignal: AbortSignal | undefined;
+    const body = JSON.stringify(locator);
+    const stage = createOverseerApprovalStageTransport({
+      readToken: () => 'root-owned-token',
+      fetchImpl: async (_input, init) => {
+        observedSignal = init?.signal as AbortSignal;
+        return streamedResponse(
+          responseBodyStream(body, () => { cancelled = true; }),
+          { 'content-length': String(Buffer.byteLength(body)) },
+          503,
+        );
+      },
+    });
+
+    await expect(stage(capability, validProvisioningIntent())).rejects.toThrow('Overseer approval staging is unavailable.');
+    expect(observedSignal?.aborted).toBe(true);
+    expect(cancelled).toBe(true);
+  });
+
+  it('cancels the response body for invalid transfer encoding after headers are received', async () => {
+    let cancelled = false;
+    const body = JSON.stringify(locator);
+    const stage = createOverseerApprovalStageTransport({
+      readToken: () => 'root-owned-token',
+      fetchImpl: async () => streamedResponse(
+        responseBodyStream(body, () => { cancelled = true; }),
+        {
+          'content-length': String(Buffer.byteLength(body)),
+          'transfer-encoding': 'chunked',
+        },
+      ),
+    });
+
+    await expect(stage(capability, validProvisioningIntent())).rejects.toThrow('Overseer approval staging is unavailable.');
+    expect(cancelled).toBe(true);
+  });
+
+  it('cancels a response body rejected for content encoding', async () => {
+    let cancelled = false;
+    const body = JSON.stringify(locator);
+    const stage = createOverseerApprovalStageTransport({
+      readToken: () => 'root-owned-token',
+      fetchImpl: async () => streamedResponse(
+        responseBodyStream(body, () => { cancelled = true; }),
+        {
+          'content-length': String(Buffer.byteLength(body)),
+          'content-encoding': 'gzip',
+        },
+      ),
+    });
+
+    await expect(stage(capability, validProvisioningIntent())).rejects.toThrow('Overseer approval staging is unavailable.');
+    expect(cancelled).toBe(true);
+  });
+
+  it('cancels an endless decoded stream as soon as it exceeds the response cap', async () => {
+    let cancelled = false;
+    let pulls = 0;
+    const stage = createOverseerApprovalStageTransport({
+      readToken: () => 'root-owned-token',
+      fetchImpl: async () => streamedResponse(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulls += 1;
+            controller.enqueue(new Uint8Array(1024));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { 'content-length': '16384' },
+      ),
+    });
+
+    await expect(stage(capability, validProvisioningIntent())).rejects.toThrow('Overseer approval staging is unavailable.');
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThan(20);
+  });
+
+  it('cancels an acquired body when the timeout aborts during streaming', async () => {
+    let cancelled = false;
+    const stage = createOverseerApprovalStageTransport({
+      readToken: () => 'root-owned-token',
+      timeoutMs: 10,
+      fetchImpl: async () => streamedResponse(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            controller.enqueue(new Uint8Array([1]));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { 'content-length': '16384' },
+      ),
+    });
+
+    await expect(stage(capability, validProvisioningIntent())).rejects.toThrow('Overseer approval staging is unavailable.');
+    expect(cancelled).toBe(true);
+  });
+
+  it('cancels an acquired body when the parent aborts during streaming', async () => {
+    const parent = new AbortController();
+    let cancelled = false;
+    const stage = createOverseerApprovalStageTransport({
+      readToken: () => 'root-owned-token',
+      fetchImpl: async () => streamedResponse(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            controller.enqueue(new Uint8Array([1]));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { 'content-length': '16384' },
+      ),
+    });
+    const pending = stage(capability, validProvisioningIntent(), parent.signal);
+    const assertion = expect(pending).rejects.toThrow('Overseer approval staging is unavailable.');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    parent.abort();
+
+    await assertion;
+    expect(cancelled).toBe(true);
+  });
+
+  it('succeeds for an exact response without canceling its body', async () => {
+    let cancelled = false;
+    const body = JSON.stringify(locator);
+    const stage = createOverseerApprovalStageTransport({
+      readToken: () => 'root-owned-token',
+      fetchImpl: async () => streamedResponse(
+        responseBodyStream(body, () => { cancelled = true; }),
+        { 'content-length': String(Buffer.byteLength(body)) },
+      ),
+    });
+
+    await expect(stage(capability, validProvisioningIntent())).resolves.toEqual(locator);
+    expect(cancelled).toBe(false);
   });
 
   it('aborts a timed-out request and redacts transport failures', async () => {
