@@ -6,6 +6,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -82,6 +83,196 @@ describe('state persistence', () => {
       'directory-sync',
       'directory-close',
     ]);
+  });
+
+  it('uses exclusive no-follow creation for a unique temporary file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-state-temp-flags-'));
+    const path = join(dir, 'state.json');
+    const flags: number[] = [];
+    const operations: JsonFilePersistenceOperations = {
+      openFile: (filePath, fileFlags, mode) => {
+        flags.push(fileFlags);
+        return openSync(filePath, fileFlags, mode);
+      },
+      writeFile: (fd, contents) => writeFileSync(fd, contents, { encoding: 'utf8' }),
+      syncFile: fsyncSync,
+      closeFile: closeSync,
+      rename: renameSync,
+      openDirectory: (directory) => openSync(directory, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY),
+      syncDirectory: fsyncSync,
+      closeDirectory: closeSync,
+      unlink: unlinkSync,
+    };
+
+    createJsonFilePersistence(path, operations).save(serializeState({}));
+
+    expect(flags).toEqual([
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW | fsConstants.O_WRONLY,
+    ]);
+  });
+
+  it('does not follow the legacy temporary-path symlink or overwrite its target', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-state-temp-symlink-'));
+    const path = join(dir, 'state.json');
+    const target = join(dir, 'unrelated.json');
+    const legacyTemp = `${path}.tmp`;
+    writeFileSync(target, 'unrelated-content', { mode: 0o600 });
+    symlinkSync(target, legacyTemp);
+
+    createJsonFilePersistence(path).save(serializeState({}));
+
+    expect(readFileSync(target, 'utf8')).toBe('unrelated-content');
+    expect(readFileSync(path, 'utf8')).toContain('"sessions": []');
+    expect(readFileSync(legacyTemp, 'utf8')).toBe('unrelated-content');
+  });
+
+  it('cleans only its owned temporary file after a pre-rename write failure', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-state-write-failure-'));
+    const path = join(dir, 'state.json');
+    const opened: string[] = [];
+    const unlinked: string[] = [];
+    const operations: JsonFilePersistenceOperations = {
+      openFile: (filePath, fileFlags, mode) => {
+        opened.push(filePath);
+        return openSync(filePath, fileFlags, mode);
+      },
+      writeFile: () => { throw new Error('write-failed'); },
+      syncFile: fsyncSync,
+      closeFile: closeSync,
+      rename: renameSync,
+      openDirectory: (directory) => openSync(directory, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY),
+      syncDirectory: fsyncSync,
+      closeDirectory: closeSync,
+      unlink: (filePath) => {
+        unlinked.push(filePath);
+        unlinkSync(filePath);
+      },
+    };
+
+    expect(() => createJsonFilePersistence(path, operations).save(serializeState({})))
+      .toThrowError('write-failed');
+    expect(unlinked).toEqual(opened);
+    expect(opened).toHaveLength(1);
+    expect(() => readFileSync(opened[0])).toThrow();
+  });
+
+  it('closes and removes its owned temporary file after a pre-rename close failure', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-state-close-failure-'));
+    const path = join(dir, 'state.json');
+    const opened: string[] = [];
+    let closeCalls = 0;
+    const operations: JsonFilePersistenceOperations = {
+      openFile: (filePath, fileFlags, mode) => {
+        opened.push(filePath);
+        return openSync(filePath, fileFlags, mode);
+      },
+      writeFile: (fd, contents) => writeFileSync(fd, contents, { encoding: 'utf8' }),
+      syncFile: fsyncSync,
+      closeFile: (fd) => {
+        closeCalls += 1;
+        if (closeCalls === 1) throw new Error('close-failed');
+        closeSync(fd);
+      },
+      rename: renameSync,
+      openDirectory: (directory) => openSync(directory, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY),
+      syncDirectory: fsyncSync,
+      closeDirectory: closeSync,
+      unlink: unlinkSync,
+    };
+
+    expect(() => createJsonFilePersistence(path, operations).save(serializeState({})))
+      .toThrowError('close-failed');
+    expect(closeCalls).toBe(2);
+    expect(() => readFileSync(opened[0])).toThrow();
+  });
+
+  it('removes only its owned temporary file when rename fails', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-state-rename-failure-'));
+    const path = join(dir, 'state.json');
+    const opened: string[] = [];
+    const unlinked: string[] = [];
+    const operations: JsonFilePersistenceOperations = {
+      openFile: (filePath, fileFlags, mode) => {
+        opened.push(filePath);
+        return openSync(filePath, fileFlags, mode);
+      },
+      writeFile: (fd, contents) => writeFileSync(fd, contents, { encoding: 'utf8' }),
+      syncFile: fsyncSync,
+      closeFile: closeSync,
+      rename: () => { throw new Error('rename-failed'); },
+      openDirectory: (directory) => openSync(directory, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY),
+      syncDirectory: fsyncSync,
+      closeDirectory: closeSync,
+      unlink: (filePath) => {
+        unlinked.push(filePath);
+        unlinkSync(filePath);
+      },
+    };
+
+    expect(() => createJsonFilePersistence(path, operations).save(serializeState({})))
+      .toThrowError('rename-failed');
+    expect(unlinked).toEqual(opened);
+    expect(() => readFileSync(opened[0])).toThrow();
+  });
+
+  it('preserves the original pre-rename failure when cleanup also fails', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-state-cleanup-failure-'));
+    const path = join(dir, 'state.json');
+    const operations: JsonFilePersistenceOperations = {
+      openFile: (filePath, fileFlags, mode) => openSync(filePath, fileFlags, mode),
+      writeFile: () => { throw new Error('write-failed-first'); },
+      syncFile: fsyncSync,
+      closeFile: closeSync,
+      rename: renameSync,
+      openDirectory: (directory) => openSync(directory, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY),
+      syncDirectory: fsyncSync,
+      closeDirectory: closeSync,
+      unlink: () => { throw new Error('cleanup-failed-second'); },
+    };
+
+    expect(() => createJsonFilePersistence(path, operations).save(serializeState({})))
+      .toThrowError('write-failed-first');
+  });
+
+  it('does not unlink a pre-existing path when temporary creation fails exclusively', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-state-exclusive-failure-'));
+    const path = join(dir, 'state.json');
+    const unrelated = `${path}.tmp`;
+    writeFileSync(unrelated, 'keep-me', { mode: 0o600 });
+    const operations: JsonFilePersistenceOperations = {
+      openFile: () => { throw Object.assign(new Error('exclusive-create-failed'), { code: 'EEXIST' }); },
+      writeFile: () => { throw new Error('unreachable'); },
+      syncFile: fsyncSync,
+      closeFile: closeSync,
+      rename: renameSync,
+      openDirectory: (directory) => openSync(directory, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY),
+      syncDirectory: fsyncSync,
+      closeDirectory: closeSync,
+      unlink: unlinkSync,
+    };
+
+    expect(() => createJsonFilePersistence(path, operations).save(serializeState({})))
+      .toThrowError('exclusive-create-failed');
+    expect(readFileSync(unrelated, 'utf8')).toBe('keep-me');
+  });
+
+  it('never unlinks the temporary path after rename succeeds', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-state-no-post-rename-unlink-'));
+    const path = join(dir, 'state.json');
+    const operations: JsonFilePersistenceOperations = {
+      openFile: (filePath, fileFlags, mode) => openSync(filePath, fileFlags, mode),
+      writeFile: (fd, contents) => writeFileSync(fd, contents, { encoding: 'utf8' }),
+      syncFile: fsyncSync,
+      closeFile: closeSync,
+      rename: renameSync,
+      openDirectory: (directory) => openSync(directory, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY),
+      syncDirectory: fsyncSync,
+      closeDirectory: closeSync,
+      unlink: () => { throw new Error('post-rename-unlink'); },
+    };
+
+    expect(() => createJsonFilePersistence(path, operations).save(serializeState({}))).not.toThrow();
+    expect(readFileSync(path, 'utf8')).toContain('"sessions": []');
   });
 
   it('returns indeterminate when the parent directory cannot be synchronized after rename', () => {

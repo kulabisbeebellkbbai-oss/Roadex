@@ -9,6 +9,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { dirname } from 'node:path';
 import type { AuditEvent, ManagedThreadClaim, RoadexSession, StreamEvent } from '../shared/sessionContracts.js';
 import {
@@ -48,7 +49,7 @@ export type StatePersistence = {
 };
 
 export type JsonFilePersistenceOperations = {
-  openFile: (path: string) => number;
+  openFile: (path: string, flags: number, mode: number) => number;
   writeFile: (fd: number, contents: string) => void;
   syncFile: (fd: number) => void;
   closeFile: (fd: number) => void;
@@ -69,7 +70,7 @@ class JsonPersistenceDurabilityError extends Error {
 }
 
 const defaultJsonFilePersistenceOperations: JsonFilePersistenceOperations = {
-  openFile: (path) => openSync(path, fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_WRONLY, 0o600),
+  openFile: (path, flags, mode) => openSync(path, flags, mode),
   writeFile: (fd, contents) => writeFileSync(fd, contents, { encoding: 'utf8' }),
   syncFile: fsyncSync,
   closeFile: closeSync,
@@ -79,6 +80,23 @@ const defaultJsonFilePersistenceOperations: JsonFilePersistenceOperations = {
   closeDirectory: closeSync,
   unlink: unlinkSync,
 };
+
+const temporaryFileFlags = fsConstants.O_CREAT
+  | fsConstants.O_EXCL
+  | fsConstants.O_NOFOLLOW
+  | fsConstants.O_WRONLY;
+const temporaryFileAttempts = 16;
+
+function isAlreadyExistsError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && (error as { code?: unknown }).code === 'EEXIST';
+}
+
+function temporaryPathFor(path: string, attempt: number): string {
+  return `${path}.tmp-${process.pid}-${Date.now()}-${randomBytes(8).toString('hex')}-${attempt}`;
+}
 
 export type AuthoritativeStateRead =
   | { outcome: 'valid'; state: PersistedRoadexState }
@@ -159,20 +177,36 @@ export function createJsonFilePersistence(
     },
     save(state) {
       mkdirSync(dirname(path), { recursive: true });
-      const tmp = `${path}.tmp`;
+      let tmp: string | undefined;
       let file: number | undefined;
       try {
-        file = operations.openFile(tmp);
+        for (let attempt = 0; attempt < temporaryFileAttempts; attempt += 1) {
+          const candidate = temporaryPathFor(path, attempt);
+          try {
+            file = operations.openFile(candidate, temporaryFileFlags, 0o600);
+            tmp = candidate;
+            break;
+          } catch (error) {
+            if (!isAlreadyExistsError(error) || attempt === temporaryFileAttempts - 1) throw error;
+          }
+        }
+        if (file === undefined || tmp === undefined) throw new Error('Unable to create a temporary JSON state file.');
         operations.writeFile(file, `${JSON.stringify(serializeState(state), null, 2)}\n`);
         operations.syncFile(file);
-      } finally {
-        if (file !== undefined) operations.closeFile(file);
-      }
-      try {
+        operations.closeFile(file);
+        file = undefined;
         operations.rename(tmp, path);
+        tmp = undefined;
         syncJsonPersistenceDirectory(dirname(path), operations);
       } catch (error) {
-        try { operations.unlink(tmp); } catch { /* The rename normally removes the temporary path. */ }
+        if (file !== undefined) {
+          try {
+            operations.closeFile(file);
+          } catch { /* Preserve the original failure. */ }
+        }
+        if (tmp !== undefined) {
+          try { operations.unlink(tmp); } catch { /* Preserve the original failure. */ }
+        }
         throw error;
       }
     },
