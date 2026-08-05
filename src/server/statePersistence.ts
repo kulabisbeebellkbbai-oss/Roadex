@@ -1,4 +1,14 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  constants as fsConstants,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import type { AuditEvent, ManagedThreadClaim, RoadexSession, StreamEvent } from '../shared/sessionContracts.js';
 import {
@@ -35,6 +45,39 @@ export type StatePersistence = {
   load: () => PersistedRoadexState;
   save: (state: PersistedRoadexState) => void;
   readAuthoritative?: () => AuthoritativeStateRead;
+};
+
+export type JsonFilePersistenceOperations = {
+  openFile: (path: string) => number;
+  writeFile: (fd: number, contents: string) => void;
+  syncFile: (fd: number) => void;
+  closeFile: (fd: number) => void;
+  rename: (from: string, to: string) => void;
+  openDirectory: (path: string) => number;
+  syncDirectory: (fd: number) => void;
+  closeDirectory: (fd: number) => void;
+  unlink: (path: string) => void;
+};
+
+class JsonPersistenceDurabilityError extends Error {
+  readonly afterRename = true;
+
+  constructor(cause: unknown) {
+    super('JSON persistence durability was not established.', { cause });
+    this.name = 'JsonPersistenceDurabilityError';
+  }
+}
+
+const defaultJsonFilePersistenceOperations: JsonFilePersistenceOperations = {
+  openFile: (path) => openSync(path, fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_WRONLY, 0o600),
+  writeFile: (fd, contents) => writeFileSync(fd, contents, { encoding: 'utf8' }),
+  syncFile: fsyncSync,
+  closeFile: closeSync,
+  rename: renameSync,
+  openDirectory: (path) => openSync(path, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY),
+  syncDirectory: fsyncSync,
+  closeDirectory: closeSync,
+  unlink: unlinkSync,
 };
 
 export type AuthoritativeStateRead =
@@ -94,6 +137,7 @@ export function createMemoryPersistence(initial?: Partial<PersistedRoadexState>)
 
 export function createJsonFilePersistence(
   path = process.env.ROADEX_STATE_PATH ?? 'data/roadex-state.json',
+  operations: JsonFilePersistenceOperations = defaultJsonFilePersistenceOperations,
 ): StatePersistence {
   return {
     load() {
@@ -116,8 +160,21 @@ export function createJsonFilePersistence(
     save(state) {
       mkdirSync(dirname(path), { recursive: true });
       const tmp = `${path}.tmp`;
-      writeFileSync(tmp, `${JSON.stringify(serializeState(state), null, 2)}\n`, { mode: 0o600 });
-      renameSync(tmp, path);
+      let file: number | undefined;
+      try {
+        file = operations.openFile(tmp);
+        operations.writeFile(file, `${JSON.stringify(serializeState(state), null, 2)}\n`);
+        operations.syncFile(file);
+      } finally {
+        if (file !== undefined) operations.closeFile(file);
+      }
+      try {
+        operations.rename(tmp, path);
+        syncJsonPersistenceDirectory(dirname(path), operations);
+      } catch (error) {
+        try { operations.unlink(tmp); } catch { /* The rename normally removes the temporary path. */ }
+        throw error;
+      }
     },
   };
 }
@@ -127,9 +184,11 @@ export function commitAuthoritativeRegistration(
   snapshot: PersistedRoadexState,
   expected: RegistrationCanonicalTuple,
 ): RegistrationCommitOutcome {
+  let saveError: unknown;
   try {
     persistence.save(snapshot);
-  } catch {
+  } catch (error) {
+    saveError = error;
     // The strict read below distinguishes a post-rename exception from a failed write.
   }
 
@@ -168,9 +227,33 @@ export function commitAuthoritativeRegistration(
     && deepEqual(matchingStreamEvents[0], expected.streamEvent)
     && deepEqual(matchingAuditEvents[0], expected.auditEvent)
   ) {
+    if (saveError instanceof JsonPersistenceDurabilityError && saveError.afterRename) return 'indeterminate';
     return 'committed';
   }
   return 'indeterminate';
+}
+
+function syncJsonPersistenceDirectory(
+  directoryPath: string,
+  operations: JsonFilePersistenceOperations,
+): void {
+  let directory: number | undefined;
+  let failure: unknown;
+  try {
+    directory = operations.openDirectory(directoryPath);
+    operations.syncDirectory(directory);
+  } catch (error) {
+    failure = error;
+  } finally {
+    if (directory !== undefined) {
+      try {
+        operations.closeDirectory(directory);
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+  }
+  if (failure !== undefined) throw new JsonPersistenceDurabilityError(failure);
 }
 
 export function serializeState(state: Partial<PersistedRoadexState>, options: RetentionOptions = {}): PersistedRoadexState {

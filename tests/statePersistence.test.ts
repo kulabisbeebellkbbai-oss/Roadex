@@ -1,4 +1,14 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  constants as fsConstants,
+  fsyncSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -7,6 +17,7 @@ import {
   createJsonFilePersistence,
   createMemoryPersistence,
   serializeState,
+  type JsonFilePersistenceOperations,
   type StatePersistence,
 } from '../src/server/statePersistence';
 import type { ApprovalWaitRecord } from '../src/shared/approvalWorkflowContracts';
@@ -19,6 +30,108 @@ import type {
 } from '../src/shared/deviceBridgeContracts';
 
 describe('state persistence', () => {
+  it('synchronizes the file and parent directory around the atomic rename before save succeeds', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-state-order-'));
+    const path = join(dir, 'state.json');
+    const order: string[] = [];
+    const operations: JsonFilePersistenceOperations = {
+      openFile: (filePath) => {
+        order.push('file-open');
+        return openSync(filePath, fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_WRONLY, 0o600);
+      },
+      writeFile: (fd, contents) => {
+        order.push('file-write');
+        writeFileSync(fd, contents, { encoding: 'utf8' });
+      },
+      syncFile: (fd) => {
+        order.push('file-sync');
+        fsyncSync(fd);
+      },
+      closeFile: (fd) => {
+        order.push('file-close');
+        closeSync(fd);
+      },
+      rename: (from, to) => {
+        order.push('rename');
+        renameSync(from, to);
+      },
+      openDirectory: (directory) => {
+        order.push('directory-open');
+        return openSync(directory, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
+      },
+      syncDirectory: (fd) => {
+        order.push('directory-sync');
+        fsyncSync(fd);
+      },
+      closeDirectory: (fd) => {
+        order.push('directory-close');
+        closeSync(fd);
+      },
+      unlink: unlinkSync,
+    };
+
+    createJsonFilePersistence(path, operations).save(serializeState({}));
+
+    expect(order).toEqual([
+      'file-open',
+      'file-write',
+      'file-sync',
+      'file-close',
+      'rename',
+      'directory-open',
+      'directory-sync',
+      'directory-close',
+    ]);
+  });
+
+  it('returns indeterminate when the parent directory cannot be synchronized after rename', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-state-directory-fsync-'));
+    const path = join(dir, 'state.json');
+    const durable = createJsonFilePersistence(path);
+    const operations: JsonFilePersistenceOperations = {
+      openFile: (filePath) => openSync(filePath, fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_WRONLY, 0o600),
+      writeFile: (fd, contents) => writeFileSync(fd, contents, { encoding: 'utf8' }),
+      syncFile: fsyncSync,
+      closeFile: closeSync,
+      rename: renameSync,
+      openDirectory: (directory) => openSync(directory, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY),
+      syncDirectory: () => { throw new Error('directory-fsync-failed'); },
+      closeDirectory: closeSync,
+      unlink: unlinkSync,
+    };
+    const persistence = createJsonFilePersistence(path, operations);
+    const session = sessionFixture('directory-fsync-session', 'paused', new Date(0).toISOString());
+    const wait = approvalWaitFixture({ sessionId: session.id, id: 'directory-fsync-wait' });
+    session.waitingApproval = {
+      waitId: wait.id,
+      approvalRef: wait.approvalRef,
+      subject: wait.subject,
+      consoleSurface: wait.consoleSurface,
+      state: wait.state,
+      updatedAt: wait.updatedAt,
+    };
+    const stream = streamEvent('directory-fsync-stream', session.id);
+    const audit = {
+      id: 'directory-fsync-audit',
+      at: new Date(0).toISOString(),
+      actorId: 'roadex-approval-coordinator',
+      action: 'approval_wait.register' as const,
+      resource: session.id,
+      outcome: 'allowed' as const,
+      summary: `wait=${wait.id};state=${wait.state};console=${wait.consoleSurface}`,
+    };
+    const snapshot = serializeState({ sessions: [session], approvalWaits: [wait], streamEvents: [stream], auditEvents: [audit] });
+
+    expect(commitAuthoritativeRegistration(persistence, snapshot, {
+      wait,
+      session: { id: session.id, lifecycle: session.lifecycle, waitingApproval: session.waitingApproval },
+      streamEvent: stream,
+      auditEvent: audit,
+    })).toBe('indeterminate');
+    expect(durable.readAuthoritative?.().outcome).toBe('valid');
+    expect(durable.load().approvalWaits).toEqual([wait]);
+  });
+
   it('strictly reconciles a durable registration when save throws after the atomic rename', () => {
     const dir = mkdtempSync(join(tmpdir(), 'roadex-registration-commit-'));
     const durable = createJsonFilePersistence(join(dir, 'state.json'));
