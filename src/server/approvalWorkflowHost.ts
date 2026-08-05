@@ -119,7 +119,7 @@ export function startApprovalWorkflowHost(
       }
       let request: ApprovalWorkflowRequest;
       try {
-        request = parseRequest(input.subarray(0, newline).toString('utf8'));
+        request = parseRequest(new TextDecoder('utf-8', { fatal: true }).decode(input.subarray(0, newline)));
       } catch {
         deny('request_invalid');
         return;

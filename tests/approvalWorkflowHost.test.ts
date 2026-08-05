@@ -301,6 +301,71 @@ describe('approval workflow host listener', () => {
     }
   });
 
+  it('rejects invalid UTF-8 before consuming or staging an approval request', async () => {
+    const broker = new ApprovalWorkflowGrantBroker({ now: () => 1_000 });
+    const grant = broker.issue({
+      userId: 'owner',
+      sessionId: 'session-1',
+      workspaceId: 'roadex',
+      managedThreadId: 'thread-1',
+      runId: 'run-1',
+    });
+    const runContext: ApprovalSessionCapability = {
+      sessionId: 'session-1',
+      userId: 'owner',
+      projectId: 'roadex',
+      workspaceId: 'roadex',
+      resourceRef: 'resource-1',
+      managedThreadId: 'thread-1',
+    };
+    let consumed = 0;
+    let staged = 0;
+    let registered = 0;
+    const host = startApprovalWorkflowHost({
+      socketPath,
+      consumeGrant: (token) => {
+        consumed += 1;
+        return broker.consume(token);
+      },
+      resolveRunContext: () => runContext,
+      stageTypedIntent: async () => {
+        staged += 1;
+        return {
+          provider: 'overseer', approvalRef: 'approval.invalid-utf8', projectId: 'roadex',
+          workspaceId: 'roadex', resourceRef: 'resource-1', authorityClass: 'project-workflow',
+          scopeDigest: `sha256:${'a'.repeat(64)}`,
+        };
+      },
+      registerApprovalWait: async () => {
+        registered += 1;
+        return WAIT;
+      },
+      verifyPeer: async () => true,
+    });
+    await waitForListening(host);
+    try {
+      const request = Buffer.from(JSON.stringify({
+        token: grant.token,
+        provider: 'overseer',
+        intent: validProvisioningIntent(),
+      }) + '\n');
+      const reasonBytes = Buffer.from('Run the approved provisioning workflow fixture.');
+      const reasonOffset = request.indexOf(reasonBytes);
+      expect(reasonOffset).toBeGreaterThanOrEqual(0);
+      request[reasonOffset + 4] = 0xff;
+
+      await expect(sendRawApprovalWorkflowRequest(request)).resolves.toEqual({
+        ok: false,
+        reason: 'request_invalid',
+      });
+      expect(consumed).toBe(0);
+      expect(staged).toBe(0);
+      expect(registered).toBe(0);
+    } finally {
+      await closeServer(host);
+    }
+  });
+
   it('requires one complete bounded newline request', async () => {
     let consumed = 0;
     const host = startApprovalWorkflowHost({
@@ -620,7 +685,7 @@ async function sendApprovalWorkflowRequest(payload: Record<string, unknown>): Pr
   return sendRawApprovalWorkflowRequest(`${JSON.stringify(payload)}\n`);
 }
 
-async function sendRawApprovalWorkflowRequest(payload: string): Promise<Record<string, unknown>> {
+async function sendRawApprovalWorkflowRequest(payload: string | Uint8Array): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
     let output = '';
