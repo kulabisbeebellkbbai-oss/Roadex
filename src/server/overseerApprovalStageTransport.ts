@@ -148,7 +148,7 @@ export function createOverseerApprovalStageTransport(
     } catch {
       if (responseHeadersReceived && !responseSucceeded) {
         abortTransport();
-        await cancelResponseBody();
+        void cancelResponseBody();
       }
       throw new Error('Overseer approval staging is unavailable.');
     } finally {

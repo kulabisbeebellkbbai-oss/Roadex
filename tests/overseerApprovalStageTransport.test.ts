@@ -131,28 +131,27 @@ describe('Overseer approval staging transport', () => {
     expect(cancelled).toBe(true);
   });
 
-  it('does not reject until response-body cancellation completes after headers', async () => {
+  it('rejects promptly after invoking a never-settling response-body cancellation', async () => {
     let cancellationStarted!: () => void;
-    let finishCancellation!: () => void;
     const cancellationObserved = new Promise<void>((resolve) => { cancellationStarted = resolve; });
-    const cancellationFinished = new Promise<void>((resolve) => { finishCancellation = resolve; });
-    let settled = false;
     const body = new ReadableStream<Uint8Array>({
       cancel() {
         cancellationStarted();
-        return cancellationFinished;
+        return new Promise<void>(() => undefined);
       },
     });
     const stage = createOverseerApprovalStageTransport({
       readToken: () => 'root-owned-token',
       fetchImpl: async () => streamedResponse(body, { 'content-length': '0' }, 503),
     });
-    const pending = stage(capability, validProvisioningIntent()).finally(() => { settled = true; });
+    const pending = stage(capability, validProvisioningIntent());
+    const outcome = pending.then(() => 'resolved', () => 'rejected');
 
     await cancellationObserved;
-    await Promise.resolve();
-    expect(settled).toBe(false);
-    finishCancellation();
+    await expect(Promise.race([
+      outcome,
+      new Promise<'sentinel'>((resolve) => setImmediate(() => resolve('sentinel'))),
+    ])).resolves.toBe('rejected');
     await expect(pending).rejects.toThrow('Overseer approval staging is unavailable.');
   });
 
