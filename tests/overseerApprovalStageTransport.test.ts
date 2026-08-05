@@ -131,6 +131,31 @@ describe('Overseer approval staging transport', () => {
     expect(cancelled).toBe(true);
   });
 
+  it('does not reject until response-body cancellation completes after headers', async () => {
+    let cancellationStarted!: () => void;
+    let finishCancellation!: () => void;
+    const cancellationObserved = new Promise<void>((resolve) => { cancellationStarted = resolve; });
+    const cancellationFinished = new Promise<void>((resolve) => { finishCancellation = resolve; });
+    let settled = false;
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancellationStarted();
+        return cancellationFinished;
+      },
+    });
+    const stage = createOverseerApprovalStageTransport({
+      readToken: () => 'root-owned-token',
+      fetchImpl: async () => streamedResponse(body, { 'content-length': '0' }, 503),
+    });
+    const pending = stage(capability, validProvisioningIntent()).finally(() => { settled = true; });
+
+    await cancellationObserved;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    finishCancellation();
+    await expect(pending).rejects.toThrow('Overseer approval staging is unavailable.');
+  });
+
   it('cancels the response body for invalid transfer encoding after headers are received', async () => {
     let cancelled = false;
     const body = JSON.stringify(locator);
