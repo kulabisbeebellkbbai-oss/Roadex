@@ -2,7 +2,13 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { createJsonFilePersistence, serializeState } from '../src/server/statePersistence';
+import {
+  commitAuthoritativeRegistration,
+  createJsonFilePersistence,
+  createMemoryPersistence,
+  serializeState,
+  type StatePersistence,
+} from '../src/server/statePersistence';
 import type { ApprovalWaitRecord } from '../src/shared/approvalWorkflowContracts';
 import type { RoadexSession, StreamEvent } from '../src/shared/sessionContracts';
 import type {
@@ -13,6 +19,148 @@ import type {
 } from '../src/shared/deviceBridgeContracts';
 
 describe('state persistence', () => {
+  it('strictly reconciles a durable registration when save throws after the atomic rename', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-registration-commit-'));
+    const durable = createJsonFilePersistence(join(dir, 'state.json'));
+    const session = sessionFixture('session-1', 'paused', new Date(0).toISOString());
+    const wait = approvalWaitFixture({ sessionId: session.id, id: 'wait-registration' });
+    session.waitingApproval = {
+      waitId: wait.id,
+      approvalRef: wait.approvalRef,
+      subject: wait.subject,
+      consoleSurface: wait.consoleSurface,
+      state: wait.state,
+      updatedAt: wait.updatedAt,
+    };
+    const stream = streamEvent('registration-stream', session.id);
+    const audit = {
+      id: 'audit-registration',
+      at: new Date(0).toISOString(),
+      actorId: 'roadex-approval-coordinator',
+      action: 'approval_wait.register' as const,
+      resource: session.id,
+      outcome: 'allowed' as const,
+      summary: `wait=${wait.id};state=${wait.state};console=${wait.consoleSurface}`,
+    };
+    const snapshot = serializeState({
+      sessions: [session],
+      approvalWaits: [wait],
+      streamEvents: [stream],
+      auditEvents: [audit],
+    });
+    const persistence: StatePersistence = {
+      load: durable.load,
+      readAuthoritative: durable.readAuthoritative,
+      save: (next) => {
+        durable.save(next);
+        throw new Error('rename-already-completed');
+      },
+    };
+
+    const outcome = commitAuthoritativeRegistration(persistence, snapshot, {
+      wait,
+      session: {
+        id: session.id,
+        lifecycle: session.lifecycle,
+        waitingApproval: session.waitingApproval,
+      },
+      streamEvent: stream,
+      auditEvent: audit,
+    });
+
+    expect(outcome).toBe('committed');
+    expect(durable.load().approvalWaits).toEqual([wait]);
+    expect(durable.load().streamEvents).toEqual([stream]);
+    expect(durable.load().auditEvents).toEqual([audit]);
+  });
+
+  it('classifies a structurally valid empty authoritative state as not committed', () => {
+    const persistence = createMemoryPersistence();
+    const session = sessionFixture('session-1', 'paused', new Date(0).toISOString());
+    const wait = approvalWaitFixture({ sessionId: session.id, id: 'wait-absent' });
+    const stream = streamEvent('stream-absent', session.id);
+    const audit = {
+      id: 'audit-absent',
+      at: new Date(0).toISOString(),
+      actorId: 'roadex-approval-coordinator',
+      action: 'approval_wait.register' as const,
+      resource: session.id,
+      outcome: 'allowed' as const,
+      summary: 'wait=wait-absent;state=pending;console=admin',
+    };
+
+    expect(commitAuthoritativeRegistration(persistence, serializeState({}), {
+      wait,
+      session: { id: session.id, lifecycle: session.lifecycle },
+      streamEvent: stream,
+      auditEvent: audit,
+    })).toBe('not-committed');
+  });
+
+  it('does not treat malformed authoritative JSON as confirmed absence', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-authoritative-read-'));
+    const path = join(dir, 'state.json');
+    writeFileSync(path, '{"sessions": []}', { mode: 0o600 });
+    const persistence = createJsonFilePersistence(path);
+
+    expect(persistence.readAuthoritative?.()).toEqual({ outcome: 'indeterminate' });
+  });
+
+  it('converts a strict authoritative probe exception into indeterminate', () => {
+    const session = sessionFixture('session-1', 'paused', new Date(0).toISOString());
+    const wait = approvalWaitFixture({ sessionId: session.id, id: 'wait-probe-error' });
+    const stream = streamEvent('stream-probe-error', session.id);
+    const audit = {
+      id: 'audit-probe-error',
+      at: new Date(0).toISOString(),
+      actorId: 'roadex-approval-coordinator',
+      action: 'approval_wait.register' as const,
+      resource: session.id,
+      outcome: 'allowed' as const,
+      summary: 'registration',
+    };
+    const persistence: StatePersistence = {
+      load: () => serializeState({}),
+      save: () => {},
+      readAuthoritative: () => { throw new Error('probe-failed'); },
+    };
+
+    expect(commitAuthoritativeRegistration(persistence, serializeState({}), {
+      wait,
+      session: { id: session.id, lifecycle: session.lifecycle },
+      streamEvent: stream,
+      auditEvent: audit,
+    })).toBe('indeterminate');
+  });
+
+  it('classifies a partial or conflicting authoritative tuple as indeterminate', () => {
+    const session = sessionFixture('session-1', 'paused', new Date(0).toISOString());
+    const wait = approvalWaitFixture({ sessionId: session.id, id: 'wait-partial' });
+    const stream = streamEvent('stream-partial', session.id);
+    const audit = {
+      id: 'audit-partial',
+      at: new Date(0).toISOString(),
+      actorId: 'roadex-approval-coordinator',
+      action: 'approval_wait.register' as const,
+      resource: session.id,
+      outcome: 'allowed' as const,
+      summary: 'registration',
+    };
+    const partial = createMemoryPersistence({ approvalWaits: [wait] });
+    const persistence: StatePersistence = {
+      load: partial.load,
+      readAuthoritative: partial.readAuthoritative,
+      save: () => {},
+    };
+
+    expect(commitAuthoritativeRegistration(persistence, serializeState({}), {
+      wait,
+      session: { id: session.id, lifecycle: session.lifecycle },
+      streamEvent: stream,
+      auditEvent: audit,
+    })).toBe('indeterminate');
+  });
+
   it('writes Roadex runtime state as mode 600 JSON and reloads it', () => {
     const dir = mkdtempSync(join(tmpdir(), 'roadex-state-'));
     const path = join(dir, 'state.json');

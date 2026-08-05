@@ -34,7 +34,21 @@ export type PersistedRoadexState = {
 export type StatePersistence = {
   load: () => PersistedRoadexState;
   save: (state: PersistedRoadexState) => void;
+  readAuthoritative?: () => AuthoritativeStateRead;
 };
+
+export type AuthoritativeStateRead =
+  | { outcome: 'valid'; state: PersistedRoadexState }
+  | { outcome: 'indeterminate' };
+
+export type RegistrationCanonicalTuple = {
+  wait: ApprovalWaitRecord;
+  session: Pick<RoadexSession, 'id' | 'lifecycle' | 'waitingApproval'>;
+  streamEvent: StreamEvent;
+  auditEvent: AuditEvent;
+};
+
+export type RegistrationCommitOutcome = 'committed' | 'not-committed' | 'indeterminate';
 
 export type RetentionOptions = {
   now?: number;
@@ -69,6 +83,9 @@ export function createMemoryPersistence(initial?: Partial<PersistedRoadexState>)
     load() {
       return cloneState(state);
     },
+    readAuthoritative() {
+      return { outcome: 'valid', state: cloneState(state) };
+    },
     save(next) {
       state = cloneState(next);
     },
@@ -86,6 +103,16 @@ export function createJsonFilePersistence(
         return emptyState();
       }
     },
+    readAuthoritative() {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+        const state = parseAuthoritativeState(parsed);
+        return state ? { outcome: 'valid', state } : { outcome: 'indeterminate' };
+      } catch (error) {
+        if (isMissingFile(error)) return { outcome: 'valid', state: emptyState() };
+        return { outcome: 'indeterminate' };
+      }
+    },
     save(state) {
       mkdirSync(dirname(path), { recursive: true });
       const tmp = `${path}.tmp`;
@@ -93,6 +120,57 @@ export function createJsonFilePersistence(
       renameSync(tmp, path);
     },
   };
+}
+
+export function commitAuthoritativeRegistration(
+  persistence: StatePersistence,
+  snapshot: PersistedRoadexState,
+  expected: RegistrationCanonicalTuple,
+): RegistrationCommitOutcome {
+  try {
+    persistence.save(snapshot);
+  } catch {
+    // The strict read below distinguishes a post-rename exception from a failed write.
+  }
+
+  let authoritative: AuthoritativeStateRead | undefined;
+  try {
+    authoritative = persistence.readAuthoritative?.();
+  } catch {
+    return 'indeterminate';
+  }
+  if (!authoritative || authoritative.outcome === 'indeterminate') {
+    return 'indeterminate';
+  }
+
+  const state = authoritative.state;
+  const matchingWaits = state.approvalWaits.filter((record) => record.id === expected.wait.id);
+  const matchingSessions = state.sessions.filter((session) => session.id === expected.session.id);
+  const matchingStreamEvents = state.streamEvents.filter((event) => event.id === expected.streamEvent.id);
+  const matchingAuditEvents = state.auditEvents.filter((event) => event.id === expected.auditEvent.id);
+  const componentCounts = [
+    matchingWaits.length,
+    matchingSessions.length,
+    matchingStreamEvents.length,
+    matchingAuditEvents.length,
+  ];
+  if (componentCounts.every((count) => count === 0)) return 'not-committed';
+  if (
+    matchingWaits.length === 1
+    && matchingSessions.length === 1
+    && matchingStreamEvents.length === 1
+    && matchingAuditEvents.length === 1
+    && deepEqual(matchingWaits[0], expected.wait)
+    && deepEqual(
+      projectRegistrationSession(matchingSessions[0]),
+      expected.session,
+    )
+    && deepEqual(matchingStreamEvents[0], expected.streamEvent)
+    && deepEqual(matchingAuditEvents[0], expected.auditEvent)
+  ) {
+    return 'committed';
+  }
+  return 'indeterminate';
 }
 
 export function serializeState(state: Partial<PersistedRoadexState>, options: RetentionOptions = {}): PersistedRoadexState {
@@ -805,4 +883,131 @@ function approvalWaitTimestamp(record: ApprovalWaitRecord): number {
 
 function cloneState(state: PersistedRoadexState): PersistedRoadexState {
   return JSON.parse(JSON.stringify(state)) as PersistedRoadexState;
+}
+
+const PERSISTED_STATE_KEYS = [
+  'sessions',
+  'streamEvents',
+  'auditEvents',
+  'managedThreadClaims',
+  'approvalWaits',
+  'deviceArtifacts',
+  'deviceBridgeRequests',
+  'deviceBridgeApprovals',
+  'deviceBridgeOperations',
+  'deviceInventoryBindings',
+  'deviceDescriptorObservations',
+].sort();
+
+function parseAuthoritativeState(value: unknown): PersistedRoadexState | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (Object.keys(candidate).sort().join(',') !== PERSISTED_STATE_KEYS.join(',')) return undefined;
+  if (PERSISTED_STATE_KEYS.some((key) => !Array.isArray(candidate[key]))) return undefined;
+  const state = candidate as unknown as PersistedRoadexState;
+  const canonical = serializeState(state, {
+    now: Date.now(),
+    maxSessions: Number.MAX_SAFE_INTEGER,
+    maxStreamEvents: Number.MAX_SAFE_INTEGER,
+    maxAuditEvents: Number.MAX_SAFE_INTEGER,
+    sessionRetentionMs: Number.MAX_SAFE_INTEGER,
+    maxDeviceArtifacts: Number.MAX_SAFE_INTEGER,
+    maxDeviceRequests: Number.MAX_SAFE_INTEGER,
+    maxDeviceApprovals: Number.MAX_SAFE_INTEGER,
+    maxDeviceOperations: Number.MAX_SAFE_INTEGER,
+    deviceBridgeRetentionMs: Number.MAX_SAFE_INTEGER,
+    maxApprovalWaits: Number.MAX_SAFE_INTEGER,
+    approvalWaitRetentionMs: Number.MAX_SAFE_INTEGER,
+  });
+  return deepEqual(canonical, state) && strictSessionRecords(state.sessions)
+    && strictStreamRecords(state.streamEvents)
+    && strictAuditRecords(state.auditEvents)
+    && strictManagedThreadClaims(state.managedThreadClaims)
+    ? cloneState(state)
+    : undefined;
+}
+
+const SESSION_REQUIRED_KEYS = [
+  'id', 'userId', 'workspace', 'lifecycle', 'runnerMode', 'transport',
+  'deviceBridge', 'gates', 'createdAt', 'updatedAt',
+];
+const SESSION_OPTIONAL_KEYS = ['codexThreadId', 'managedThreadId', 'waitingApproval', 'runActivity'];
+
+function strictSessionRecords(records: RoadexSession[]): boolean {
+  return records.every((record) => {
+    if (!record || typeof record !== 'object') return false;
+    const keys = Object.keys(record).sort();
+    const allowed = new Set([...SESSION_REQUIRED_KEYS, ...SESSION_OPTIONAL_KEYS]);
+    if (keys.some((key) => !allowed.has(key)) || SESSION_REQUIRED_KEYS.some((key) => !keys.includes(key))) {
+      return false;
+    }
+    const workspace = record.workspace;
+    if (!workspace || typeof workspace !== 'object' || Array.isArray(workspace)) return false;
+    if (Object.keys(workspace).sort().join(',') !== 'id,name,root') return false;
+    return typeof record.id === 'string'
+      && typeof record.userId === 'string'
+      && typeof workspace.id === 'string'
+      && typeof workspace.name === 'string'
+      && typeof workspace.root === 'string'
+      && Array.isArray(record.gates)
+      && typeof record.createdAt === 'string'
+      && typeof record.updatedAt === 'string';
+  });
+}
+
+function strictStreamRecords(records: StreamEvent[]): boolean {
+  return records.every((record) => (
+    record !== null
+    && typeof record === 'object'
+    && Object.keys(record).sort().join(',') === 'at,id,kind,message,sessionId'
+    && typeof record.id === 'string'
+    && typeof record.sessionId === 'string'
+    && typeof record.kind === 'string'
+    && typeof record.message === 'string'
+    && typeof record.at === 'string'
+  ));
+}
+
+function strictAuditRecords(records: AuditEvent[]): boolean {
+  return records.every((record) => (
+    record !== null
+    && typeof record === 'object'
+    && Object.keys(record).sort().join(',') === 'action,actorId,at,id,outcome,resource,summary'
+    && typeof record.id === 'string'
+    && typeof record.at === 'string'
+    && typeof record.actorId === 'string'
+    && typeof record.action === 'string'
+    && typeof record.outcome === 'string'
+    && typeof record.resource === 'string'
+    && typeof record.summary === 'string'
+  ));
+}
+
+function strictManagedThreadClaims(records: ManagedThreadClaim[]): boolean {
+  return records.every((record) => (
+    record !== null
+    && typeof record === 'object'
+    && Object.keys(record).sort().join(',') === 'claimedAt,threadId,userId'
+    && typeof record.threadId === 'string'
+    && typeof record.userId === 'string'
+    && typeof record.claimedAt === 'string'
+  ));
+}
+
+function projectRegistrationSession(
+  session: RoadexSession,
+): Pick<RoadexSession, 'id' | 'lifecycle' | 'waitingApproval'> {
+  return {
+    id: session.id,
+    lifecycle: session.lifecycle,
+    ...(session.waitingApproval ? { waitingApproval: { ...session.waitingApproval } } : {}),
+  };
+}
+
+function deepEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function isMissingFile(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT';
 }

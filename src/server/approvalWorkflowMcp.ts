@@ -37,6 +37,7 @@ const BROKER_DENIAL_REASONS = new Set([
   'request_too_large',
   'peer_denied',
   'request_timeout',
+  'persistence_indeterminate',
   'workflow_request_failed',
   'response_invalid',
 ]);

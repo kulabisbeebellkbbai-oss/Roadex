@@ -10,7 +10,7 @@ import {
   realpathSync,
 } from 'node:fs';
 import { basename, extname, isAbsolute, resolve, sep } from 'node:path';
-import { appendAudit, createAuditLogFromEvents, type AuditLog } from './auditLog.js';
+import { appendAudit, createAuditEvent, createAuditLogFromEvents, type AuditLog } from './auditLog.js';
 import { createCodexRunner, type SessionRunner } from './codexRunner.js';
 import {
   denyDeviceBridge,
@@ -29,7 +29,9 @@ import { createRunnerIntro, createStreamEvent } from './mockRunner.js';
 import { addStreamEvents, createSessionStoreFromState, getOwnedSession, type SessionStore } from './sessionStore.js';
 import {
   createJsonFilePersistence,
+  commitAuthoritativeRegistration,
   serializeState,
+  type PersistedRoadexState,
   type StatePersistence,
 } from './statePersistence.js';
 import { canAccessManagedCodexProjects, getApprovedWorkspaces, resolveWorkspaceForUser } from './workspacePolicy.js';
@@ -215,7 +217,11 @@ export function createInitialState(
   runner: SessionRunner = createCodexRunner(),
   persistence: StatePersistence = createJsonFilePersistence(),
 ): RoadexState {
-  const persisted = persistence.load();
+  const authoritative = persistence.readAuthoritative?.();
+  if (authoritative?.outcome === 'indeterminate') {
+    throw new Error('roadex_state_indeterminate');
+  }
+  const persisted = authoritative?.state ?? persistence.load();
   const deviceProfiles = loadProjectDeviceManifest();
   const managedThreadClaims = new Map(persisted.managedThreadClaims.map((claim) => [claim.threadId, claim]));
   for (const session of persisted.sessions) {
@@ -491,6 +497,45 @@ export function createApprovalCoordinatorCallbacks(
 ): ApprovalCoordinatorCallbacks {
   return {
     persist: () => saveState(state),
+    registrationCommit: (session, wait) => {
+      const streamEvent = createStreamEvent(
+        session.id,
+        'system',
+        waitingMessage(wait.consoleSurface),
+      );
+      const auditEvent = createAuditEvent(
+        state.audit,
+        approvalCoordinatorActor(),
+        'approval_wait.register',
+        wait.sessionId,
+        'allowed',
+        `wait=${wait.id};state=${wait.state};console=${wait.consoleSurface}`,
+      );
+      const outcome = commitAuthoritativeRegistration(
+        state.persistence,
+        persistedStateSnapshot(state, {
+          streamEvents: [...state.sessions.streamEvents, streamEvent],
+          auditEvents: [...state.audit.events, auditEvent],
+        }),
+        {
+          wait,
+          session: {
+            id: session.id,
+            lifecycle: session.lifecycle,
+            ...(session.waitingApproval ? { waitingApproval: { ...session.waitingApproval } } : {}),
+          },
+          streamEvent,
+          auditEvent,
+        },
+      );
+      return outcome === 'committed'
+        ? { outcome, streamEvent, auditEvent }
+        : { outcome };
+    },
+    publishCommittedRegistration: (streamEvent, auditEvent) => {
+      state.audit.events.push(auditEvent);
+      publishStreamEvents(state, [streamEvent]);
+    },
     publish: (sessionId, message) => {
       addAndPublishStreamEvents(state, [createStreamEvent(sessionId, 'system', message)]);
     },
@@ -570,6 +615,10 @@ function approvalCoordinatorActor(): UserProfile {
     authMode: 'protected-gateway',
     roles: ['user'],
   };
+}
+
+function waitingMessage(consoleSurface: 'admin' | 'overview'): string {
+  return `Roadex is waiting for human approval in ${consoleSurface === 'admin' ? 'Admin Console' : 'Overview Console'}. Roadex will continue automatically after verified approval.`;
 }
 
 export async function bootstrap(state: RoadexState, user: UserProfile): Promise<RoadexBootstrap> {
@@ -3044,7 +3093,14 @@ function expiredIso(value: string): boolean {
 }
 
 function saveState(state: RoadexState): void {
-  state.persistence.save(serializeState({
+  state.persistence.save(persistedStateSnapshot(state));
+}
+
+function persistedStateSnapshot(
+  state: RoadexState,
+  overrides: Partial<PersistedRoadexState> = {},
+): PersistedRoadexState {
+  return serializeState({
     sessions: state.sessions.sessions,
     streamEvents: state.sessions.streamEvents,
     auditEvents: state.audit.events,
@@ -3056,7 +3112,8 @@ function saveState(state: RoadexState): void {
     deviceBridgeOperations: [...state.deviceBridgeOperations.values()],
     deviceInventoryBindings: [...state.deviceInventoryBindings.values()],
     deviceDescriptorObservations: [...state.deviceDescriptorObservations.values()],
-  }));
+    ...overrides,
+  });
 }
 
 function pseudonymizeControlledOperationResource(sessionId: string): string {
@@ -3081,22 +3138,15 @@ function persistStateSnapshot(
     deviceDescriptorObservations: DeviceDescriptorObservationRecord[];
   }>,
 ): void {
-  state.persistence.save(serializeState({
-    sessions: overrides.sessions ?? state.sessions.sessions,
-    streamEvents: overrides.streamEvents ?? state.sessions.streamEvents,
-    auditEvents: overrides.auditEvents ?? state.audit.events,
-    managedThreadClaims: overrides.managedThreadClaims ?? [...state.managedThreadClaims.values()],
-    approvalWaits: overrides.approvalWaits ?? state.approvalWaits,
-    deviceArtifacts: overrides.deviceArtifacts ?? [...state.deviceArtifacts.values()],
-    deviceBridgeRequests: overrides.deviceBridgeRequests ?? [...state.deviceBridgeRequests.values()],
-    deviceBridgeApprovals: overrides.deviceBridgeApprovals ?? [...state.deviceBridgeApprovals.values()],
-    deviceBridgeOperations: overrides.deviceBridgeOperations ?? [...state.deviceBridgeOperations.values()],
-    deviceInventoryBindings: overrides.deviceInventoryBindings ?? [...state.deviceInventoryBindings.values()],
-    deviceDescriptorObservations: overrides.deviceDescriptorObservations ?? [...state.deviceDescriptorObservations.values()],
-  }));
+  state.persistence.save(persistedStateSnapshot(state, overrides));
 }
 
 function addAndPublishStreamEvents(state: RoadexState, events: StreamEvent[]): void {
+  publishStreamEvents(state, events);
+  saveState(state);
+}
+
+function publishStreamEvents(state: RoadexState, events: StreamEvent[]): void {
   addStreamEvents(state.sessions, events);
   for (const event of events) {
     const subscribers = state.streamSubscribers.get(event.sessionId);
@@ -3112,7 +3162,6 @@ function addAndPublishStreamEvents(state: RoadexState, events: StreamEvent[]): v
     }
     if (subscribers.size === 0) state.streamSubscribers.delete(event.sessionId);
   }
-  saveState(state);
 }
 
 function recordCancelAttempt(state: RoadexState, user: UserProfile, sessionId: string, reason: string): void {

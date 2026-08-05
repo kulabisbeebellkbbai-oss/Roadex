@@ -6,9 +6,11 @@ import {
   type ApprovalSessionCapability,
   type RegisterApprovalWaitInput,
   type RegisterApprovalWaitResult,
+  type RegistrationCommitResult,
   ApprovalCoordinator,
 } from '../src/server/approvalCoordinator.js';
 import { buildApprovalContinuation } from '../src/server/approvalContinuation.js';
+import { createStreamEvent } from '../src/server/mockRunner.js';
 import type { ApprovalWaitRecord, NormalizedApprovalStatus, WaitingApprovalSummary } from '../src/shared/approvalWorkflowContracts.js';
 import type { AuditEvent, RoadexSession } from '../src/shared/sessionContracts.js';
 import type { ApprovalStatusProvider } from '../src/server/approvalStatusProvider.js';
@@ -143,6 +145,7 @@ function statusSequenceProvider(sequence: Array<NormalizedApprovalStatus>): Appr
 
 function callbacksBuilder(overrides: {
   persist?: () => void | Promise<void>;
+  registrationCommit?: (session: RoadexSession, wait: ApprovalWaitRecord) => RegistrationCommitResult;
   queueContinuation?: () => ApprovalContinuationDispatchResult | Promise<ApprovalContinuationDispatchResult>;
   publish?: (sessionId: string, message: string) => void;
   audit?: (action: AuditEvent['action'], outcome: AuditEvent['outcome'], summary: string, resource: string) => void;
@@ -156,6 +159,23 @@ function callbacksBuilder(overrides: {
         if (overrides.persist) {
           await overrides.persist();
         }
+      },
+      registrationCommit: (session, wait) => overrides.registrationCommit?.(session, wait) ?? {
+        outcome: 'committed',
+        streamEvent: createStreamEvent(session.id, 'system', `Roadex is waiting for human approval in ${wait.consoleSurface === 'admin' ? 'Admin Console' : 'Overview Console'}. Roadex will continue automatically after verified approval.`),
+        auditEvent: {
+          id: `audit-${audits.length + 1}`,
+          at: BASE.toISOString(),
+          actorId: 'actor-1',
+          action: 'approval_wait.register',
+          outcome: 'allowed',
+          summary: `wait=${wait.id};state=${wait.state};console=${wait.consoleSurface}`,
+          resource: wait.sessionId,
+        },
+      },
+      publishCommittedRegistration: (streamEvent, auditEvent) => {
+        events.push(`[${streamEvent.sessionId}] ${streamEvent.message}`);
+        audits.push(auditEvent);
       },
       publish: (sessionId: string, message: string) => {
         if (overrides.publish) {
@@ -236,81 +256,143 @@ describe('ApprovalCoordinator', () => {
     expect(session.waitingApproval).toBeUndefined();
   });
 
-  it('fails closed after waiting for the session lock when cancellation occurs', async () => {
-    const persistGate = deferred<void>();
-    let persistCalls = 0;
+  it('does not hold the session lock across registration persistence', async () => {
     const firstSession = fixtureSession();
     const waits: ApprovalWaitRecord[] = [];
     const first = new ApprovalCoordinator(
       waits,
       [firstSession],
       statusSequenceProvider([fixtureStatus(), fixtureStatus()]),
-      {
-        ...callbacksBuilder().callbacks,
-        persist: async () => {
-          persistCalls += 1;
-          if (persistCalls === 1) await persistGate.promise;
-        },
-      },
-      { clock: clockWithState(), idSource: { generateWaitId: () => `wait-lock-${persistCalls}` } },
+      callbacksBuilder().callbacks,
+      { clock: clockWithState(), idSource: { generateWaitId: () => `wait-lock-${waits.length}` } },
     );
     const firstRegistration = first.register(fixtureCapability(), {
       provider: 'overseer',
       approvalRef: 'admin.roadex.test',
     });
-    await vi.waitFor(() => expect(persistCalls).toBe(1));
-
-    const controller = new AbortController();
     const secondRegistration = first.register(fixtureCapability(), {
       provider: 'overseer',
       approvalRef: 'admin.roadex.test',
-    }, controller.signal);
-    controller.abort();
-    persistGate.resolve();
+    });
 
     await expect(firstRegistration).resolves.toMatchObject({ ok: true });
-    await expect(secondRegistration).resolves.toEqual({ ok: false, code: 'provider-unavailable' });
+    await expect(secondRegistration).resolves.toMatchObject({ ok: false });
     expect(waits).toHaveLength(1);
     expect(firstSession.waitingApproval?.waitId).toBe(waits[0].id);
   });
 
   it('keeps the durable registration when cancellation arrives after the commit fence', async () => {
-    const persistGate = deferred<void>();
-    const persisted: Array<{ waits: number; lifecycle: RoadexSession['lifecycle']; waiting: boolean }> = [];
     const session = fixtureSession();
     const waits: ApprovalWaitRecord[] = [];
-    let persistCalls = 0;
+    const controller = new AbortController();
     const coordinator = new ApprovalCoordinator(
       waits,
       [session],
       statusSequenceProvider([fixtureStatus()]),
       {
         ...callbacksBuilder().callbacks,
-        persist: async () => {
-          persistCalls += 1;
-          persisted.push({ waits: waits.length, lifecycle: session.lifecycle, waiting: session.waitingApproval !== undefined });
-          if (persistCalls === 1) await persistGate.promise;
-          if (persistCalls > 1) throw new Error('compensating-persist-must-not-run');
+        registrationCommit: (committingSession, wait) => {
+          controller.abort();
+          return {
+            outcome: 'committed',
+            streamEvent: createStreamEvent(committingSession.id, 'system', 'waiting'),
+            auditEvent: {
+              id: 'audit-fenced',
+              at: BASE.toISOString(),
+              actorId: 'actor-1',
+              action: 'approval_wait.register',
+              outcome: 'allowed',
+              summary: `wait=${wait.id};state=${wait.state};console=${wait.consoleSurface}`,
+              resource: wait.sessionId,
+            },
+          };
         },
       },
       { clock: clockWithState(), idSource: { generateWaitId: () => 'wait-persist-cancelled' } },
     );
-    const controller = new AbortController();
     const registration = coordinator.register(fixtureCapability(), {
       provider: 'overseer',
       approvalRef: 'admin.roadex.test',
     }, controller.signal);
-    await vi.waitFor(() => expect(persistCalls).toBe(1));
-
-    controller.abort();
-    persistGate.resolve();
 
     await expect(registration).resolves.toMatchObject({ ok: true, wait: { waitId: 'wait-persist-cancelled' } });
     expect(waits).toHaveLength(1);
     expect(session.lifecycle).toBe('paused');
     expect(session.waitingApproval).toMatchObject({ waitId: 'wait-persist-cancelled', state: 'pending' });
-    expect(persistCalls).toBe(1);
-    expect(persisted).toEqual([{ waits: 1, lifecycle: 'paused', waiting: true }]);
+  });
+
+  it('does not route registration through a never-settling generic persistence callback', async () => {
+    const session = fixtureSession();
+    const waits: ApprovalWaitRecord[] = [];
+    let genericPersistCalls = 0;
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      [session],
+      statusSequenceProvider([fixtureStatus()]),
+      {
+        ...callbacksBuilder().callbacks,
+        persist: () => {
+          genericPersistCalls += 1;
+          return new Promise<void>(() => {});
+        },
+      },
+      { clock: clockWithState(), idSource: { generateWaitId: () => 'wait-dedicated-port' } },
+    );
+
+    const result = await Promise.race([
+      coordinator.register(fixtureCapability(), {
+        provider: 'overseer',
+        approvalRef: 'admin.roadex.test',
+      }),
+      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 100)),
+    ]);
+
+    expect(result).not.toBe('timed-out');
+    expect(result).toMatchObject({ ok: true, wait: { waitId: 'wait-dedicated-port' } });
+    expect(genericPersistCalls).toBe(0);
+  });
+
+  it('quarantines an indeterminate registration without publishing, polling, dispatching, or compensating', async () => {
+    const session = fixtureSession();
+    const waits: ApprovalWaitRecord[] = [];
+    const provider = { getStatus: vi.fn(async () => fixtureStatus()) };
+    const queueContinuation = vi.fn(async () => ({ status: 'started', runnerRunId: 'must-not-run' } as const));
+    const publishCommittedRegistration = vi.fn();
+    const genericPersist = vi.fn();
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      [session],
+      provider,
+      {
+        ...callbacksBuilder().callbacks,
+        persist: genericPersist,
+        registrationCommit: () => ({ outcome: 'indeterminate' }),
+        publishCommittedRegistration,
+        queueContinuation,
+      },
+      { clock: clockWithState(), idSource: { generateWaitId: () => 'wait-indeterminate' } },
+    );
+
+    const result = await coordinator.register(fixtureCapability(), {
+      provider: 'overseer',
+      approvalRef: 'admin.roadex.test',
+    });
+
+    expect(result).toEqual({ ok: false, code: 'persistence-indeterminate' });
+    expect(waits).toHaveLength(1);
+    expect(waits[0].state).toBe('resume-reconciliation-required');
+    expect(session.lifecycle).toBe('blocked');
+    expect(session.waitingApproval).toMatchObject({
+      waitId: 'wait-indeterminate',
+      state: 'resume-reconciliation-required',
+    });
+    expect(publishCommittedRegistration).not.toHaveBeenCalled();
+    expect(genericPersist).not.toHaveBeenCalled();
+
+    await coordinator.tick();
+    expect(provider.getStatus).toHaveBeenCalledTimes(1);
+    expect(queueContinuation).not.toHaveBeenCalled();
+    expect(genericPersist).not.toHaveBeenCalled();
   });
 
   it('registers a pending approval and pauses the session with full wait result', async () => {
@@ -729,7 +811,9 @@ describe('ApprovalCoordinator', () => {
 
     const waits: ApprovalWaitRecord[] = [];
     const sessions = [fixtureSession()];
-    const cb = callbacksBuilder({ persist: () => { throw new Error('persist-down'); } });
+    const cb = callbacksBuilder({
+      registrationCommit: () => ({ outcome: 'not-committed' }),
+    });
     const result = await new ApprovalCoordinator(
       waits,
       sessions,
@@ -748,8 +832,7 @@ describe('ApprovalCoordinator', () => {
     const sessions = [fixtureSession()];
     const waits: ApprovalWaitRecord[] = [];
     const cb = callbacksBuilder();
-    cb.callbacks.publish = () => { throw new Error('publish-failed'); };
-    cb.callbacks.audit = () => { throw new Error('audit-failed'); };
+    cb.callbacks.publishCommittedRegistration = () => { throw new Error('publish-failed'); };
 
     const result = await new ApprovalCoordinator(
       waits,
@@ -1669,8 +1752,8 @@ describe('ApprovalCoordinator', () => {
       const session = fixtureSession({ lifecycle: 'closed' });
       bindSessionToWait(session, oldWait);
       session.lifecycle = 'closed';
-      const persistGates = [deferred<void>(), deferred<void>()];
-      const persistStarts = [deferred<void>(), deferred<void>()];
+      const persistGate = deferred<void>();
+      const persistStarted = deferred<void>();
       let persistCall = 0;
       let durable: {
         lifecycle: RoadexSession['lifecycle'];
@@ -1687,8 +1770,27 @@ describe('ApprovalCoordinator', () => {
         ]),
         {
           ...callbacksBuilder().callbacks,
+          registrationCommit: (committingSession, wait) => {
+            durable = {
+              lifecycle: committingSession.lifecycle,
+              waitingApproval: committingSession.waitingApproval ? { ...committingSession.waitingApproval } : undefined,
+              waits: waits.map((candidate) => ({ ...candidate })),
+            };
+            return {
+              outcome: 'committed',
+              streamEvent: createStreamEvent(committingSession.id, 'system', 'waiting'),
+              auditEvent: {
+                id: `audit-${wait.id}`,
+                at: clock.now(),
+                actorId: 'actor-1',
+                action: 'approval_wait.register',
+                resource: wait.sessionId,
+                outcome: 'allowed',
+                summary: `wait=${wait.id};state=${wait.state};console=${wait.consoleSurface}`,
+              },
+            };
+          },
           persist: async () => {
-            const index = persistCall;
             persistCall += 1;
             const snapshot = {
               lifecycle: session.lifecycle,
@@ -1696,8 +1798,8 @@ describe('ApprovalCoordinator', () => {
               waits: waits.map((wait) => ({ ...wait })),
             };
             persistedOrder.push(snapshot.waitingApproval?.waitId ?? 'retirement-only');
-            persistStarts[index].resolve();
-            await persistGates[index].promise;
+            persistStarted.resolve();
+            await persistGate.promise;
             durable = snapshot;
           },
           queueContinuation,
@@ -1713,7 +1815,7 @@ describe('ApprovalCoordinator', () => {
       let registerPromise: Promise<RegisterApprovalWaitResult>;
       if (order === 'retirement-first') {
         tickPromise = coordinator.tick();
-        await persistStarts[0].promise;
+        await persistStarted.promise;
         registerPromise = coordinator.register(
           fixtureCapability(),
           { provider: 'overseer', approvalRef: 'admin.roadex.test' },
@@ -1723,23 +1825,19 @@ describe('ApprovalCoordinator', () => {
           fixtureCapability(),
           { provider: 'overseer', approvalRef: 'admin.roadex.test' },
         );
-        await persistStarts[0].promise;
         tickPromise = coordinator.tick();
+        await persistStarted.promise;
       }
 
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(persistCall, order).toBe(1);
 
-      persistGates[0].resolve();
-      await persistStarts[1].promise;
-      persistGates[1].resolve();
+      persistGate.resolve();
       const registerResult = await registerPromise;
       await tickPromise;
 
       expect(registerResult, order).toMatchObject({ ok: true });
-      expect(persistedOrder, order).toEqual(order === 'retirement-first'
-        ? ['retirement-only', `wait-successor-${order}`]
-        : [`wait-successor-${order}`, `wait-successor-${order}`]);
+      expect(persistedOrder, order).toEqual(['retirement-only']);
       expect(durable?.lifecycle, order).toBe('paused');
       expect(durable?.waitingApproval?.waitId, order).toBe(`wait-successor-${order}`);
       expect(durable?.waits.find((wait) => wait.id === oldWait.id)?.state, order).toBe('session-closed');
@@ -2201,13 +2299,11 @@ describe('ApprovalCoordinator', () => {
     }
   });
 
-  it('waits for in-flight registration persistence before allowing close', async () => {
+  it('does not route registration through generic persistence before allowing close', async () => {
     const clock = clockWithState();
     const waits: ApprovalWaitRecord[] = [];
     const sessions = [fixtureSession()];
     const order: string[] = [];
-    const persistGate = deferred<void>();
-    const persistStarted = deferred<void>();
 
     const coordinator = new ApprovalCoordinator(
       waits,
@@ -2217,38 +2313,22 @@ describe('ApprovalCoordinator', () => {
         ...callbacksBuilder().callbacks,
         persist: async () => {
           order.push('persist');
-          persistStarted.resolve();
-          if (order.length === 1) {
-            await persistGate.promise;
-          }
         },
       },
       { clock },
     );
 
-    const registerPromise = coordinator.register(fixtureCapability(), {
+    await expect(coordinator.register(fixtureCapability(), {
       provider: 'overseer',
       approvalRef: 'admin.roadex.test',
-    });
-    await persistStarted.promise;
+    })).resolves.toMatchObject({ ok: true });
+    expect(order).toEqual([]);
 
-    let closeResolved = false;
-    const closePromise = coordinator.closeSessionWait('session-1').then(() => {
-      closeResolved = true;
-    });
-    await Promise.resolve();
+    await coordinator.closeSessionWait('session-1');
 
     expect(order).toEqual(['persist']);
-    expect(closeResolved).toBe(false);
-
-    persistGate.resolve();
-    await registerPromise;
-    await closePromise;
-
-    expect(order).toEqual(['persist', 'persist']);
     expect(waits).toHaveLength(1);
     expect(waits[0].state).toBe('session-closed');
-    expect(closeResolved).toBe(true);
   });
 
   it('handles pre-queue binding drift to security-failure without queueing continuation', async () => {

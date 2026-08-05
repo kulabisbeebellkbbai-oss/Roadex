@@ -374,6 +374,46 @@ describe('approval workflow host listener', () => {
     }
   });
 
+  it('returns a redacted persistence-indeterminate result without claiming success', async () => {
+    const broker = new ApprovalWorkflowGrantBroker();
+    const grant = broker.issue({
+      userId: 'owner',
+      sessionId: 'session-1',
+      workspaceId: 'roadex',
+      managedThreadId: 'thread-1',
+      runId: 'run-1',
+    });
+    const host = startApprovalWorkflowHost({
+      socketPath,
+      consumeGrant: (token) => broker.consume(token),
+      resolveRunContext: () => ({
+        sessionId: 'session-1',
+        userId: 'owner',
+        projectId: 'roadex',
+        workspaceId: 'roadex',
+        resourceRef: 'resource-1',
+        managedThreadId: 'thread-1',
+      }),
+      stageTypedIntent: async () => ({
+        provider: 'overseer', approvalRef: 'admin.roadex.test', projectId: 'roadex',
+        workspaceId: 'roadex', resourceRef: 'resource-1', authorityClass: 'privileged-operation',
+        scopeDigest: `sha256:${'a'.repeat(64)}`,
+      }),
+      registerApprovalWait: async () => ({ ok: false, code: 'persistence-indeterminate' }),
+      verifyPeer: async () => true,
+    });
+    await waitForListening(host);
+    try {
+      await expect(sendApprovalWorkflowRequest({
+        token: grant.token,
+        provider: 'overseer',
+        intent: validProvisioningIntent(),
+      })).resolves.toEqual({ ok: false, reason: 'persistence_indeterminate' });
+    } finally {
+      await closeServer(host);
+    }
+  });
+
   it('bounds a registration callback that never settles', async () => {
     const broker = new ApprovalWorkflowGrantBroker();
     const grant = broker.issue({

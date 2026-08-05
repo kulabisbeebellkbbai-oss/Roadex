@@ -22,6 +22,7 @@ import { ApprovalWorkflowGrantBroker } from '../src/server/approvalWorkflowGrant
 import type { ApprovalWaitRecord } from '../src/shared/approvalWorkflowContracts';
 import type { RoadexSession } from '../src/shared/sessionContracts';
 import type { RunnerPromptRequest, RunnerPromptResult, SessionRunner } from '../src/server/codexRunner';
+import { createMemoryPersistence } from '../src/server/statePersistence';
 import type { PersistedRoadexState, StatePersistence } from '../src/server/statePersistence';
 
 const NOW = '2026-08-02T18:00:00.000Z';
@@ -143,7 +144,7 @@ describe('approval lifecycle integration', () => {
         return requests.length === 1 ? userRun.promise : continuationRun.promise;
       },
     };
-    const state = createInitialState(runner, { load: emptyPersistedState, save: () => {} });
+    const state = createInitialState(runner, createMemoryPersistence());
     const { session } = fixture();
     session.userId = mockUser.id;
     session.workspace = { id: 'roadex', name: 'Roadex', root: process.cwd() };

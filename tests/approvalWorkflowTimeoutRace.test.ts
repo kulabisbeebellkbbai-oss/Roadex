@@ -16,6 +16,7 @@ import type { ApprovalStageLocator } from '../src/server/approvalWorkflowMcp';
 import type { ApprovalWaitRecord, NormalizedApprovalStatus } from '../src/shared/approvalWorkflowContracts';
 import type { RoadexSession } from '../src/shared/sessionContracts';
 import { validProvisioningIntent } from './approvalFixtures';
+import { createStreamEvent } from '../src/server/mockRunner';
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -77,6 +78,20 @@ function fixtureLocator(): ApprovalStageLocator {
 function callbacks(persist: () => void | Promise<void>): ApprovalCoordinatorCallbacks {
   return {
     persist,
+    registrationCommit: (session, wait) => ({
+      outcome: 'committed',
+      streamEvent: createStreamEvent(session.id, 'system', 'waiting'),
+      auditEvent: {
+        id: `audit-${wait.id}`,
+        at: '2026-08-04T00:00:00.000Z',
+        actorId: 'roadex-approval-coordinator',
+        action: 'approval_wait.register',
+        resource: wait.sessionId,
+        outcome: 'allowed',
+        summary: `wait=${wait.id};state=${wait.state};console=${wait.consoleSurface}`,
+      },
+    }),
+    publishCommittedRegistration: () => {},
     publish: () => {},
     audit: () => {},
     queueContinuation: async () => ({ status: 'started', runnerRunId: 'runner-1' }),
@@ -169,25 +184,13 @@ describe('approval workflow timeout race', () => {
     };
     const session = fixtureSession();
     const waits: ApprovalWaitRecord[] = [];
-    const persistGate = deferred<void>();
-    const durableSnapshots: Array<{ waits: ApprovalWaitRecord[]; session: RoadexSession }> = [];
-    let persistCalls = 0;
+    const registrationReturned = deferred<void>();
+    const responseGate = deferred<void>();
     const coordinator = new ApprovalCoordinator(
       waits,
       [session],
       { getStatus: vi.fn(async () => fixtureStatus()) },
-      callbacks(async () => {
-        persistCalls += 1;
-        if (persistCalls === 1) {
-          durableSnapshots.push({
-            waits: structuredClone(waits),
-            session: structuredClone(session),
-          });
-          await persistGate.promise;
-          return;
-        }
-        throw new Error('compensating-persist-must-not-run');
-      }),
+      callbacks(async () => {}),
       { idSource: { generateWaitId: () => 'wait-fenced' } },
     );
     const runtime = createApprovalWorkflowRunRuntime(broker, {
@@ -198,49 +201,42 @@ describe('approval workflow timeout race', () => {
       broker,
       runtime,
       socketPath,
-      registerApprovalWait: (run, input, signal, registrationFence) => coordinator.register(
-        run,
-        input,
-        signal,
-        registrationFence,
-      ),
+      registerApprovalWait: async (run, input, signal, registrationFence) => {
+        const result = await coordinator.register(run, input, signal, registrationFence);
+        registrationReturned.resolve();
+        await responseGate.promise;
+        return result;
+      },
     });
     const host = startApprovalWorkflowHost({
       ...dependencies,
-      registerApprovalWait: (run, input, signal, registrationFence) => coordinator.register(
-        run,
-        input,
-        signal,
-        registrationFence,
-      ),
+      registerApprovalWait: async (run, input, signal, registrationFence) => {
+        const result = await coordinator.register(run, input, signal, registrationFence);
+        registrationReturned.resolve();
+        await responseGate.promise;
+        return result;
+      },
       verifyPeer: async () => true,
       requestTimeoutMs: 25,
     });
     await waitForListening(host);
     const responsePromise = sendRequest(socketPath, { token: grant.token });
     try {
-      await vi.waitFor(() => expect(persistCalls).toBe(1));
+      await registrationReturned.promise;
       await new Promise((resolve) => setTimeout(resolve, 40));
       let responseSettled = false;
       void responsePromise.then(() => { responseSettled = true; });
       await new Promise((resolve) => setImmediate(resolve));
       expect(responseSettled).toBe(false);
 
-      persistGate.resolve();
+      responseGate.resolve();
       await expect(responsePromise).resolves.toMatchObject({
         ok: true,
         waitId: 'wait-fenced',
         waitState: 'pending',
       });
-      expect(persistCalls).toBe(1);
-      expect(durableSnapshots).toHaveLength(1);
-      expect(durableSnapshots[0].waits).toHaveLength(1);
-      expect(durableSnapshots[0].session).toMatchObject({
-        lifecycle: 'paused',
-        waitingApproval: { waitId: 'wait-fenced', state: 'pending' },
-      });
     } finally {
-      persistGate.resolve();
+      responseGate.resolve();
       await closeServer(host);
     }
   });
@@ -310,6 +306,77 @@ describe('approval workflow timeout race', () => {
       expect(registrations).toBe(0);
     } finally {
       stageGate.resolve(fixtureLocator());
+      socket.destroy();
+      await closeServer(host);
+    }
+  });
+
+  it('preserves committed registration when the client socket closes after the fence', async () => {
+    const broker = new ApprovalWorkflowGrantBroker({ now: () => 1_000 });
+    const capability: ApprovalSessionCapability = {
+      sessionId: 'session-1',
+      userId: 'owner',
+      projectId: 'roadex',
+      workspaceId: 'roadex',
+      resourceRef: 'resource-1',
+      managedThreadId: 'thread-1',
+    };
+    const session = fixtureSession();
+    const waits: ApprovalWaitRecord[] = [];
+    const registrationReturned = deferred<void>();
+    const responseGate = deferred<void>();
+    const coordinator = new ApprovalCoordinator(
+      waits,
+      [session],
+      { getStatus: vi.fn(async () => fixtureStatus()) },
+      callbacks(() => {}),
+      { idSource: { generateWaitId: () => 'wait-post-fence-close' } },
+    );
+    const runtime = createApprovalWorkflowRunRuntime(broker, {
+      stageTypedIntent: async () => fixtureLocator(),
+    });
+    const grant = runtime.beginRun(capability);
+    const host = startApprovalWorkflowHost({
+      socketPath,
+      consumeGrant: (token) => broker.consume(token),
+      resolveRunContext: (runId) => runtime.resolveRunContext(runId),
+      stageTypedIntent: runtime.stageTypedIntent,
+      registerApprovalWait: async (run, input, signal, registrationFence) => {
+        const result = await coordinator.register(run, input, signal, registrationFence);
+        registrationReturned.resolve();
+        await responseGate.promise;
+        return result;
+      },
+      verifyPeer: async () => true,
+      requestTimeoutMs: 1_000,
+    });
+    await waitForListening(host);
+    const socket = createConnection(socketPath);
+    socket.on('error', () => {});
+    try {
+      await new Promise<void>((resolve) => {
+        socket.once('connect', () => {
+          socket.end(JSON.stringify({
+            token: grant.token,
+            provider: 'overseer',
+            intent: validProvisioningIntent(),
+          }) + '\n');
+          resolve();
+        });
+      });
+      await registrationReturned.promise;
+      const closed = new Promise<void>((resolve) => socket.once('close', () => resolve()));
+      socket.destroy();
+      await closed;
+      responseGate.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(waits).toHaveLength(1);
+      expect(waits[0].state).toBe('pending');
+      expect(session.lifecycle).toBe('paused');
+      expect(session.waitingApproval).toMatchObject({ waitId: 'wait-post-fence-close', state: 'pending' });
+    } finally {
+      responseGate.resolve();
       socket.destroy();
       await closeServer(host);
     }

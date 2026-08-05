@@ -251,6 +251,9 @@ function intentMatchesRun(intent: ApprovalTypedIntent, run: ApprovalSessionCapab
 }
 
 function publicResult(result: RegisterApprovalWaitResult): ApprovalWorkflowResponse {
+  if (result?.ok === false && result.code === 'persistence-indeterminate') {
+    return { ok: false, reason: 'persistence_indeterminate' };
+  }
   if (
     !result
     || typeof result !== 'object'

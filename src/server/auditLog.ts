@@ -24,7 +24,20 @@ export function appendAudit(
   outcome: AuditEvent['outcome'],
   summary: string,
 ): AuditEvent {
-  const event: AuditEvent = {
+  const event = createAuditEvent(log, user, action, resource, outcome, summary);
+  log.events.push(event);
+  return event;
+}
+
+export function createAuditEvent(
+  log: AuditLog,
+  user: UserProfile,
+  action: AuditEvent['action'],
+  resource: string,
+  outcome: AuditEvent['outcome'],
+  summary: string,
+): AuditEvent {
+  return {
     id: `audit-${log.events.length + 1}`,
     at: new Date().toISOString(),
     actorId: user.id,
@@ -33,8 +46,6 @@ export function appendAudit(
     outcome,
     summary: redactAuditSummary(summary),
   };
-  log.events.push(event);
-  return event;
 }
 
 export function redactAuditSummary(summary: string): string {

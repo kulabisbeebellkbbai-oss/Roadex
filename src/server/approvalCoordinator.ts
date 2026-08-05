@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import type { AuditEvent, RoadexSession } from '../shared/sessionContracts.js';
+import type { AuditEvent, RoadexSession, StreamEvent } from '../shared/sessionContracts.js';
 import {
   type ApprovalWaitRecord,
   type ApprovalWaitState,
@@ -33,8 +33,21 @@ export type RegisterApprovalWaitResult =
     }
   | {
       ok: false;
-      code: 'active-wait-exists' | 'approval-not-pending' | 'provider-unavailable' | 'scope-mismatch';
+      code: 'active-wait-exists'
+        | 'approval-not-pending'
+        | 'persistence-indeterminate'
+        | 'provider-unavailable'
+        | 'scope-mismatch';
     };
+
+export type RegistrationCommitResult =
+  | {
+      outcome: 'committed';
+      streamEvent: StreamEvent;
+      auditEvent: AuditEvent;
+    }
+  | { outcome: 'not-committed' }
+  | { outcome: 'indeterminate' };
 
 export type ApprovalContinuationDispatchResult =
   | { status: 'started'; runnerRunId: string }
@@ -55,6 +68,11 @@ export type ApprovalCoordinatorStateClock = {
 
 export type ApprovalCoordinatorCallbacks = {
   persist: () => void | Promise<void>;
+  registrationCommit?: (
+    session: RoadexSession,
+    wait: ApprovalWaitRecord,
+  ) => RegistrationCommitResult;
+  publishCommittedRegistration?: (streamEvent: StreamEvent, auditEvent: AuditEvent) => void;
   publish: (sessionId: string, message: string) => void;
   audit: (action: AuditEvent['action'], outcome: AuditEvent['outcome'], summary: string, resource: string) => void;
   queueContinuation: (wait: ApprovalWaitRecord, prompt: string) => Promise<ApprovalContinuationDispatchResult>;
@@ -532,27 +550,36 @@ export class ApprovalCoordinator {
         this.#waits.push(record);
         this.projectSessionForWait(session);
 
-        const persisted = await this.#persistWaitTransition(
-          session,
-          sessionBefore,
-          record,
-          waitBefore,
-          () => {
-            this.projectSessionForWait(session);
-          },
-          () => {
-            this.#publish(session.id, this.#waitingCopy(record));
-            this.#audit('approval_wait.register', 'allowed', this.#auditSummary(record), record.sessionId);
-          },
-          signal,
-          registrationFence,
-        );
-        if (!persisted) {
+        if (cancelled() || !registrationFence.tryCommit()) {
+          this.restoreSession(session, sessionBefore);
+          this.restoreWait(record, waitBefore);
           const inserted = this.#waits.indexOf(record);
-          if (inserted >= 0) {
-            this.#waits.splice(inserted, 1);
-          }
+          if (inserted >= 0) this.#waits.splice(inserted, 1);
           return { ok: false, code: 'provider-unavailable' } as const;
+        }
+
+        let commit: RegistrationCommitResult;
+        try {
+          commit = this.#callbacks.registrationCommit?.(session, record) ?? { outcome: 'not-committed' };
+        } catch {
+          commit = { outcome: 'indeterminate' };
+        }
+        if (commit.outcome === 'not-committed') {
+          this.restoreSession(session, sessionBefore);
+          this.restoreWait(record, waitBefore);
+          const inserted = this.#waits.indexOf(record);
+          if (inserted >= 0) this.#waits.splice(inserted, 1);
+          return { ok: false, code: 'provider-unavailable' } as const;
+        }
+        if (commit.outcome === 'indeterminate') {
+          this.#quarantineRegistration(session, record);
+          return { ok: false, code: 'persistence-indeterminate' } as const;
+        }
+
+        try {
+          this.#callbacks.publishCommittedRegistration?.(commit.streamEvent, commit.auditEvent);
+        } catch {
+          // Durable registration is canonical; subscriber delivery cannot roll it back.
         }
 
         return {
@@ -1626,6 +1653,24 @@ export class ApprovalCoordinator {
     this.#audit('approval_wait.reconciliation_required', 'denied', this.#auditSummary(summaryWait), session.id);
   }
 
+  #quarantineRegistration(session: RoadexSession, wait: ApprovalWaitRecord): void {
+    const now = this.#clock.now();
+    wait.state = 'resume-reconciliation-required';
+    wait.updatedAt = now;
+    wait.nextCheckAt = now;
+    delete wait.runnerRunId;
+    delete wait.dispatchReservedAt;
+    session.lifecycle = 'blocked';
+    session.waitingApproval = {
+      waitId: wait.id,
+      approvalRef: wait.approvalRef,
+      subject: wait.subject,
+      consoleSurface: wait.consoleSurface,
+      state: 'resume-reconciliation-required',
+      updatedAt: now,
+    };
+  }
+
   async #persistWaitTransition(
     session: RoadexSession,
     sessionBefore: SessionSnapshot,
@@ -1633,52 +1678,13 @@ export class ApprovalCoordinator {
     waitBefore: ApprovalWaitRecord,
     transition: () => void | Promise<void>,
     publish: () => void | Promise<void> = () => {},
-    signal?: AbortSignal,
-    registrationFence?: ApprovalRegistrationCommitFence,
   ): Promise<boolean> {
-    const cancelled = (): boolean => signal?.aborted === true;
-    const cancelledBeforeCommit = (): boolean => cancelled() && !registrationFence?.isCommitted();
-    if (cancelledBeforeCommit()) {
-      return false;
-    }
-
     try {
       await Promise.resolve(transition());
-      if (cancelledBeforeCommit()) {
-        this.restoreSession(session, sessionBefore);
-        this.restoreWait(wait, waitBefore);
-        return false;
-      }
-      if (registrationFence && !registrationFence.tryCommit()) {
-        this.restoreSession(session, sessionBefore);
-        this.restoreWait(wait, waitBefore);
-        return false;
-      }
       await Promise.resolve(this.#callbacks.persist());
-      if (!registrationFence?.isCommitted() && cancelled()) {
-        this.restoreSession(session, sessionBefore);
-        this.restoreWait(wait, waitBefore);
-        try {
-          await Promise.resolve(this.#callbacks.persist());
-        } catch {
-          return false;
-        }
-        return false;
-      }
     } catch {
       this.restoreSession(session, sessionBefore);
       this.restoreWait(wait, waitBefore);
-      return false;
-    }
-
-    if (!registrationFence?.isCommitted() && cancelled()) {
-      this.restoreSession(session, sessionBefore);
-      this.restoreWait(wait, waitBefore);
-      try {
-        await Promise.resolve(this.#callbacks.persist());
-      } catch {
-        return false;
-      }
       return false;
     }
 
@@ -1686,17 +1692,6 @@ export class ApprovalCoordinator {
       await Promise.resolve(publish());
     } catch {
       // Persisted state is canonical; callback exceptions must not roll back memory.
-    }
-
-    if (!registrationFence?.isCommitted() && cancelled()) {
-      this.restoreSession(session, sessionBefore);
-      this.restoreWait(wait, waitBefore);
-      try {
-        await Promise.resolve(this.#callbacks.persist());
-      } catch {
-        return false;
-      }
-      return false;
     }
 
     return true;
