@@ -273,9 +273,11 @@ function syncJsonPersistenceDirectory(
 ): void {
   let directory: number | undefined;
   let failure: unknown;
+  let directorySyncCompleted = false;
   try {
     directory = operations.openDirectory(directoryPath);
     operations.syncDirectory(directory);
+    directorySyncCompleted = true;
   } catch (error) {
     failure = error;
   } finally {
@@ -287,7 +289,10 @@ function syncJsonPersistenceDirectory(
       }
     }
   }
-  if (failure !== undefined) throw new JsonPersistenceDurabilityError(failure);
+  if (failure !== undefined) {
+    if (directorySyncCompleted) throw failure;
+    throw new JsonPersistenceDurabilityError(failure);
+  }
 }
 
 export function serializeState(state: Partial<PersistedRoadexState>, options: RetentionOptions = {}): PersistedRoadexState {

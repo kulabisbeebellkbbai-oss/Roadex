@@ -363,6 +363,70 @@ describe('state persistence', () => {
     expect(durable.load().approvalWaits).toEqual([wait]);
   });
 
+  it('reconciles an exact registration as committed after directory fsync and close failure', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'roadex-state-directory-close-'));
+    const path = join(dir, 'state.json');
+    let directoryCloseCalls = 0;
+    const operations: JsonFilePersistenceOperations = {
+      openFile: (filePath, flags, mode) => openSync(filePath, flags, mode),
+      writeFile: (fd, contents) => writeFileSync(fd, contents, { encoding: 'utf8' }),
+      syncFile: fsyncSync,
+      closeFile: closeSync,
+      rename: renameSync,
+      openDirectory: () => 0,
+      syncDirectory: () => {},
+      closeDirectory: () => {
+        directoryCloseCalls += 1;
+        throw new Error('directory-close-failed');
+      },
+      unlink: unlinkSync,
+    };
+    const durable = createJsonFilePersistence(path, operations);
+    const session = sessionFixture('directory-close-session', 'paused', new Date(0).toISOString());
+    const wait = approvalWaitFixture({ sessionId: session.id, id: 'directory-close-wait' });
+    session.waitingApproval = {
+      waitId: wait.id,
+      approvalRef: wait.approvalRef,
+      subject: wait.subject,
+      consoleSurface: wait.consoleSurface,
+      state: wait.state,
+      updatedAt: wait.updatedAt,
+    };
+    const stream = streamEvent('directory-close-stream', session.id);
+    const audit = {
+      id: 'directory-close-audit',
+      at: new Date(0).toISOString(),
+      actorId: 'roadex-approval-coordinator',
+      action: 'approval_wait.register' as const,
+      resource: session.id,
+      outcome: 'allowed' as const,
+      summary: `wait=${wait.id};state=${wait.state};console=${wait.consoleSurface}`,
+    };
+    const snapshot = serializeState({ sessions: [session], approvalWaits: [wait], streamEvents: [stream], auditEvents: [audit] });
+    const persistence: StatePersistence = {
+      load: durable.load,
+      readAuthoritative: durable.readAuthoritative,
+      save: durable.save,
+    };
+
+    let saveError: unknown;
+    try {
+      durable.save(snapshot);
+    } catch (error) {
+      saveError = error;
+    }
+
+    expect(saveError).toMatchObject({ message: 'directory-close-failed' });
+    expect(directoryCloseCalls).toBe(1);
+    expect(commitAuthoritativeRegistration(persistence, snapshot, {
+      wait,
+      session: { id: session.id, lifecycle: session.lifecycle, waitingApproval: session.waitingApproval },
+      streamEvent: stream,
+      auditEvent: audit,
+    })).toBe('committed');
+    expect(durable.readAuthoritative?.().outcome).toBe('valid');
+  });
+
   it('strictly reconciles a durable registration when save throws after the atomic rename', () => {
     const dir = mkdtempSync(join(tmpdir(), 'roadex-registration-commit-'));
     const durable = createJsonFilePersistence(join(dir, 'state.json'));
