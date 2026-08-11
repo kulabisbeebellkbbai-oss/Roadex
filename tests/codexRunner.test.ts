@@ -40,6 +40,7 @@ describe('createCodexRunner', () => {
     expect(buildCodexExecArgs('/tmp/workspace', 'hello')).toEqual([
       'exec',
       '--json',
+      '--skip-git-repo-check',
       '--sandbox',
       'workspace-write',
       '-C',
@@ -52,6 +53,7 @@ describe('createCodexRunner', () => {
     expect(buildCodexExecArgs('/tmp/workspace', 'hello again', 'thread-123')).toEqual([
       'exec',
       '--json',
+      '--skip-git-repo-check',
       '--sandbox',
       'workspace-write',
       '-C',
@@ -74,6 +76,7 @@ describe('createCodexRunner', () => {
     )).toEqual([
       'exec',
       '--json',
+      '--skip-git-repo-check',
       '--ignore-user-config',
       '--ignore-rules',
       '--config',

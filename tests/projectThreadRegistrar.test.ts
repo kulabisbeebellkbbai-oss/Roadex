@@ -27,7 +27,13 @@ describe('controlled project thread finalizer', () => {
 
   it('uses the controlled profile, ignores user config and rules, and accepts no browser prompt', () => {
     const args = controlledBootstrapArgs('/tmp/approved-project');
-    expect(args.slice(0, 4)).toEqual(['exec', '--json', '--ignore-user-config', '--ignore-rules']);
+    expect(args.slice(0, 5)).toEqual([
+      'exec',
+      '--json',
+      '--skip-git-repo-check',
+      '--ignore-user-config',
+      '--ignore-rules',
+    ]);
     expect(args).toContain('sandbox_workspace_write.network_access=false');
     expect(args).toContain('mcp_servers.the-a-team.required=true');
     expect(args).toContain('mcp_servers.skiller.required=true');

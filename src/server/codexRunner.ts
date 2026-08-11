@@ -327,6 +327,9 @@ export function buildCodexExecArgs(
   const base = [
     'exec',
     '--json',
+    // A Roadex-managed project is intentionally usable during its planning
+    // phase, before the approved bootstrap workflow creates its Git repository.
+    '--skip-git-repo-check',
     ...(capabilityProfile.mode === 'controlled-project-manager'
       ? [
           '--ignore-user-config',
