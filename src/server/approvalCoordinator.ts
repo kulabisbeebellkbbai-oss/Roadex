@@ -622,7 +622,6 @@ export class ApprovalCoordinator {
       }
       wait.updatedAt = now;
       wait.nextCheckAt = now;
-      delete wait.runnerRunId;
       delete wait.dispatchReservedAt;
 
       const persisted = await this.#persistWaitTransition(

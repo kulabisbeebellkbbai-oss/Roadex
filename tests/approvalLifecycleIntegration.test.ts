@@ -488,6 +488,7 @@ describe('approval lifecycle integration', () => {
     run.resolve({ ok: true, events: [], exitCode: 0, codexThreadId: 'thread-1' });
     await eventually(() => wait.state === 'resumed');
 
+    expect(wait.runnerRunId).toBe('runner-approval-1');
     expect(revokeRun).toHaveBeenCalledTimes(1);
     expect(revokeRun).toHaveBeenCalledWith('runner-approval-1');
     expect(workflow.resolveRunContext('runner-approval-1')).toBeUndefined();
@@ -563,7 +564,7 @@ describe('approval lifecycle integration', () => {
     await eventually(() => wait.state === 'resumed');
 
     expect(persisted).toContain('resume-dispatching:runner-immediate-1');
-    expect(persisted.indexOf('resumed:none')).toBeGreaterThan(
+    expect(persisted.indexOf('resumed:runner-immediate-1')).toBeGreaterThan(
       persisted.indexOf('resume-dispatching:runner-immediate-1'),
     );
     expect(revokeRun).toHaveBeenCalledExactlyOnceWith('runner-immediate-1');
