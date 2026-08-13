@@ -79,6 +79,7 @@ const APPROVAL_PROJECTION_REQUIRED_KEYS = [
   'updatedAt',
 ];
 const APPROVAL_PROJECTION_REQUIRED_KEY_SET = new Set(APPROVAL_PROJECTION_REQUIRED_KEYS);
+const APPROVAL_PROJECTION_OPTIONAL_KEYS = ['policyException'] as const;
 const SHA256_HEX_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const ISO8601_WITH_TZ_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|([+-])(\d{2}):(\d{2}))$/;
@@ -162,6 +163,7 @@ export function createOverseerApprovalStatusProvider(options: OverseerProviderOp
         resourceRef: projection.resourceRef,
         subject: projection.subject,
         updatedAt: projection.updatedAt,
+        ...(projection.policyException ? { policyException: projection.policyException } : {}),
       };
     },
   };
@@ -360,7 +362,7 @@ function parseRoadexApprovalStatusProjection(value: unknown): RoadexApprovalStat
   }
 
   const keys = Reflect.ownKeys(value);
-  if (keys.length !== APPROVAL_PROJECTION_REQUIRED_KEYS.length) {
+  if (keys.length < APPROVAL_PROJECTION_REQUIRED_KEYS.length || keys.length > APPROVAL_PROJECTION_REQUIRED_KEYS.length + APPROVAL_PROJECTION_OPTIONAL_KEYS.length) {
     throw new Error('Approval status has unexpected shape.');
   }
 
@@ -368,7 +370,7 @@ function parseRoadexApprovalStatusProjection(value: unknown): RoadexApprovalStat
     if (typeof key !== 'string') {
       throw new Error('Approval status has non-string keys.');
     }
-    if (!APPROVAL_PROJECTION_REQUIRED_KEY_SET.has(key)) {
+    if (!APPROVAL_PROJECTION_REQUIRED_KEY_SET.has(key) && !APPROVAL_PROJECTION_OPTIONAL_KEYS.includes(key as typeof APPROVAL_PROJECTION_OPTIONAL_KEYS[number])) {
       throw new Error('Approval status has unexpected field.');
     }
   }
@@ -387,6 +389,13 @@ function parseRoadexApprovalStatusProjection(value: unknown): RoadexApprovalStat
     }
     values[key] = descriptor.value;
   }
+  if (Object.prototype.hasOwnProperty.call(value, 'policyException')) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, 'policyException');
+    if (!descriptor || descriptor.enumerable === false || descriptor.get !== undefined || descriptor.set !== undefined || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      throw new Error('Approval status has non-enumerable field.');
+    }
+    values.policyException = descriptor.value;
+  }
 
   const candidate = values;
   const sourceKind = parseSourceKind(candidate.sourceKind);
@@ -400,6 +409,9 @@ function parseRoadexApprovalStatusProjection(value: unknown): RoadexApprovalStat
   const scopeDigest = parseSha256Digest(candidate.scopeDigest);
   const decisionVersion = parseSha256Digest(candidate.decisionVersion);
   const updatedAt = parseOpaqueString(candidate.updatedAt, MAX_TEXT_FIELD_LENGTH);
+  const policyException = Object.hasOwn(candidate, 'policyException')
+    ? parseRoadexPolicyExceptionProjection(candidate.policyException)
+    : undefined;
 
   if (!isValidIso(updatedAt)) {
     throw new Error('Approval status has invalid values.');
@@ -417,6 +429,7 @@ function parseRoadexApprovalStatusProjection(value: unknown): RoadexApprovalStat
     decision,
     decisionVersion,
     updatedAt,
+    ...(policyException ? { policyException } : {}),
   } as RoadexApprovalStatusProjection;
 }
 

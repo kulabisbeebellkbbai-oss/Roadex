@@ -7,6 +7,8 @@ import {
   isActiveApprovalWait,
   type ApprovalWaitState,
   consoleForAuthority,
+  parsePsychloPolicyExceptionFixture,
+  type PsychloPolicyExceptionFixture,
 } from '../shared/approvalWorkflowContracts.js';
 import type {
   DeviceArtifactMetadata,
@@ -569,6 +571,15 @@ function sanitizeApprovalWait(record: unknown): ApprovalWaitRecord | undefined {
     ? candidate.resumedAt
     : undefined;
   const hasSuccessorOfWaitId = Object.hasOwn(candidate, 'successorOfWaitId');
+  const hasPolicyException = Object.hasOwn(candidate, 'policyException');
+  let policyException: PsychloPolicyExceptionFixture | undefined;
+  if (hasPolicyException) {
+    try {
+      policyException = parsePsychloPolicyExceptionFixture(candidate.policyException);
+    } catch {
+      return undefined;
+    }
+  }
   const successorOfWaitId = hasSuccessorOfWaitId
     ? cleanCanonicalOpaqueString(candidate.successorOfWaitId, 128)
     : undefined;
@@ -630,6 +641,7 @@ function sanitizeApprovalWait(record: unknown): ApprovalWaitRecord | undefined {
     nextCheckAt: cleanOptionalIsoDate(candidate.nextCheckAt)!,
     createdAt: cleanOptionalIsoDate(candidate.createdAt)!,
     updatedAt: cleanOptionalIsoDate(candidate.updatedAt)!,
+    ...(policyException ? { policyException } : {}),
     ...(Object.hasOwn(candidate, 'decisionObservedAt') && decisionObservedAt
       ? { decisionObservedAt: cleanOptionalIsoDate(decisionObservedAt) }
       : {}),
@@ -692,6 +704,7 @@ const APPROVAL_WAIT_ALLOWED_KEYS = new Set([
   'runnerRunId',
   'successorOfWaitId',
   'resumedAt',
+  'policyException',
 ]);
 
 const APPROVAL_WAIT_REQUIRED_KEY_LIST = [...APPROVAL_WAIT_REQUIRED_KEYS];

@@ -83,7 +83,7 @@ async function expectFailureCode<T>(promise: Promise<T>, code: string): Promise<
 describe('createOverseerApprovalStatusProvider', () => {
   it('parses and projects the exact frozen Psychlo policy exception fixture as display-only data', () => {
     const fixture = JSON.parse(readFileSync(
-      '/home/god/Documents/Codex Workspace/Overseer/.worktrees/psychlo-v1-1-counterpart/tests/fixtures/psychlo-v1-1-policy-exception.json',
+      'tests/fixtures/psychlo-v1-1-policy-exception.json',
       'utf8',
     ));
     const parsed = parseRoadexPolicyExceptionProjection(fixture);
@@ -100,7 +100,7 @@ describe('createOverseerApprovalStatusProvider', () => {
 
   it('does not accept unsafe authority links in a policy exception projection', () => {
     const fixture = JSON.parse(readFileSync(
-      '/home/god/Documents/Codex Workspace/Overseer/.worktrees/psychlo-v1-1-counterpart/tests/fixtures/psychlo-v1-1-policy-exception.json',
+      'tests/fixtures/psychlo-v1-1-policy-exception.json',
       'utf8',
     ));
     expect(() => parseRoadexPolicyExceptionProjection({
@@ -132,6 +132,15 @@ describe('createOverseerApprovalStatusProvider', () => {
       subject: 'Restart test service',
       updatedAt: '2026-08-02T18:00:00+00:00',
     });
+  });
+
+  it('admits a policy exception only through the scoped status workflow and returns it privately', async () => {
+    const fixture = JSON.parse(readFileSync('tests/fixtures/psychlo-v1-1-policy-exception.json', 'utf8'));
+    const fetchJson = vi.fn(async () => ({ ...buildProjection({ authorityClass: 'project-workflow' }), policyException: fixture }));
+    const provider = createOverseerApprovalStatusProvider({ readToken: () => token, fetchJson });
+    const status = await provider.getStatus(approvalRef, validScope);
+    expect(status.policyException?.request.digest).toBe(fixture.request.digest);
+    expect(status.policyException?.outcome?.outcomeDigest).toBe(fixture.outcome.outcomeDigest);
   });
 
   it('returns every exact approval decision', async () => {

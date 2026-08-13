@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
   type ApprovalContinuationDispatchResult,
@@ -10,6 +11,7 @@ import {
 } from '../src/server/approvalCoordinator.js';
 import { buildApprovalContinuation } from '../src/server/approvalContinuation.js';
 import type { ApprovalWaitRecord, NormalizedApprovalStatus, WaitingApprovalSummary } from '../src/shared/approvalWorkflowContracts.js';
+import { parsePsychloPolicyExceptionFixture } from '../src/shared/approvalWorkflowContracts.js';
 import type { AuditEvent, RoadexSession } from '../src/shared/sessionContracts.js';
 import type { ApprovalStatusProvider } from '../src/server/approvalStatusProvider.js';
 
@@ -211,6 +213,41 @@ function deriveSuccessorContinuationId(
 }
 
 describe('ApprovalCoordinator', () => {
+  it('admits the real provider policy exception, persists it privately, and replays only bounded display fields after restart', async () => {
+    const policyException = parsePsychloPolicyExceptionFixture(JSON.parse(readFileSync(
+      'tests/fixtures/psychlo-v1-1-policy-exception.json',
+      'utf8',
+    )));
+    const clock = clockWithState(new Date('2026-08-12T18:00:00.000Z').getTime());
+    const sessions = [fixtureSession()];
+    const waits: ApprovalWaitRecord[] = [];
+    const status = fixtureStatus({ authorityClass: 'project-workflow', policyException });
+    const coordinator = new ApprovalCoordinator(waits, sessions, statusSequenceProvider([status]), callbacksBuilder().callbacks, {
+      clock, idSource: { generateWaitId: () => 'wait-policy' },
+    });
+    const result = await coordinator.register(fixtureCapability(), { provider: 'overseer', approvalRef: status.approvalRef });
+    expect(result).toMatchObject({ ok: true });
+    expect(sessions[0].waitingApproval?.policyException).toEqual({
+      exceptionId: 'exception-enforce-safety-reserve', ruleId: 'enforce-safety-reserve', priorPolicyRevision: 4,
+      requestedValue: false, expiresAt: '2026-08-13T00:00:00.000Z', status: 'approved', authorityClass: 'project-workflow',
+      consoleSurface: 'overview', consolePath: '/Overseer/overview',
+    });
+    expect(sessions[0].waitingApproval?.policyException).not.toHaveProperty('requestDigest');
+    expect(waits[0].policyException?.request.digest).toBe('c01fdef45590e31a57d9974e7a20a58924f691ebd9b2ac9a2d3277d04f49587a');
+
+    const restartedSessions = JSON.parse(JSON.stringify(sessions)) as RoadexSession[];
+    const restartedWaits = JSON.parse(JSON.stringify(waits)) as ApprovalWaitRecord[];
+    const restarted = new ApprovalCoordinator(restartedWaits, restartedSessions, statusSequenceProvider([status]), callbacksBuilder().callbacks, { clock });
+    expect(restartedSessions[0].waitingApproval?.policyException).toEqual(sessions[0].waitingApproval?.policyException);
+    expect(restartedWaits[0].policyException).toEqual(waits[0].policyException);
+    expect(restartedSessions[0].waitingApproval?.policyException).not.toHaveProperty('scopeDigest');
+    status.policyException = { ...status.policyException!, request: { ...status.policyException!.request, reason: 'conflicting replay' } };
+    clock.set(new Date('2026-08-12T18:00:03.000Z').getTime());
+    await restarted.tick();
+    expect(restartedWaits[0].state).toBe('security-failure');
+    void restarted;
+  });
+
   it('registers a pending approval and pauses the session with full wait result', async () => {
     const clock = clockWithState();
     const sessions = [fixtureSession()];

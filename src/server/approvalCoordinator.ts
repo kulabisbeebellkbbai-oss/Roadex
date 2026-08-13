@@ -6,6 +6,8 @@ import {
   type NormalizedApprovalStatus,
   type ApprovalConsoleSurface,
   type WaitingApprovalSummary,
+  type PsychloPolicyExceptionFixture,
+  projectPsychloPolicyException,
   consoleForAuthority,
 } from '../shared/approvalWorkflowContracts.js';
 import type { ApprovalStatusProvider } from './approvalStatusProvider.js';
@@ -337,7 +339,11 @@ export class ApprovalCoordinator {
     }
 
     for (const key of Object.keys(expected)) {
-      if (waiting[key as keyof WaitingApprovalSummary] !== expected[key as keyof WaitingApprovalSummary]) {
+      const actualValue = waiting[key as keyof WaitingApprovalSummary];
+      const expectedValue = expected[key as keyof WaitingApprovalSummary];
+      if (key === 'policyException'
+        ? JSON.stringify(actualValue) !== JSON.stringify(expectedValue)
+        : actualValue !== expectedValue) {
         return false;
       }
     }
@@ -404,6 +410,10 @@ export class ApprovalCoordinator {
         : { ok: false, code: 'approval-not-pending' };
     }
 
+    if (status.policyException !== undefined && status.authorityClass !== 'project-workflow') {
+      return { ok: false, code: 'scope-mismatch' };
+    }
+
     let consoleSurface: ApprovalConsoleSurface;
     try {
       consoleSurface = consoleForAuthority(status.authorityClass);
@@ -465,6 +475,7 @@ export class ApprovalCoordinator {
           nextCheckAt: this.nextCheckAt(now, 1),
           createdAt: now,
           updatedAt: now,
+          ...(status.policyException ? { policyException: clonePolicyException(status.policyException) } : {}),
         };
 
         const sessionBefore = this.snapshotSession(session);
@@ -504,6 +515,9 @@ export class ApprovalCoordinator {
             approvalRef: record.approvalRef,
             subject: record.subject,
             updatedAt: record.updatedAt,
+            ...(record.policyException
+              ? { policyException: projectPsychloPolicyException(record.policyException, new Date(this.#clock.now())) }
+              : {}),
           },
         } satisfies RegisterApprovalWaitResult;
       });
@@ -876,6 +890,7 @@ export class ApprovalCoordinator {
           nextCheckAt: status.decision === 'approved' ? now : this.nextCheckAt(now, 1),
           createdAt: now,
           updatedAt: now,
+          ...(status.policyException ? { policyException: clonePolicyException(status.policyException) } : {}),
           ...(status.decision === 'approved' ? { decisionObservedAt: now } : {}),
         };
         const sessionBefore = this.snapshotSession(session);
@@ -1018,6 +1033,21 @@ export class ApprovalCoordinator {
           : deriveContinuationId(wait.sessionId, wait.approvalRef, status.decisionVersion);
       }
       wait.subject = status.subject;
+      if (!this.#policyExceptionMatches(wait.policyException, status.policyException)) {
+        wait.state = 'security-failure';
+        wait.nextCheckAt = now;
+        delete wait.dispatchReservedAt;
+        delete wait.runnerRunId;
+        await this.#persistWaitTransition(
+          session,
+          sessionBefore,
+          wait,
+          waitBefore,
+          () => this.projectSessionForWait(session),
+          () => this.#publish(wait.sessionId, this.#terminalCopy('security-failure')),
+        );
+        return;
+      }
       wait.updatedAt = now;
 
       if (status.decision === 'pending') {
@@ -1728,6 +1758,13 @@ export class ApprovalCoordinator {
     return false;
   }
 
+  #policyExceptionMatches(
+    current: PsychloPolicyExceptionFixture | undefined,
+    incoming: PsychloPolicyExceptionFixture | undefined,
+  ): boolean {
+    return JSON.stringify(current) === JSON.stringify(incoming);
+  }
+
   #isFieldValid(value: string, maxLength = MAX_FIELD_LENGTH): boolean {
     if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) {
       return false;
@@ -1949,6 +1986,7 @@ export class ApprovalCoordinator {
       consoleSurface: wait.consoleSurface,
       state: wait.state as PublicWaitState,
       updatedAt: wait.updatedAt,
+      ...(wait.policyException ? { policyException: projectPsychloPolicyException(wait.policyException, new Date(this.#clock.now())) } : {}),
     };
   }
 
@@ -2001,6 +2039,10 @@ function isAllowedLifecycleForRegistration(lifecycle: RoadexSession['lifecycle']
 function deriveContinuationId(sessionId: string, approvalRef: string, decisionVersion: string): string {
   const canonical = JSON.stringify([sessionId, approvalRef, decisionVersion]);
   return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
+}
+
+function clonePolicyException(value: PsychloPolicyExceptionFixture): PsychloPolicyExceptionFixture {
+  return JSON.parse(JSON.stringify(value)) as PsychloPolicyExceptionFixture;
 }
 
 function deriveSuccessorContinuationId(

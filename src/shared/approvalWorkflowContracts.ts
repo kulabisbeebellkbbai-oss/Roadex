@@ -13,13 +13,44 @@ export const PSYCHLO_USAGE_SNAPSHOT_SCHEMA = 'psychlo.usage-snapshot.v1.1' as co
 
 export type PsychloPolicyExceptionStatus = 'pending' | 'approved' | 'rejected' | 'expired';
 
+export type PsychloPolicyRuleId =
+  | 'reset-daily-at-provider-reset'
+  | 'count-other-development'
+  | 'enforce-provider-quota'
+  | 'enforce-safety-reserve'
+  | 'respect-blackouts'
+  | 'carry-unused-daily-allowance'
+  | 'pause-after-failures'
+  | 'require-manual-resume'
+  | 'enforce-project-share';
+
+export type PsychloProposedPolicy = {
+  schemaVersion: 'psychlo.policy.v1';
+  id: string;
+  revision: number;
+  dailyQuotaPercent: number;
+  safetyReservePercent: number;
+  projectShares: Record<string, number>;
+  failurePauseThreshold: number;
+  rules: Record<PsychloPolicyRuleId, boolean>;
+  operatingEnvelope: { maxDailyQuotaPercent: number; minSafetyReservePercent: number };
+  actorId: string;
+  correlationId: string;
+  idempotencyKey: string;
+  occurredAt: string;
+  digest: string;
+};
+
+export type PsychloPolicyExceptionForm =
+  | { requestedValue: boolean | number; basePolicyDigest?: never; proposedPolicy?: never }
+  | { requestedValue?: never; basePolicyDigest: string; proposedPolicy: PsychloProposedPolicy };
+
 export type PsychloPolicyExceptionRequest = {
   schemaVersion: typeof PSYCHLO_POLICY_EXCEPTION_REQUEST_SCHEMA;
   id: string;
-  requestedRuleId: 'enforce-safety-reserve';
+  requestedRuleId: PsychloPolicyRuleId;
   policyRevision: number;
   actorId: string;
-  requestedValue: boolean | number;
   reason: string;
   activatedAt: string;
   expiresAt: string;
@@ -29,7 +60,7 @@ export type PsychloPolicyExceptionRequest = {
   scopeDigest: string;
   decisionVersion: string;
   digest: string;
-};
+} & PsychloPolicyExceptionForm;
 
 export type PsychloPolicyExceptionOutcome = {
   schemaVersion: typeof PSYCHLO_POLICY_EXCEPTION_OUTCOME_SCHEMA;
@@ -37,8 +68,7 @@ export type PsychloPolicyExceptionOutcome = {
   status: 'approved' | 'rejected';
   exceptionId: string;
   policyRevision: number;
-  ruleId: 'enforce-safety-reserve';
-  requestedValue: boolean | number;
+  ruleId: PsychloPolicyRuleId;
   requestDigest: string;
   decisionId: string;
   decisionDigest: string;
@@ -51,7 +81,7 @@ export type PsychloPolicyExceptionOutcome = {
   outcomeDigest: string;
   reason?: string;
   basePolicyDigest?: string;
-};
+} & PsychloPolicyExceptionForm;
 
 export type PsychloUsageSnapshot = {
   schemaVersion: typeof PSYCHLO_USAGE_SNAPSHOT_SCHEMA;
@@ -86,18 +116,14 @@ export type PsychloPolicyExceptionFixture = {
 
 export type RoadexPolicyExceptionDisplay = {
   exceptionId: string;
-  ruleId: 'enforce-safety-reserve';
+  ruleId: PsychloPolicyRuleId;
   priorPolicyRevision: number;
-  requestedValue: boolean | number;
+  requestedValue?: boolean | number;
   expiresAt: string;
   status: PsychloPolicyExceptionStatus;
   authorityClass: 'project-workflow';
   consoleSurface: 'overview';
   consolePath: '/Overseer/overview';
-  requestDigest: string;
-  outcomeDigest?: string;
-  scopeDigest: string;
-  decisionVersion: string;
 };
 
 export type ApprovalWaitState =
@@ -125,6 +151,7 @@ export type NormalizedApprovalStatus = {
   resourceRef: string;
   subject: string;
   updatedAt: string;
+  policyException?: PsychloPolicyExceptionFixture;
 };
 
 export type RoadexApprovalStatusProjection = {
@@ -139,6 +166,7 @@ export type RoadexApprovalStatusProjection = {
   decision: ApprovalDecision;
   decisionVersion: string;
   updatedAt: string;
+  policyException?: PsychloPolicyExceptionFixture;
 };
 
 export type ApprovalWaitRecord = {
@@ -162,6 +190,7 @@ export type ApprovalWaitRecord = {
   nextCheckAt: string;
   createdAt: string;
   updatedAt: string;
+  policyException?: PsychloPolicyExceptionFixture;
   decisionObservedAt?: string;
   dispatchReservedAt?: string;
   runnerRunId?: string;
@@ -202,7 +231,11 @@ export function isActiveApprovalWait(value: ApprovalWaitState): boolean {
   return ACTIVE_APPROVAL_WAIT_STATES.has(value);
 }
 
-const POLICY_EXCEPTION_RULE = 'enforce-safety-reserve' as const;
+const POLICY_EXCEPTION_RULES: readonly PsychloPolicyRuleId[] = [
+  'reset-daily-at-provider-reset', 'count-other-development', 'enforce-provider-quota',
+  'enforce-safety-reserve', 'respect-blackouts', 'carry-unused-daily-allowance',
+  'pause-after-failures', 'require-manual-resume', 'enforce-project-share',
+];
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 const ISO8601_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|([+-])(\d{2}):(\d{2}))$/;
 
@@ -218,7 +251,7 @@ export function parsePsychloPolicyExceptionFixture(value: unknown): PsychloPolic
       [outcome.policyRevision, request.policyRevision],
       [outcome.ruleId, request.requestedRuleId],
       [outcome.requestDigest, request.digest],
-      [outcome.requestedValue, request.requestedValue],
+      ...(hasOwn(request, 'requestedValue') ? [[outcome.requestedValue, request.requestedValue]] : []),
       [outcome.actorId, request.actorId],
       [outcome.correlationId, request.correlationId],
       [outcome.idempotencyKey, request.idempotencyKey],
@@ -227,6 +260,7 @@ export function parsePsychloPolicyExceptionFixture(value: unknown): PsychloPolic
     ]) {
       if (left !== right) throw new Error('Policy exception outcome is not bound to the request.');
     }
+    if (!sameExceptionForm(request, outcome)) throw new Error('Policy exception outcome form is not bound to the request.');
   }
   if (usageSnapshot.snapshot.scopeDigest !== request.scopeDigest || usageSnapshot.snapshot.decisionVersion !== request.decisionVersion) {
     throw new Error('Policy exception usage snapshot is not bound to the request.');
@@ -246,35 +280,36 @@ export function projectPsychloPolicyException(
     exceptionId: request.id,
     ruleId: request.requestedRuleId,
     priorPolicyRevision: request.policyRevision,
-    requestedValue: request.requestedValue,
+    ...(hasOwn(request, 'requestedValue') ? { requestedValue: request.requestedValue } : {}),
     expiresAt: request.expiresAt,
     status,
     authorityClass: 'project-workflow',
     consoleSurface: 'overview',
     consolePath: '/Overseer/overview',
-    requestDigest: request.digest,
-    ...(fixture.outcome ? { outcomeDigest: fixture.outcome.outcomeDigest } : {}),
-    scopeDigest: request.scopeDigest,
-    decisionVersion: request.decisionVersion,
   };
 }
 
 export function canonicalPsychloPolicyDigest(value: Record<string, unknown>): string {
-  return sha256Hex(canonicalJson(withoutDigest(value)));
+  const content = withoutDigest(value);
+  const requested = content.requestedValue;
+  if (typeof requested === 'number') {
+    if (!Number.isFinite(requested)) throw new Error('requestedValue must be finite.');
+    content.requestedValue = { $f64: f64Hex(requested) };
+  }
+  return sha256Hex(canonicalJson(content));
 }
 
 function parsePolicyExceptionRequest(value: unknown): PsychloPolicyExceptionRequest {
   const candidate = strictRecord(value, [
-    'schemaVersion', 'id', 'requestedRuleId', 'policyRevision', 'actorId', 'requestedValue', 'reason',
+    'schemaVersion', 'id', 'requestedRuleId', 'policyRevision', 'actorId', 'reason',
     'activatedAt', 'expiresAt', 'correlationId', 'idempotencyKey', 'occurredAt', 'scopeDigest', 'decisionVersion', 'digest',
-  ], 'policy exception request');
+  ], 'policy exception request', ['requestedValue', 'basePolicyDigest', 'proposedPolicy']);
   const request = {
     schemaVersion: exactLiteral(candidate.schemaVersion, PSYCHLO_POLICY_EXCEPTION_REQUEST_SCHEMA, 'schemaVersion'),
     id: safeText(candidate.id, 'id'),
-    requestedRuleId: exactLiteral(candidate.requestedRuleId, POLICY_EXCEPTION_RULE, 'requestedRuleId'),
+    requestedRuleId: enumLiteral(candidate.requestedRuleId, POLICY_EXCEPTION_RULES, 'requestedRuleId'),
     policyRevision: nonnegativeInt(candidate.policyRevision, 'policyRevision'),
     actorId: safeText(candidate.actorId, 'actorId'),
-    requestedValue: finiteValue(candidate.requestedValue, 'requestedValue'),
     reason: safeText(candidate.reason, 'reason', 512),
     activatedAt: timestamp(candidate.activatedAt, 'activatedAt'),
     expiresAt: timestamp(candidate.expiresAt, 'expiresAt'),
@@ -284,6 +319,7 @@ function parsePolicyExceptionRequest(value: unknown): PsychloPolicyExceptionRequ
     scopeDigest: digest(candidate.scopeDigest, 'scopeDigest'),
     decisionVersion: safeText(candidate.decisionVersion, 'decisionVersion'),
     digest: digest(candidate.digest, 'digest'),
+    ...parseExceptionForm(candidate, candidate.policyRevision as number, 'policy exception request'),
   } satisfies PsychloPolicyExceptionRequest;
   if (Date.parse(request.expiresAt) <= Date.parse(request.activatedAt)) throw new Error('Policy exception expiry is invalid.');
   if (canonicalPsychloPolicyDigest(request) !== request.digest) throw new Error('Policy exception request digest mismatch.');
@@ -292,17 +328,16 @@ function parsePolicyExceptionRequest(value: unknown): PsychloPolicyExceptionRequ
 
 function parsePolicyExceptionOutcome(value: unknown): PsychloPolicyExceptionOutcome {
   const candidate = strictRecord(value, [
-    'schemaVersion', 'sourceId', 'status', 'exceptionId', 'policyRevision', 'ruleId', 'requestedValue', 'requestDigest',
+    'schemaVersion', 'sourceId', 'status', 'exceptionId', 'policyRevision', 'ruleId', 'requestDigest',
     'decisionId', 'decisionDigest', 'actorId', 'correlationId', 'idempotencyKey', 'occurredAt', 'scopeDigest', 'decisionVersion', 'outcomeDigest',
-  ], 'policy exception outcome', ['reason', 'basePolicyDigest']);
+  ], 'policy exception outcome', ['reason', 'basePolicyDigest', 'proposedPolicy', 'requestedValue']);
   const outcome = {
     schemaVersion: exactLiteral(candidate.schemaVersion, PSYCHLO_POLICY_EXCEPTION_OUTCOME_SCHEMA, 'schemaVersion'),
     sourceId: exactLiteral(candidate.sourceId, 'overseer', 'sourceId'),
     status: enumLiteral(candidate.status, ['approved', 'rejected'] as const, 'status'),
     exceptionId: safeText(candidate.exceptionId, 'exceptionId'),
     policyRevision: nonnegativeInt(candidate.policyRevision, 'policyRevision'),
-    ruleId: exactLiteral(candidate.ruleId, POLICY_EXCEPTION_RULE, 'ruleId'),
-    requestedValue: finiteValue(candidate.requestedValue, 'requestedValue'),
+    ruleId: enumLiteral(candidate.ruleId, POLICY_EXCEPTION_RULES, 'ruleId'),
     requestDigest: digest(candidate.requestDigest, 'requestDigest'),
     decisionId: safeText(candidate.decisionId, 'decisionId'),
     decisionDigest: digest(candidate.decisionDigest, 'decisionDigest'),
@@ -314,25 +349,110 @@ function parsePolicyExceptionOutcome(value: unknown): PsychloPolicyExceptionOutc
     decisionVersion: safeText(candidate.decisionVersion, 'decisionVersion'),
     outcomeDigest: digest(candidate.outcomeDigest, 'outcomeDigest'),
     ...(candidate.reason === undefined ? {} : { reason: safeText(candidate.reason, 'reason', 512) }),
-    ...(candidate.basePolicyDigest === undefined ? {} : { basePolicyDigest: digest(candidate.basePolicyDigest, 'basePolicyDigest') }),
+    ...parseExceptionForm(candidate, candidate.policyRevision as number, 'policy exception outcome'),
   } satisfies PsychloPolicyExceptionOutcome;
   const { outcomeDigest } = outcome;
+  if (outcome.status === 'approved' && outcome.reason !== undefined) throw new Error('Approved policy exception outcome forbids reason.');
+  if (outcome.status === 'rejected' && outcome.reason === undefined) throw new Error('Rejected policy exception outcome requires reason.');
   const digestInput: Record<string, unknown> = {
     status: outcome.status,
     exceptionId: outcome.exceptionId,
     policyRevision: outcome.policyRevision,
     ruleId: outcome.ruleId,
-    requestedValue: outcome.requestedValue,
     requestDigest: outcome.requestDigest,
     decisionId: outcome.decisionId,
     decisionDigest: outcome.decisionDigest,
     scopeDigest: outcome.scopeDigest,
     decisionVersion: outcome.decisionVersion,
   };
+  if (hasOwn(outcome, 'requestedValue')) digestInput.requestedValue = (outcome as { requestedValue: boolean | number }).requestedValue;
+  if (hasOwn(outcome, 'basePolicyDigest')) {
+    digestInput.basePolicyDigest = outcome.basePolicyDigest;
+    digestInput.proposedPolicy = outcome.proposedPolicy;
+  }
   if (outcome.reason !== undefined) digestInput.reason = outcome.reason;
   if (outcome.basePolicyDigest !== undefined) digestInput.basePolicyDigest = outcome.basePolicyDigest;
   if (canonicalPsychloPolicyDigest(digestInput) !== outcomeDigest) throw new Error('Policy exception outcome digest mismatch.');
   return outcome;
+}
+
+function parseExceptionForm(value: Record<string, unknown>, policyRevision: number, label: string): PsychloPolicyExceptionForm {
+  const hasRequested = hasOwn(value, 'requestedValue');
+  const hasBase = hasOwn(value, 'basePolicyDigest');
+  const hasProposed = hasOwn(value, 'proposedPolicy');
+  if (hasRequested) {
+    if (hasBase || hasProposed) throw new Error(`${label} scalar form forbids proposed-policy fields.`);
+    return { requestedValue: finiteValue(value.requestedValue, 'requestedValue') };
+  }
+  if (!hasBase || !hasProposed) throw new Error(`${label} requires exactly one exception form.`);
+  return {
+    basePolicyDigest: digest(value.basePolicyDigest, 'basePolicyDigest'),
+    proposedPolicy: parseProposedPolicy(value.proposedPolicy, policyRevision),
+  };
+}
+
+function parseProposedPolicy(value: unknown, priorRevision: number): PsychloProposedPolicy {
+  const candidate = strictRecord(value, [
+    'schemaVersion', 'id', 'revision', 'dailyQuotaPercent', 'safetyReservePercent', 'projectShares',
+    'failurePauseThreshold', 'rules', 'operatingEnvelope', 'actorId', 'correlationId', 'idempotencyKey', 'occurredAt', 'digest',
+  ], 'proposedPolicy');
+  if (candidate.schemaVersion !== 'psychlo.policy.v1') throw new Error('proposedPolicy schemaVersion is invalid.');
+  if (candidate.revision !== priorRevision + 1) throw new Error('proposedPolicy revision is invalid.');
+  const percent = (field: string): number => {
+    const item = candidate[field];
+    if (typeof item !== 'number' || !Number.isFinite(item) || item < 0 || item > 100) throw new Error(`proposedPolicy ${field} is invalid.`);
+    return item;
+  };
+  const sharesValue = candidate.projectShares;
+  if (sharesValue === null || typeof sharesValue !== 'object' || Array.isArray(sharesValue)) throw new Error('projectShares is invalid.');
+  const projectShares: Record<string, number> = {};
+  let total = 0;
+  for (const key of Object.keys(sharesValue as Record<string, unknown>)) {
+    const share = (sharesValue as Record<string, unknown>)[key];
+    if (!/^[-A-Za-z0-9._:]+$/.test(key) || typeof share !== 'number' || !Number.isFinite(share) || share < 0 || share > 100) throw new Error('project share is invalid.');
+    projectShares[key] = share; total += share;
+  }
+  if (total > 100) throw new Error('project shares exceed 100 percent.');
+  if (typeof candidate.failurePauseThreshold !== 'number' || !Number.isSafeInteger(candidate.failurePauseThreshold) || candidate.failurePauseThreshold < 1 || candidate.failurePauseThreshold > 100) throw new Error('failurePauseThreshold is invalid.');
+  const rulesCandidate = strictRecord(candidate.rules, [...POLICY_EXCEPTION_RULES], 'policy rules');
+  const rules = {} as Record<PsychloPolicyRuleId, boolean>;
+  for (const rule of POLICY_EXCEPTION_RULES) {
+    if (typeof rulesCandidate[rule] !== 'boolean') throw new Error('policy rules are invalid.');
+    rules[rule] = rulesCandidate[rule] as boolean;
+  }
+  const envelope = strictRecord(candidate.operatingEnvelope, ['maxDailyQuotaPercent', 'minSafetyReservePercent'], 'operatingEnvelope');
+  const operatingEnvelope = { maxDailyQuotaPercent: 0, minSafetyReservePercent: 0 };
+  operatingEnvelope.maxDailyQuotaPercent = percentValue(envelope.maxDailyQuotaPercent, 'maxDailyQuotaPercent');
+  operatingEnvelope.minSafetyReservePercent = percentValue(envelope.minSafetyReservePercent, 'minSafetyReservePercent');
+  const proposed = {
+    schemaVersion: 'psychlo.policy.v1' as const, id: safeText(candidate.id, 'proposedPolicy.id'),
+    revision: candidate.revision as number, dailyQuotaPercent: percent('dailyQuotaPercent'), safetyReservePercent: percent('safetyReservePercent'),
+    projectShares, failurePauseThreshold: candidate.failurePauseThreshold as number, rules, operatingEnvelope,
+    actorId: safeText(candidate.actorId, 'proposedPolicy.actorId'), correlationId: safeText(candidate.correlationId, 'proposedPolicy.correlationId'),
+    idempotencyKey: safeText(candidate.idempotencyKey, 'proposedPolicy.idempotencyKey'), occurredAt: timestamp(candidate.occurredAt, 'proposedPolicy.occurredAt'),
+    digest: digest(candidate.digest, 'proposedPolicy.digest'),
+  } satisfies PsychloProposedPolicy;
+  if (proposed.dailyQuotaPercent > proposed.operatingEnvelope.maxDailyQuotaPercent || proposed.safetyReservePercent < proposed.operatingEnvelope.minSafetyReservePercent) throw new Error('proposedPolicy violates operatingEnvelope.');
+  if (canonicalPsychloPolicyDigest(proposed) !== proposed.digest) throw new Error('proposedPolicy digest mismatch.');
+  return proposed;
+}
+
+function percentValue(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100) throw new Error(`${field} is invalid.`);
+  return value;
+}
+
+function sameExceptionForm(left: PsychloPolicyExceptionForm, right: PsychloPolicyExceptionForm): boolean {
+  if (hasOwn(left, 'requestedValue') || hasOwn(right, 'requestedValue')) return hasOwn(left, 'requestedValue') && hasOwn(right, 'requestedValue') && left.requestedValue === right.requestedValue;
+  return left.basePolicyDigest === right.basePolicyDigest && canonicalJson(left.proposedPolicy) === canonicalJson(right.proposedPolicy);
+}
+
+function f64Hex(value: number): string {
+  const normalized = Object.is(value, -0) ? 0 : value;
+  const bytes = new ArrayBuffer(8);
+  new DataView(bytes).setFloat64(0, normalized, false);
+  const view = new DataView(bytes);
+  return view.getBigUint64(0, false).toString(16).padStart(16, '0');
 }
 
 function parseUsageEnvelope(value: unknown): PsychloUsageEnvelope {
@@ -368,6 +488,8 @@ function parseUsageEnvelope(value: unknown): PsychloUsageEnvelope {
   if (canonicalPsychloPolicyDigest(envelope) !== envelope.digest) throw new Error('Usage envelope digest mismatch.');
   return envelope;
 }
+
+function hasOwn(value: object, key: PropertyKey): boolean { return Object.prototype.hasOwnProperty.call(value, key); }
 
 function strictRecord(value: unknown, required: string[], label: string, optional: string[] = []): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object.`);

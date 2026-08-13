@@ -6,6 +6,7 @@ import {
   isActiveApprovalWait,
   parsePsychloPolicyExceptionFixture,
   projectPsychloPolicyException,
+  canonicalPsychloPolicyDigest,
   type ApprovalWaitState,
 } from '../src/shared/approvalWorkflowContracts';
 
@@ -48,7 +49,7 @@ describe('approval workflow contracts', () => {
 
   it('parses the frozen Psychlo policy exception fixture and projects a read-only overview authority', () => {
     const fixture = JSON.parse(readFileSync(
-      '/home/god/Documents/Codex Workspace/Overseer/.worktrees/psychlo-v1-1-counterpart/tests/fixtures/psychlo-v1-1-policy-exception.json',
+      'tests/fixtures/psychlo-v1-1-policy-exception.json',
       'utf8',
     ));
     const parsed = parsePsychloPolicyExceptionFixture(fixture);
@@ -68,7 +69,7 @@ describe('approval workflow contracts', () => {
 
   it('rejects altered, unknown, or unsafe fields in the frozen fixture', () => {
     const fixture = JSON.parse(readFileSync(
-      '/home/god/Documents/Codex Workspace/Overseer/.worktrees/psychlo-v1-1-counterpart/tests/fixtures/psychlo-v1-1-policy-exception.json',
+      'tests/fixtures/psychlo-v1-1-policy-exception.json',
       'utf8',
     ));
     expect(() => parsePsychloPolicyExceptionFixture({ ...fixture, extra: true })).toThrow();
@@ -84,12 +85,64 @@ describe('approval workflow contracts', () => {
 
   it('projects pending and expired outcomes without granting mutation authority', () => {
     const fixture = JSON.parse(readFileSync(
-      '/home/god/Documents/Codex Workspace/Overseer/.worktrees/psychlo-v1-1-counterpart/tests/fixtures/psychlo-v1-1-policy-exception.json',
+      'tests/fixtures/psychlo-v1-1-policy-exception.json',
       'utf8',
     ));
     const requestOnly = parsePsychloPolicyExceptionFixture({ ...fixture, outcome: undefined });
     expect(projectPsychloPolicyException(requestOnly, new Date('2026-08-12T18:00:00.000Z'))).toMatchObject({ status: 'pending' });
     expect(projectPsychloPolicyException(requestOnly, new Date('2026-08-13T00:00:00.000Z'))).toMatchObject({ status: 'expired' });
     expect(projectPsychloPolicyException(requestOnly, new Date('2026-08-12T18:00:00.000Z'))).not.toHaveProperty('approve');
+  });
+
+  it('matches Overseer binary64 requestedValue parity vectors without changing wire values', () => {
+    const base = {
+      schemaVersion: 'psychlo.policy-exception-request.v1',
+      id: 'exception-vector', requestedRuleId: 'enforce-safety-reserve', policyRevision: 4,
+      actorId: 'operator-1', reason: 'bounded safety drill',
+      activatedAt: '2026-08-12T12:00:00.000Z', expiresAt: '2026-08-13T00:00:00.000Z',
+      correlationId: 'corr-vector', idempotencyKey: 'key-vector',
+      occurredAt: '2026-08-12T12:00:00.000Z', scopeDigest: 'e'.repeat(64), decisionVersion: 'decision-v1',
+    } as Record<string, unknown>;
+    const expected: Record<string, string> = {
+      true: 'f4df4ccdfb1e6a794204fee8b2c2543d457e1a1099fbcdd486fa9a5edce80310',
+      '1': '99987ff22f6311f73a32a7ebadc3939bdaec14077d5f62cb9bbcf86f7c575112',
+      '-0': '8a01b71b6b00a8ee7582a6e5cbab913b72fbda826b866315c2edc9f414169dbf',
+      '0.125': '175aa0c8b0a942f21509ab6c555787815f046cf6c121b4e718d23986ddca31a4',
+      '1e-7': '607cdfba0c6a1ff8793472956639b08f8cfbb0ad2a509672679b21ccc2991744',
+    };
+    for (const [label, value] of [['true', true], ['1', 1], ['1.0', 1.0], ['-0', -0], ['0.125', 0.125], ['1e-7', 1e-7]] as const) {
+      const request = { ...base, requestedValue: value };
+      expect(canonicalPsychloPolicyDigest(request)).toBe(expected[label === '1.0' ? '1' : label]);
+      expect(request.requestedValue).toBe(value);
+    }
+  });
+
+  it('requires exactly one scalar or proposed-policy form and enforces all nine rules', () => {
+    const fixture = JSON.parse(readFileSync(
+      'tests/fixtures/psychlo-v1-1-policy-exception.json',
+      'utf8',
+    ));
+    const rules = Object.fromEntries([
+      'reset-daily-at-provider-reset', 'count-other-development', 'enforce-provider-quota', 'enforce-safety-reserve',
+      'respect-blackouts', 'carry-unused-daily-allowance', 'pause-after-failures', 'require-manual-resume', 'enforce-project-share',
+    ].map((rule) => [rule, true]));
+    for (const requestedRuleId of Object.keys(rules)) {
+      const request = { ...fixture.request, requestedRuleId, digest: '' } as Record<string, unknown>;
+      request.digest = canonicalPsychloPolicyDigest(request);
+      expect(parsePsychloPolicyExceptionFixture({ ...fixture, request, outcome: undefined }).request.requestedRuleId).toBe(requestedRuleId);
+    }
+    const proposedPolicy = {
+      schemaVersion: 'psychlo.policy.v1', id: 'policy-next', revision: 5,
+      dailyQuotaPercent: 80, safetyReservePercent: 20, projectShares: { 'project-1': 50 }, failurePauseThreshold: 3,
+      rules, operatingEnvelope: { maxDailyQuotaPercent: 90, minSafetyReservePercent: 10 }, actorId: 'operator-1',
+      correlationId: 'policy-corr', idempotencyKey: 'policy-key', occurredAt: '2026-08-12T12:00:00.000Z', digest: '',
+    } as Record<string, unknown>;
+    proposedPolicy.digest = canonicalPsychloPolicyDigest(proposedPolicy);
+    const proposedRequest = { ...fixture.request, requestedValue: undefined, basePolicyDigest: 'b'.repeat(64), proposedPolicy, digest: '' } as Record<string, unknown>;
+    delete proposedRequest.requestedValue;
+    proposedRequest.digest = canonicalPsychloPolicyDigest(proposedRequest);
+    const parsed = parsePsychloPolicyExceptionFixture({ ...fixture, request: proposedRequest, outcome: undefined });
+    expect(parsed.request).toHaveProperty('proposedPolicy');
+    expect(() => parsePsychloPolicyExceptionFixture({ ...fixture, request: { ...fixture.request, basePolicyDigest: 'b'.repeat(64) }, outcome: undefined })).toThrow();
   });
 });
