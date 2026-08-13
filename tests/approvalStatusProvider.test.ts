@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createOverseerApprovalStatusProvider,
+  parseRoadexPolicyExceptionProjection,
+  projectRoadexPolicyException,
   type ApprovalScope,
 } from '../src/server/approvalStatusProvider';
 
@@ -79,6 +81,34 @@ async function expectFailureCode<T>(promise: Promise<T>, code: string): Promise<
 }
 
 describe('createOverseerApprovalStatusProvider', () => {
+  it('parses and projects the exact frozen Psychlo policy exception fixture as display-only data', () => {
+    const fixture = JSON.parse(readFileSync(
+      '/home/god/Documents/Codex Workspace/Overseer/.worktrees/psychlo-v1-1-counterpart/tests/fixtures/psychlo-v1-1-policy-exception.json',
+      'utf8',
+    ));
+    const parsed = parseRoadexPolicyExceptionProjection(fixture);
+    expect(projectRoadexPolicyException(parsed, new Date('2026-08-12T18:00:00.000Z'))).toMatchObject({
+      exceptionId: 'exception-enforce-safety-reserve',
+      priorPolicyRevision: 4,
+      requestedValue: false,
+      expiresAt: '2026-08-13T00:00:00.000Z',
+      status: 'approved',
+      consoleSurface: 'overview',
+      consolePath: '/Overseer/overview',
+    });
+  });
+
+  it('does not accept unsafe authority links in a policy exception projection', () => {
+    const fixture = JSON.parse(readFileSync(
+      '/home/god/Documents/Codex Workspace/Overseer/.worktrees/psychlo-v1-1-counterpart/tests/fixtures/psychlo-v1-1-policy-exception.json',
+      'utf8',
+    ));
+    expect(() => parseRoadexPolicyExceptionProjection({
+      ...fixture,
+      outcome: { ...fixture.outcome, decisionId: 'https://evil.example/approve' },
+    })).toThrow();
+  });
+
   it('reads only the exact scoped projection', async () => {
     const fetchJson = vi.fn(async () => buildProjection());
 

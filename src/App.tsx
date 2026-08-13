@@ -36,7 +36,7 @@ import { resolveLayoutMode, toggleLayoutMode } from './layoutMode';
 import { hasBleRuntimeVerification, verifyBleRuntime } from './client/bleRuntimeVerifier';
 import { hasSerialRuntimeVerification, verifySerialRuntime } from './client/serialRuntimeVerifier';
 import { allowsUsbOperation } from './shared/usbDeviceProfileContracts';
-import type { WaitingApprovalSummary } from './shared/approvalWorkflowContracts';
+import type { RoadexPolicyExceptionDisplay, WaitingApprovalSummary } from './shared/approvalWorkflowContracts';
 
 function App() {
   const roadex = useRoadexSession();
@@ -114,6 +114,7 @@ function App() {
   const approvalConsoleLabel = approvalWait?.consoleSurface === 'admin' ? 'Admin Console' : 'Overview Console';
   const approvalConsolePath = safeApprovalConsolePath(approvalWait);
   const approvalCards = approvalWait ? approvalCopy(approvalWait) : undefined;
+  const policyException = approvalWait?.policyException;
   const composerDisabled =
     roadex.connectionState === 'loading' ||
     roadex.connectionState === 'streaming' ||
@@ -783,6 +784,7 @@ function App() {
                 ? 'General device access remains disabled; verified flashing requires fresh approval.'
                 : 'Device bridge remains disabled.'}
             </div>
+            {policyException ? <PolicyExceptionCard projection={policyException} /> : null}
           </article>
 
           <article className="section-card device-card" id="device-status">
@@ -1039,6 +1041,34 @@ function safeApprovalConsolePath(wait: WaitingApprovalSummary | undefined): stri
     ? '/Overseer/admin'
     : '/Overseer/overview';
   return wait.consolePath === deploymentPath ? deploymentPath : undefined;
+}
+
+function PolicyExceptionCard({ projection }: { projection: RoadexPolicyExceptionDisplay }) {
+  const requestedEffect = typeof projection.requestedValue === 'boolean'
+    ? projection.requestedValue ? 'enabled' : 'disabled'
+    : String(projection.requestedValue);
+  return (
+    <section className={`policy-exception policy-exception-${projection.status}`} aria-label="Psychlo policy exception">
+      <div className="panel-heading compact">
+        <div>
+          <span className="section-label">Read-only authority projection</span>
+          <h3>Psychlo policy exception</h3>
+        </div>
+        <ShieldCheck size={18} />
+      </div>
+      <dl className="policy-exception-details">
+        <div><dt>Rule</dt><dd>{projection.ruleId}</dd></div>
+        <div><dt>Prior revision</dt><dd>{projection.priorPolicyRevision}</dd></div>
+        <div><dt>Requested effect</dt><dd>{requestedEffect}</dd></div>
+        <div><dt>Expiry</dt><dd>{projection.expiresAt}</dd></div>
+        <div><dt>Status</dt><dd>{projection.status}</dd></div>
+      </dl>
+      {projection.consolePath === '/Overseer/overview' ? (
+        <a className="approval-wait-link" href="/Overseer/overview">Open Overview Console</a>
+      ) : null}
+      <p className="policy-exception-note">Roadex can display this authority but cannot create, approve, or mutate it.</p>
+    </section>
+  );
 }
 
 function deviceTransportLabel(transport: 'webusb' | 'unavailable'): string {

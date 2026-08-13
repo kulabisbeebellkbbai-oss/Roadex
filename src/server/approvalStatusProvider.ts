@@ -1,9 +1,24 @@
 import {
+  parsePsychloPolicyExceptionFixture,
+  projectPsychloPolicyException,
   type ApprovalAuthorityClass,
   type ApprovalDecision,
   type NormalizedApprovalStatus,
+  type PsychloPolicyExceptionFixture,
+  type RoadexPolicyExceptionDisplay,
   type RoadexApprovalStatusProjection,
 } from '../shared/approvalWorkflowContracts.js';
+
+export function parseRoadexPolicyExceptionProjection(value: unknown): PsychloPolicyExceptionFixture {
+  return parsePsychloPolicyExceptionFixture(value);
+}
+
+export function projectRoadexPolicyException(
+  value: PsychloPolicyExceptionFixture,
+  now: Date = new Date(),
+): RoadexPolicyExceptionDisplay {
+  return projectPsychloPolicyException(value, now);
+}
 
 export type ApprovalScope = {
   projectId: string;
