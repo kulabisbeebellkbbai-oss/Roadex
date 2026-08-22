@@ -105,6 +105,40 @@ describe('ProjectCreationWorker', () => {
     expect(JSON.stringify(advanceExecution.mock.calls)).not.toContain('command output');
   });
 
+  it('records the dedicated human thread before completing project creation', async () => {
+    const advanceExecution = vi.fn(async () => true);
+    const provision = vi.fn(async () => undefined);
+    const worker = new ProjectCreationWorker({
+      claimExecution: vi.fn(async () => lease), advanceExecution,
+    }, async (_lease, onEvent) => {
+      for (const phase of ['local-prepared', 'remote-created', 'pushed'] as const) await onEvent({ type: 'phase', phase });
+      await onEvent({ type: 'done' });
+    }, readyFinalizer, { provision });
+    expect(await worker.run(owner, lease.proposalId)).toBe(true);
+    expect(provision).toHaveBeenCalledWith(owner, lease, expect.objectContaining({ workspaceId: 'workspace-project-alpha' }));
+    expect(provision.mock.invocationCallOrder[0]).toBeLessThan(
+      advanceExecution.mock.invocationCallOrder[advanceExecution.mock.invocationCallOrder.length - 1],
+    );
+  });
+
+  it('resumes an exact thread-started checkpoint without running the external adapter again', async () => {
+    const finalization = {
+      workspaceId: 'workspace-project-alpha',
+      workspaceRoot: '/home/god/Documents/Codex Workspace/Project Alpha',
+      managedThreadId: '019fc36f-0570-7623-912f-6da8181eda2d',
+    };
+    const resumed = { ...lease, startPhase: 'thread-started' as const, finalization };
+    const advanceExecution = vi.fn(async () => true);
+    const provision = vi.fn(async () => undefined);
+    const execute = vi.fn();
+    const worker = new ProjectCreationWorker({ claimExecution: vi.fn(async () => resumed), advanceExecution },
+      execute, readyFinalizer, { provision });
+    expect(await worker.run(owner, lease.proposalId)).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+    expect(provision).toHaveBeenCalledWith(owner, resumed, finalization);
+    expect(advanceExecution).toHaveBeenCalledWith(owner, lease.operationId, lease.leaseToken, 'completed');
+  });
+
   it('classifies ambiguous external failure as reconciliation-required', async () => {
     const advanceExecution = vi.fn(async () => true);
     const worker = new ProjectCreationWorker({

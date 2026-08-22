@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   constants as fsConstants,
@@ -79,6 +80,7 @@ let projectCreationBroker: ProjectCreationBroker | undefined;
 let projectCreationWorker: ProjectCreationWorker | undefined;
 let appPublicationRequester: AppPublicationRequester | undefined;
 let projectHumanThreadStore: ProjectHumanThreadStore | undefined;
+let projectHumanThreadService: ProjectHumanThreadService | undefined;
 let projectHumanThreadController: ProjectHumanThreadController | undefined;
 let projectHumanThreadRelay: ProjectHumanThreadRelay | undefined;
 let projectHumanThreadRelayCoordinator: ProjectHumanThreadRelayCoordinator | undefined;
@@ -648,7 +650,27 @@ function getProjectCreationBroker(): ProjectCreationBroker {
 }
 
 function getProjectCreationWorker(): ProjectCreationWorker {
-  projectCreationWorker ??= new ProjectCreationWorker(getProjectCreationBroker());
+  projectCreationWorker ??= new ProjectCreationWorker(
+    getProjectCreationBroker(), undefined, undefined, {
+      async provision(_user, lease, finalization) {
+        if (!projectHumanThreadService) getProjectHumanThreadController();
+        const provenanceDigest = createHash('sha256').update(JSON.stringify({
+          operationId: lease.operationId,
+          projectId: finalization.workspaceId,
+          projectRoot: finalization.workspaceRoot,
+          conversationId: finalization.managedThreadId,
+        })).digest('hex');
+        await projectHumanThreadService!.adopt({
+          projectId: finalization.workspaceId,
+          projectRoot: finalization.workspaceRoot,
+          conversationId: finalization.managedThreadId,
+          provenanceDigest,
+          idempotencyKey: `project-human-thread:${lease.operationId}`,
+        });
+        scheduleProjectHumanThreadRelay();
+      },
+    },
+  );
   return projectCreationWorker;
 }
 
@@ -666,8 +688,8 @@ function getAppPublicationRequester(): AppPublicationRequester {
 function getProjectHumanThreadController(): ProjectHumanThreadController {
   if (projectHumanThreadController) return projectHumanThreadController;
   projectHumanThreadStore = new ProjectHumanThreadStore();
-  const service = new ProjectHumanThreadService(projectHumanThreadStore, new ProjectHumanThreadAuthority());
-  projectHumanThreadController = new ProjectHumanThreadController(service, {
+  projectHumanThreadService = new ProjectHumanThreadService(projectHumanThreadStore, new ProjectHumanThreadAuthority());
+  projectHumanThreadController = new ProjectHumanThreadController(projectHumanThreadService, {
     resolveOwnedProject(user, projectId) {
       const decision = resolveWorkspaceForUser(user, projectId);
       if (!decision.ok) return undefined;
