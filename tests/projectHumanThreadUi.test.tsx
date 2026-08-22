@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ProjectHumanThreadPanelView, type ProjectHumanThreadSnapshot } from '../src/ProjectHumanThreadPanel';
+import type { ProjectHumanThreadPublicQuestion } from '../src/client/projectHumanThreadTranscriptApi';
 import type { ProjectHumanThreadBinding } from '../src/shared/projectHumanThreadContracts';
 
 const project = { id: 'arcade', name: 'Arcade', root: '/srv/projects/arcade' };
@@ -95,5 +96,27 @@ describe('project human thread UI', () => {
     expect(html).toContain('Only the project binding lifecycle is available here.');
     expect(html).not.toContain('Approve');
     expect(html).not.toContain('Deploy');
+  });
+
+  it('renders bounded choices and ordinary response entry without approval semantics', () => {
+    const question: ProjectHumanThreadPublicQuestion = {
+      messageId: 'question-choice',
+      projectId: 'arcade',
+      conversationId: '11111111-1111-1111-1111-111111111111',
+      generation: 1,
+      kind: 'bounded-choice',
+      content: 'Choose the next project action.',
+      choices: ['Continue conversation', 'Wait for user'],
+      correlationId: 'corr-choice',
+      occurredAt: '2026-08-22T12:00:00.000Z',
+      state: 'pending',
+    };
+    const html = view({ pendingQuestions: [question] });
+    expect(html).toContain('Project conversation');
+    expect(html).toContain('Choose the next project action.');
+    expect(html).toContain('Continue conversation');
+    expect(html).toContain('Wait for user');
+    expect(html).toContain('data-testid="project-human-thread-question-question-choice"');
+    expect(html).not.toContain('Approve');
   });
 });

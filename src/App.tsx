@@ -615,7 +615,24 @@ function App() {
           </section>
         ) : null}
 
-        <ProjectHumanThreadPanel token={roadex.token} project={selectedProject} />
+        <ProjectHumanThreadPanel
+          token={roadex.token}
+          project={selectedProject}
+          onOpenConversation={(conversationId) => {
+            const attached = [...roadex.sessions, ...roadex.archivedSessions].find((candidate) => (
+              candidate.workspace.id === selectedProject?.id
+              && (candidate.id === conversationId || candidate.codexThreadId === conversationId)
+            ));
+            if (attached && attached.lifecycle !== 'closed') {
+              void roadex.selectThread(attached.id);
+              return;
+            }
+            const managed = roadex.managedThreads.find((candidate) => (
+              candidate.project.id === selectedProject?.id && candidate.id === conversationId
+            ));
+            if (managed && selectedProject) void roadex.attachManagedThread(managed.id, selectedProject.id);
+          }}
+        />
 
         <section className="dashboard-grid live-grid" aria-label="Roadex dashboard">
           <article className="codex-panel">

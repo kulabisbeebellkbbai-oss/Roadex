@@ -19,7 +19,10 @@ type ServiceInput = {
   provenanceDigest: string;
   idempotencyKey: string;
 };
-type Dependencies = { resolveOwnedProject(user: UserProfile, projectId: string): OwnedProject | undefined };
+type Dependencies = {
+  resolveOwnedProject(user: UserProfile, projectId: string): OwnedProject | undefined;
+  hasPendingInteraction?: (projectId: string) => boolean;
+};
 
 const empty = z.object({}).strict();
 const adopt = z.object({ conversationId: z.string().uuid() }).strict();
@@ -71,6 +74,9 @@ export class ProjectHumanThreadController {
     const body = parseBody(replace, payload);
     const project = this.#owned(user, projectId);
     if (project.activeRun) throw new Error('Project human thread cannot be replaced during an active run.');
+    if (this.#deps.hasPendingInteraction?.(project.projectId)) {
+      throw new Error('Project human thread cannot be replaced while human interaction is pending.');
+    }
     return await this.#service.replace({ ...this.#input(user, project, idempotencyKey, 'replace'), ...body });
   }
 

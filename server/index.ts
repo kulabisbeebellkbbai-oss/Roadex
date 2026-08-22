@@ -69,6 +69,11 @@ import { ProjectHumanThreadAuthority } from '../src/server/projectHumanThreadAut
 import { ProjectHumanThreadService } from '../src/server/projectHumanThreadService.js';
 import { ProjectHumanThreadController } from '../src/server/projectHumanThreadController.js';
 import { isAvailableProjectHumanThreadRoute, validProjectHumanThreadCsrf } from '../src/server/projectHumanThreadPolicy.js';
+import { isAvailableProjectHumanThreadQuestionRoute, isAvailableProjectHumanThreadTranscriptRoute } from '../src/server/projectHumanThreadTranscriptPolicy.js';
+import { ProjectHumanThreadTranscriptStore } from '../src/server/projectHumanThreadTranscriptStore.js';
+import { ProjectHumanThreadTranscriptController } from '../src/server/projectHumanThreadTranscriptController.js';
+import { ProjectHumanThreadQuestionReceiver } from '../src/server/projectHumanThreadQuestionReceiver.js';
+import { ProjectHumanThreadTranscriptRelayCoordinator } from '../src/server/projectHumanThreadTranscriptRelay.js';
 import { resolveWorkspaceForUser } from '../src/server/workspacePolicy.js';
 import { ProjectHumanThreadRelay, ProjectHumanThreadRelayCoordinator } from '../src/server/projectHumanThreadRelay.js';
 
@@ -84,6 +89,10 @@ let projectHumanThreadService: ProjectHumanThreadService | undefined;
 let projectHumanThreadController: ProjectHumanThreadController | undefined;
 let projectHumanThreadRelay: ProjectHumanThreadRelay | undefined;
 let projectHumanThreadRelayCoordinator: ProjectHumanThreadRelayCoordinator | undefined;
+let projectHumanThreadTranscriptStore: ProjectHumanThreadTranscriptStore | undefined;
+let projectHumanThreadTranscriptController: ProjectHumanThreadTranscriptController | undefined;
+let projectHumanThreadQuestionReceiver: ProjectHumanThreadQuestionReceiver | undefined;
+let projectHumanThreadTranscriptRelayCoordinator: ProjectHumanThreadTranscriptRelayCoordinator | undefined;
 state.resolveControlledRunnerGrant = (context) =>
   getProjectCreationBroker().resolveControlledRunnerGrant({
     userId: context.userId,
@@ -194,6 +203,61 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       sendJson(res, notFound ? 404 : conflict ? 409 : 400, {
         error: { code: notFound ? 'not_found' : conflict ? 'thread_conflict' : 'invalid_request', message },
       });
+      return;
+    }
+  }
+
+  if (url.search === '' && isAvailableProjectHumanThreadQuestionRoute(req.method, url.pathname)) {
+    if (!isJsonRequest(req)) {
+      sendJson(res, 415, { error: { code: 'unsupported_media_type', message: 'JSON content type is required.' } });
+      return;
+    }
+    const receiver = getProjectHumanThreadQuestionReceiver();
+    const response = receiver.receive(await readRawBody(req, 32_768), req.headers);
+    res.writeHead(response.status, response.headers);
+    res.end(response.body);
+    if (response.status === 202) scheduleProjectHumanThreadRelay();
+    return;
+  }
+
+  if (url.search === '' && isAvailableProjectHumanThreadTranscriptRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const match = url.pathname.match(/^\/api\/projects\/([A-Za-z0-9][A-Za-z0-9._:-]{0,159})\/human-thread\/messages(?:\/(history|([A-Za-z0-9][A-Za-z0-9._:-]{0,159})\/respond))?$/);
+    if (!match) {
+      sendJson(res, 404, { error: { code: 'not_found', message: 'Route not found.' } });
+      return;
+    }
+    const projectId = match[1];
+    const action = match[2];
+    const controller = getProjectHumanThreadTranscriptController();
+    try {
+      if (req.method === 'GET') {
+        sendJson(res, 200, { ok: true, questions: action === 'history' ? controller.history(auth.user, projectId) : controller.pending(auth.user, projectId) });
+        return;
+      }
+      if (!validProjectHumanThreadCsrf(req.headers['x-roadex-csrf'])) {
+        sendJson(res, 403, { error: { code: 'csrf_required', message: 'Gateway CSRF validation is required.' } });
+        return;
+      }
+      const idempotency = req.headers['idempotency-key'];
+      if (typeof idempotency !== 'string') {
+        sendJson(res, 400, { error: { code: 'idempotency_required', message: 'A valid idempotency key is required.' } });
+        return;
+      }
+      if (!isJsonRequest(req) || !match[3]) {
+        sendJson(res, 400, { error: { code: 'invalid_request', message: 'A response message and JSON body are required.' } });
+        return;
+      }
+      const response = controller.submit(auth.user, projectId, match[3], idempotency, await readJson<unknown>(req, 8_192));
+      sendJson(res, 200, { ok: true, response });
+      scheduleProjectHumanThreadRelay();
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Project human thread response failed.';
+      const notFound = /not found|missing/i.test(message);
+      const conflict = /conflict|already answered|generation|pending|choice|informational/i.test(message);
+      sendJson(res, notFound ? 404 : conflict ? 409 : 400, { error: { code: notFound ? 'not_found' : conflict ? 'thread_conflict' : 'invalid_request', message } });
       return;
     }
   }
@@ -592,6 +656,11 @@ function requireAuth(
 }
 
 async function readJson<T>(req: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
+  const raw = (await readRawBody(req, maxBytes)).trim();
+  return (raw ? JSON.parse(raw) : {}) as T;
+}
+
+async function readRawBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<string> {
   const chunks: Buffer[] = [];
   let bytes = 0;
   for await (const chunk of req) {
@@ -600,8 +669,7 @@ async function readJson<T>(req: IncomingMessage, maxBytes = 1_000_000): Promise<
     if (bytes > maxBytes) throw new Error('request_body_too_large');
     chunks.push(buffer);
   }
-  const raw = Buffer.concat(chunks).toString('utf8').trim();
-  return (raw ? JSON.parse(raw) : {}) as T;
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 function isJsonRequest(req: IncomingMessage): boolean {
@@ -690,6 +758,9 @@ function getProjectHumanThreadController(): ProjectHumanThreadController {
   if (projectHumanThreadController) return projectHumanThreadController;
   projectHumanThreadStore = new ProjectHumanThreadStore();
   projectHumanThreadService = new ProjectHumanThreadService(projectHumanThreadStore, new ProjectHumanThreadAuthority());
+  projectHumanThreadTranscriptStore = new ProjectHumanThreadTranscriptStore(
+    (projectId) => projectHumanThreadService?.current(projectId),
+  );
   projectHumanThreadController = new ProjectHumanThreadController(projectHumanThreadService, {
     resolveOwnedProject(user, projectId) {
       const decision = resolveWorkspaceForUser(user, projectId);
@@ -704,8 +775,33 @@ function getProjectHumanThreadController(): ProjectHumanThreadController {
         )),
       };
     },
+    hasPendingInteraction(projectId) {
+      return Boolean(projectHumanThreadTranscriptStore?.pending(projectId).length)
+        || Boolean(projectHumanThreadTranscriptStore?.pendingResponseOutbox(projectId).length);
+    },
   });
   return projectHumanThreadController;
+}
+
+function getProjectHumanThreadTranscriptController(): ProjectHumanThreadTranscriptController {
+  if (!projectHumanThreadTranscriptController) {
+    getProjectHumanThreadController();
+    projectHumanThreadTranscriptController = new ProjectHumanThreadTranscriptController(projectHumanThreadTranscriptStore!, {
+      resolveOwnedProject(user, projectId) {
+        const decision = resolveWorkspaceForUser(user, projectId);
+        return decision.ok ? { projectId: decision.workspace.id } : undefined;
+      },
+    });
+  }
+  return projectHumanThreadTranscriptController;
+}
+
+function getProjectHumanThreadQuestionReceiver(): ProjectHumanThreadQuestionReceiver {
+  if (!projectHumanThreadQuestionReceiver) {
+    getProjectHumanThreadController();
+    projectHumanThreadQuestionReceiver = new ProjectHumanThreadQuestionReceiver(projectHumanThreadTranscriptStore!);
+  }
+  return projectHumanThreadQuestionReceiver;
 }
 
 function getProjectHumanThreadRelayCoordinator(): ProjectHumanThreadRelayCoordinator {
@@ -721,6 +817,16 @@ function scheduleProjectHumanThreadRelay(): void {
   queueMicrotask(() => {
     void getProjectHumanThreadRelayCoordinator().retryBindings().catch(() => {
       // The transactional binding outbox remains pending for the next retry.
+    });
+    if (!projectHumanThreadTranscriptRelayCoordinator) {
+      getProjectHumanThreadController();
+      projectHumanThreadTranscriptRelayCoordinator = new ProjectHumanThreadTranscriptRelayCoordinator(
+        projectHumanThreadTranscriptStore!,
+        projectHumanThreadRelay!,
+      );
+    }
+    void projectHumanThreadTranscriptRelayCoordinator.retryResponses().catch(() => {
+      // The transactional transcript outbox remains pending for the next retry.
     });
   });
 }
@@ -865,6 +971,7 @@ async function startRoadexApi(): Promise<void> {
           return;
         }
         projectHumanThreadStore?.close();
+        projectHumanThreadTranscriptStore?.close();
         projectHumanThreadRelay?.close();
         resolveClose();
       });

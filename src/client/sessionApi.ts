@@ -483,6 +483,12 @@ type RequestOptions<Response> = {
   headers?: Record<string, string>;
 };
 
+export type RoadexRequestOptions<Response> = RequestOptions<Response>;
+
+export async function requestRoadex<T>(path: string, options: RoadexRequestOptions<T> = {}): Promise<T> {
+  return request<T>(path, options);
+}
+
 async function request<T>(path: string, options: RequestOptions<T> = {}): Promise<T> {
   const method = options.method ?? 'GET';
   const response = await fetch(path, {

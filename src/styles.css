@@ -786,6 +786,117 @@ a:focus-visible {
   line-height: 1.4;
 }
 
+.human-thread-inbox {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #b6cde0;
+  border-radius: 8px;
+  background: #f7fbfe;
+}
+
+.human-thread-inbox .human-thread-history-heading > span {
+  color: #2f526d;
+  border-color: #bfd4e2;
+  background: #ffffff;
+}
+
+.human-thread-question {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #c7d9e4;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.human-thread-question-content {
+  display: grid;
+  gap: 2px;
+}
+
+.human-thread-question-content .section-label {
+  margin-bottom: 0;
+  color: #2a6184;
+}
+
+.human-thread-question-content p {
+  margin: 0;
+  color: var(--ink);
+  line-height: 1.45;
+}
+
+.human-thread-choice-list,
+.human-thread-response-form,
+.human-thread-response-form label {
+  display: grid;
+  gap: 8px;
+}
+
+.human-thread-response-form textarea {
+  width: 100%;
+  min-height: 72px;
+  padding: 9px 10px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  background: #ffffff;
+}
+
+.human-thread-response-form label > span {
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 800;
+}
+
+.human-thread-no-response,
+.human-thread-transcript-error {
+  color: var(--muted);
+  font-size: .82rem;
+  line-height: 1.4;
+}
+
+.human-thread-transcript-error {
+  margin: 0;
+  color: #7a1f1f;
+}
+
+.human-thread-conversation-history {
+  border-top: 1px solid #d5e0e7;
+  padding-top: 10px;
+}
+
+.human-thread-conversation-history summary {
+  min-height: 44px;
+  padding: 10px 0;
+  color: #2f526d;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.human-thread-conversation-history ol {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.human-thread-conversation-history li {
+  display: grid;
+  gap: 4px;
+  padding: 9px;
+  border: 1px solid #d5e0e7;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.human-thread-conversation-history li span {
+  color: var(--muted);
+  line-height: 1.4;
+}
+
 .error-banner button {
   margin-left: auto;
   color: #7a1f1f;
@@ -1772,6 +1883,11 @@ a:focus-visible {
 
   .human-thread-history li > div {
     justify-content: space-between;
+  }
+
+  .human-thread-choice-list .secondary-action,
+  .human-thread-response-form .primary-action {
+    width: 100%;
   }
 
   .app-shell {
