@@ -63,6 +63,12 @@ import { ApprovalWorkflowGrantBroker } from '../src/server/approvalWorkflowGrant
 import { startApprovalWorkflowHost } from '../src/server/approvalWorkflowHost.js';
 import { AppPublicationRequester } from '../src/server/appPublicationRequester.js';
 import { isAvailableAppPublicationRoute } from '../src/server/appPublicationPolicy.js';
+import { ProjectHumanThreadStore } from '../src/server/projectHumanThreadStore.js';
+import { ProjectHumanThreadAuthority } from '../src/server/projectHumanThreadAuthority.js';
+import { ProjectHumanThreadService } from '../src/server/projectHumanThreadService.js';
+import { ProjectHumanThreadController } from '../src/server/projectHumanThreadController.js';
+import { isAvailableProjectHumanThreadRoute, validProjectHumanThreadCsrf } from '../src/server/projectHumanThreadPolicy.js';
+import { resolveWorkspaceForUser } from '../src/server/workspacePolicy.js';
 
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8780);
@@ -71,6 +77,8 @@ const state = createInitialState();
 let projectCreationBroker: ProjectCreationBroker | undefined;
 let projectCreationWorker: ProjectCreationWorker | undefined;
 let appPublicationRequester: AppPublicationRequester | undefined;
+let projectHumanThreadStore: ProjectHumanThreadStore | undefined;
+let projectHumanThreadController: ProjectHumanThreadController | undefined;
 state.resolveControlledRunnerGrant = (context) =>
   getProjectCreationBroker().resolveControlledRunnerGrant({
     userId: context.userId,
@@ -127,6 +135,60 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!auth) return;
     sendJson(res, 200, await bootstrap(state, auth.user));
     return;
+  }
+
+  if (url.search === '' && isAvailableProjectHumanThreadRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const match = url.pathname.match(/^\/api\/projects\/([A-Za-z0-9][A-Za-z0-9._:-]{0,159})\/human-thread(?:\/(history|create|adopt|recover|replace))?$/);
+    if (!match) {
+      sendJson(res, 404, { error: { code: 'not_found', message: 'Route not found.' } });
+      return;
+    }
+    const projectId = match[1];
+    const action = match[2];
+    const controller = getProjectHumanThreadController();
+    try {
+      if (req.method === 'GET') {
+        sendJson(res, 200, action === 'history'
+          ? { ok: true, history: controller.history(auth.user, projectId) }
+          : { ok: true, ...controller.read(auth.user, projectId) });
+        return;
+      }
+      if (!isJsonRequest(req)) {
+        sendJson(res, 415, { error: { code: 'unsupported_media_type', message: 'JSON content type is required.' } });
+        return;
+      }
+      if (!validProjectHumanThreadCsrf(req.headers['x-roadex-csrf'])) {
+        sendJson(res, 403, { error: { code: 'csrf_required', message: 'Gateway CSRF validation is required.' } });
+        return;
+      }
+      const idempotency = req.headers['idempotency-key'];
+      if (typeof idempotency !== 'string') {
+        sendJson(res, 400, { error: { code: 'idempotency_required', message: 'A valid idempotency key is required.' } });
+        return;
+      }
+      const body = await readJson<unknown>(req, 8_192);
+      const result = action === 'create'
+        ? await controller.createMissing(auth.user, projectId, idempotency, body)
+        : action === 'adopt'
+          ? await controller.adopt(auth.user, projectId, idempotency, body)
+          : action === 'recover'
+            ? await controller.recover(auth.user, projectId, idempotency, body)
+            : await controller.replace(auth.user, projectId, idempotency, body);
+      const adoptionRequired = typeof result === 'object' && result !== null
+        && 'outcome' in result && result.outcome === 'adoption-required';
+      sendJson(res, adoptionRequired ? 409 : 200, { ok: !adoptionRequired, result });
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Project human thread request failed.';
+      const notFound = /not found/i.test(message);
+      const conflict = /conflict|active run|already has|ambiguous/i.test(message);
+      sendJson(res, notFound ? 404 : conflict ? 409 : 400, {
+        error: { code: notFound ? 'not_found' : conflict ? 'thread_conflict' : 'invalid_request', message },
+      });
+      return;
+    }
   }
 
   if (url.search === '' && isAvailableProjectCreationRoute(req.method, url.pathname)) {
@@ -597,6 +659,28 @@ function getAppPublicationRequester(): AppPublicationRequester {
   return appPublicationRequester;
 }
 
+function getProjectHumanThreadController(): ProjectHumanThreadController {
+  if (projectHumanThreadController) return projectHumanThreadController;
+  projectHumanThreadStore = new ProjectHumanThreadStore();
+  const service = new ProjectHumanThreadService(projectHumanThreadStore, new ProjectHumanThreadAuthority());
+  projectHumanThreadController = new ProjectHumanThreadController(service, {
+    resolveOwnedProject(user, projectId) {
+      const decision = resolveWorkspaceForUser(user, projectId);
+      if (!decision.ok) return undefined;
+      return {
+        projectId: decision.workspace.id,
+        root: decision.workspace.root,
+        activeRun: state.sessions.sessions.some((session) => (
+          session.userId === user.id
+          && session.workspace.id === projectId
+          && state.activeRuns.has(session.id)
+        )),
+      };
+    },
+  });
+  return projectHumanThreadController;
+}
+
 function projectCreationDenied(): { ok: false; error: { code: string; message: string } } {
   return {
     ok: false,
@@ -732,6 +816,7 @@ async function startRoadexApi(): Promise<void> {
           rejectClose(new Error('approval_workflow_host_close_failed'));
           return;
         }
+        projectHumanThreadStore?.close();
         resolveClose();
       });
     }),

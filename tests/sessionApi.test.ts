@@ -6,6 +6,30 @@ describe('Roadex client CSRF contract', () => {
     vi.resetModules();
   });
 
+  it('uses only the project-scoped human thread lifecycle routes', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ path: String(input), init });
+      return new Response(JSON.stringify({ ok: true, current: undefined, candidates: [], history: [], result: { outcome: 'current' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'x-roadex-csrf': 'private-test-value' },
+      });
+    }));
+    const { getProjectHumanThread, getProjectHumanThreadHistory, mutateProjectHumanThread } = await import('../src/client/sessionApi');
+    await getProjectHumanThread(undefined, 'arcade');
+    await getProjectHumanThreadHistory(undefined, 'arcade');
+    await mutateProjectHumanThread(undefined, 'arcade', 'recover', 'recover-key-0000001', { expectedGeneration: 1 });
+    expect(calls.map((call) => call.path)).toEqual([
+      '/Roadex/api/projects/arcade/human-thread',
+      '/Roadex/api/projects/arcade/human-thread/history',
+      '/Roadex/api/projects/arcade/human-thread/recover',
+    ]);
+    const headers = new Headers(calls[2].init?.headers);
+    expect(headers.get('idempotency-key')).toBe('recover-key-0000001');
+    expect(headers.get('x-roadex-csrf')).toBe('private-test-value');
+    expect(calls.some((call) => /approve|execute/.test(call.path))).toBe(false);
+  });
+
   it('creates and retrieves publication requests without exposing an activation call', async () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

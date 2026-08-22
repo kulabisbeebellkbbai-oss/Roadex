@@ -1,0 +1,97 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { UserProfile } from '../src/shared/sessionContracts';
+import { ProjectHumanThreadController } from '../src/server/projectHumanThreadController';
+import { isAvailableProjectHumanThreadRoute, validProjectHumanThreadCsrf } from '../src/server/projectHumanThreadPolicy';
+
+const owner: UserProfile = {
+  id: 'owner', displayName: 'Owner', authMode: 'protected-gateway', roles: ['user', 'security-reviewer'],
+};
+const binding = {
+  schemaVersion: 'roadex.project-human-thread-binding.v1' as const,
+  bindingId: 'project-human-thread:arcade:1',
+  projectId: 'arcade',
+  root: { canonicalPath: '/srv/arcade', dev: 1, ino: 2 },
+  purpose: 'human-interaction' as const,
+  conversationId: '019fc36f-0570-7623-912f-6da8181eda2d',
+  generation: 1,
+  status: 'active' as const,
+  predecessorGeneration: null,
+  creationMode: 'created' as const,
+  provenanceDigest: 'a'.repeat(64),
+  createdAt: '2026-08-22T00:00:00.000Z',
+  updatedAt: '2026-08-22T00:00:00.000Z',
+  retiredAt: null,
+  recordDigest: 'b'.repeat(64),
+};
+
+function fixture(activeRun = false) {
+  const service = {
+    current: vi.fn(() => binding),
+    history: vi.fn(() => [binding]),
+    candidates: vi.fn(() => []),
+    createMissing: vi.fn(async () => ({ outcome: 'current', binding })),
+    adopt: vi.fn(async () => ({ outcome: 'current', binding })),
+    recover: vi.fn(() => ({ outcome: 'recovered', binding })),
+    replace: vi.fn(async () => ({ outcome: 'replaced', binding: { ...binding, generation: 2 } })),
+  };
+  const controller = new ProjectHumanThreadController(service, {
+    resolveOwnedProject: (user, projectId) => user.id === owner.id && projectId === 'arcade'
+      ? { projectId, root: '/srv/arcade', activeRun }
+      : undefined,
+  });
+  return { controller, service };
+}
+
+describe('project human thread route policy', () => {
+  it('is default-off and exposes only the exact route family when enabled', () => {
+    expect(isAvailableProjectHumanThreadRoute('GET', '/api/projects/arcade/human-thread', {})).toBe(false);
+    const env = { ROADEX_PROJECT_HUMAN_THREAD_ENABLED: 'true' } as NodeJS.ProcessEnv;
+    expect(isAvailableProjectHumanThreadRoute('GET', '/api/projects/arcade/human-thread', env)).toBe(true);
+    expect(isAvailableProjectHumanThreadRoute('POST', '/api/projects/arcade/human-thread/replace', env)).toBe(true);
+    expect(isAvailableProjectHumanThreadRoute('POST', '/api/projects/arcade/human-thread/approve', env)).toBe(false);
+    expect(isAvailableProjectHumanThreadRoute('GET', '/api/projects/arcade/human-thread?x=1', env)).toBe(false);
+  });
+
+  it('requires one bounded CSRF header for mutations', () => {
+    expect(validProjectHumanThreadCsrf(undefined)).toBe(false);
+    expect(validProjectHumanThreadCsrf(['one', 'two'])).toBe(false);
+    expect(validProjectHumanThreadCsrf(' private ')).toBe(false);
+    expect(validProjectHumanThreadCsrf('private-test-value')).toBe(true);
+  });
+});
+
+describe('ProjectHumanThreadController', () => {
+  it('returns current, redacted history, and candidate inspection only to the owner', () => {
+    const { controller } = fixture();
+    expect(controller.read(owner, 'arcade')).toMatchObject({ current: binding, candidates: [] });
+    const redacted: Partial<typeof binding> = { ...binding };
+    delete redacted.root;
+    delete redacted.provenanceDigest;
+    expect(controller.history(owner, 'arcade')).toEqual([redacted]);
+    expect(() => controller.read({ ...owner, id: 'other' }, 'arcade')).toThrow(/not found/i);
+  });
+
+  it('strictly creates, adopts, and recovers without accepting approval-like fields', async () => {
+    const { controller, service } = fixture();
+    await controller.createMissing(owner, 'arcade', 'create-key-00000001', {});
+    await controller.adopt(owner, 'arcade', 'adopt-key-000000001', {
+      conversationId: binding.conversationId,
+    });
+    controller.recover(owner, 'arcade', 'recover-key-0000001', { expectedGeneration: 1 });
+    await expect(controller.createMissing(owner, 'arcade', 'create-key-00000002', { approved: true })).rejects.toThrow(/invalid/i);
+    expect(service.createMissing).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: 'arcade', projectRoot: '/srv/arcade', idempotencyKey: 'create-key-00000001',
+    }));
+  });
+
+  it('requires exact generation and bounded reason and blocks replacement during an active run', async () => {
+    const { controller } = fixture(true);
+    await expect(controller.replace(owner, 'arcade', 'replace-key-0000001', {
+      expectedGeneration: 1, reason: 'Replace unavailable thread',
+    })).rejects.toThrow(/active run/i);
+    const inactive = fixture(false).controller;
+    await expect(inactive.replace(owner, 'arcade', 'replace-key-0000001', {
+      expectedGeneration: 1, reason: 'Replace unavailable thread', approved: true,
+    })).rejects.toThrow(/invalid/i);
+  });
+});

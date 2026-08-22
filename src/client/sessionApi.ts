@@ -36,6 +36,7 @@ import type {
   AppPublicationRequestResponse,
   AppPublicationRequestSpec,
 } from '../shared/appPublicationContracts';
+import type { ProjectHumanThreadBinding } from '../shared/projectHumanThreadContracts';
 
 let csrfToken: string | undefined;
 
@@ -173,6 +174,48 @@ export async function getAppPublicationRequest(
     { token },
   );
   return response.request;
+}
+
+export type ProjectHumanThreadCandidatePublic = {
+  conversationId: string;
+  canonicalPath: string;
+  dev: string;
+  ino: string;
+  createdAt: number;
+};
+
+export async function getProjectHumanThread(
+  token: string | undefined,
+  projectId: string,
+): Promise<{ current?: ProjectHumanThreadBinding; candidates: ProjectHumanThreadCandidatePublic[] }> {
+  const response = await request<{ ok: true; current?: ProjectHumanThreadBinding; candidates: ProjectHumanThreadCandidatePublic[] }>(
+    `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread`, { token },
+  );
+  return { current: response.current, candidates: response.candidates };
+}
+
+export async function getProjectHumanThreadHistory(
+  token: string | undefined,
+  projectId: string,
+): Promise<Array<Omit<ProjectHumanThreadBinding, 'root' | 'provenanceDigest'>>> {
+  const response = await request<{ ok: true; history: Array<Omit<ProjectHumanThreadBinding, 'root' | 'provenanceDigest'>> }>(
+    `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread/history`, { token },
+  );
+  return response.history;
+}
+
+export async function mutateProjectHumanThread(
+  token: string | undefined,
+  projectId: string,
+  action: 'create' | 'adopt' | 'recover' | 'replace',
+  idempotencyKey: string,
+  body: Record<string, unknown>,
+): Promise<unknown> {
+  const response = await request<{ ok: boolean; result: unknown }>(
+    `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread/${action}`,
+    { method: 'POST', token, body, requestId: crypto.randomUUID(), headers: { 'idempotency-key': idempotencyKey } },
+  );
+  return response.result;
 }
 
 export async function submitDeviceDescriptorObservation(
