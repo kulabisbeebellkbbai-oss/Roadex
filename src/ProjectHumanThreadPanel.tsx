@@ -4,7 +4,10 @@ import {
   getProjectHumanThread,
   getProjectHumanThreadHistory,
   mutateProjectHumanThread,
+  reconcileProjectHumanThread,
+  resumeProjectHumanThread,
   type ProjectHumanThreadCandidatePublic,
+  type ProjectHumanThreadReplacementPublic,
 } from './client/sessionApi';
 import {
   getProjectHumanThreadTranscript,
@@ -18,6 +21,7 @@ export type ProjectHumanThreadSnapshot = {
   current?: ProjectHumanThreadBinding;
   candidates: ProjectHumanThreadCandidatePublic[];
   history: Array<Omit<ProjectHumanThreadBinding, 'root' | 'provenanceDigest'>>;
+  replacement?: ProjectHumanThreadReplacementPublic;
 };
 
 type ProjectHumanThreadPanelProps = {
@@ -30,7 +34,7 @@ type ProjectHumanThreadPanelViewProps = {
   project: WorkspaceRef;
   snapshot: ProjectHumanThreadSnapshot;
   loading: boolean;
-  busyAction?: 'create' | 'adopt' | 'recover' | 'replace';
+  busyAction?: 'create' | 'adopt' | 'recover' | 'replace' | 'resume' | 'reconcile';
   error?: string;
   replaceOpen: boolean;
   replaceReason: string;
@@ -38,6 +42,8 @@ type ProjectHumanThreadPanelViewProps = {
   onCreate: () => void;
   onAdopt: (conversationId: string) => void;
   onRecover: () => void;
+  onResume: () => void;
+  onReconcile: (conversationId: string) => void;
   onReplaceOpen: (open: boolean) => void;
   onReplaceReason: (reason: string) => void;
   onReplace: (event: FormEvent<HTMLFormElement>) => void;
@@ -91,7 +97,7 @@ export function ProjectHumanThreadPanel({ token, project, onOpenConversation }: 
         getProjectHumanThread(token, project.id),
         getProjectHumanThreadHistory(token, project.id),
       ]);
-      setSnapshot({ current: thread.current, candidates: thread.candidates, history });
+      setSnapshot({ current: thread.current, candidates: thread.candidates, history, replacement: thread.replacement });
       await refreshTranscript();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Project human thread status could not be loaded.');
@@ -112,16 +118,28 @@ export function ProjectHumanThreadPanel({ token, project, onOpenConversation }: 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.id, token]);
 
-  async function mutate(action: 'create' | 'adopt' | 'recover' | 'replace', body: Record<string, unknown>): Promise<void> {
+  async function mutate(action: 'create' | 'adopt' | 'recover' | 'replace' | 'resume' | 'reconcile', body: Record<string, unknown>): Promise<void> {
     if (!project) return;
     setBusyAction(action);
     setError('');
-    const requestSignature = `${action}:${JSON.stringify(body)}`;
-    const idempotencyKey = idempotencyKeys.current.get(requestSignature) ?? makeIdempotencyKey(action);
-    idempotencyKeys.current.set(requestSignature, idempotencyKey);
     try {
-      await mutateProjectHumanThread(token, project.id, action, idempotencyKey, body);
-      idempotencyKeys.current.delete(requestSignature);
+      let result: unknown;
+      if (action === 'resume') {
+        result = await resumeProjectHumanThread(token, project.id, Number(body.expectedGeneration));
+      } else if (action === 'reconcile') {
+        result = await reconcileProjectHumanThread(token, project.id, Number(body.expectedGeneration), String(body.conversationId));
+      } else {
+        const requestSignature = `${action}:${JSON.stringify(body)}`;
+        const idempotencyKey = idempotencyKeys.current.get(requestSignature) ?? makeIdempotencyKey(action);
+        idempotencyKeys.current.set(requestSignature, idempotencyKey);
+        result = await mutateProjectHumanThread(token, project.id, action, idempotencyKey, body);
+        idempotencyKeys.current.delete(requestSignature);
+      }
+      if (isReconciliationResult(result)) {
+        setError('Reconciliation is required. Select one exact unbound candidate, or retry Resume after the authority becomes inspectable.');
+        await refresh();
+        return;
+      }
       setReplaceOpen(false);
       setReplaceReason('');
       await refresh();
@@ -146,6 +164,8 @@ export function ProjectHumanThreadPanel({ token, project, onOpenConversation }: 
       onCreate={() => void mutate('create', {})}
       onAdopt={(conversationId) => void mutate('adopt', { conversationId })}
       onRecover={() => snapshot.current && void mutate('recover', { expectedGeneration: snapshot.current.generation })}
+      onResume={() => snapshot.current && void mutate('resume', { expectedGeneration: snapshot.current.generation })}
+      onReconcile={(conversationId) => snapshot.current && void mutate('reconcile', { expectedGeneration: snapshot.current.generation, conversationId })}
       onReplaceOpen={setReplaceOpen}
       onReplaceReason={setReplaceReason}
       onReplace={(event) => {
@@ -188,6 +208,8 @@ export function ProjectHumanThreadPanelView({
   onCreate,
   onAdopt,
   onRecover,
+  onResume,
+  onReconcile,
   onReplaceOpen,
   onReplaceReason,
   onReplace,
@@ -255,7 +277,31 @@ export function ProjectHumanThreadPanelView({
               </button>
             ) : null}
             {current.status === 'replacement-pending' ? (
-              <p className="human-thread-pending-note">Replacement is pending. Retry the original request to resume it; a new replacement request is rejected.</p>
+              <div className="human-thread-pending-note" data-testid="project-human-thread-replacement-pending">
+                {snapshot.replacement ? (
+                  <>
+                    <p>Replacement is pending ({snapshot.replacement.createPhase}). Resume uses the durable server-side request; a new replacement request is rejected.</p>
+                    <div className="human-thread-actions">
+                      <button className="primary-action" disabled={Boolean(busyAction)} onClick={onResume} type="button">
+                        <RotateCcw size={16} /> {busyAction === 'resume' ? 'Resuming…' : 'Resume replacement'}
+                      </button>
+                    </div>
+                  </>
+                ) : <p>Replacement is pending without a recoverable intent. Select an exact unbound candidate below for manual reconciliation; a new replacement request is blocked.</p>}
+                {snapshot.candidates.length ? (
+                  <div className="human-thread-candidates" data-testid="project-human-thread-reconcile-candidates">
+                    <span className="section-label">Reconcile an exact candidate</span>
+                    {snapshot.candidates.map((candidate) => (
+                      <div className="human-thread-candidate" key={candidate.conversationId}>
+                        <code>{candidate.conversationId}</code>
+                        <button className="secondary-action" disabled={Boolean(busyAction)} onClick={() => onReconcile(candidate.conversationId)} type="button">
+                          <CheckCircle2 size={16} /> {busyAction === 'reconcile' ? 'Reconciling…' : 'Reconcile candidate'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             ) : null}
             <button className="secondary-action" disabled={!canReplace} onClick={() => onReplaceOpen(!replaceOpen)} type="button">
               <RefreshCw size={16} /> Replace binding
@@ -430,4 +476,8 @@ function makeIdempotencyKey(action: string): string {
     ? globalThis.crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   return `project-human-thread-${action}-${random}`;
+}
+
+function isReconciliationResult(value: unknown): value is { outcome: 'reconciliation-required'; candidates: unknown[] } {
+  return Boolean(value && typeof value === 'object' && (value as { outcome?: unknown }).outcome === 'reconciliation-required');
 }

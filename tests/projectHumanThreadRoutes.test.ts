@@ -33,6 +33,10 @@ function fixture(activeRun = false, pendingInteraction = false) {
     adopt: vi.fn(async () => ({ outcome: 'current', binding })),
     recover: vi.fn(() => ({ outcome: 'recovered', binding })),
     replace: vi.fn(async () => ({ outcome: 'replaced', binding: { ...binding, generation: 2 } })),
+    replacementIntent: vi.fn(() => undefined),
+    replacementCandidates: vi.fn(() => []),
+    resume: vi.fn(async () => ({ outcome: 'replacement-pending', binding })),
+    reconcile: vi.fn(async () => ({ outcome: 'replaced', binding: { ...binding, generation: 2 } })),
   };
   const controller = new ProjectHumanThreadController(service, {
     resolveOwnedProject: (user, projectId) => user.id === owner.id && projectId === 'arcade'
@@ -49,6 +53,8 @@ describe('project human thread route policy', () => {
     const env = { ROADEX_PROJECT_HUMAN_THREAD_ENABLED: 'true' } as NodeJS.ProcessEnv;
     expect(isAvailableProjectHumanThreadRoute('GET', '/api/projects/arcade/human-thread', env)).toBe(true);
     expect(isAvailableProjectHumanThreadRoute('POST', '/api/projects/arcade/human-thread/replace', env)).toBe(true);
+    expect(isAvailableProjectHumanThreadRoute('POST', '/api/projects/arcade/human-thread/resume', env)).toBe(true);
+    expect(isAvailableProjectHumanThreadRoute('POST', '/api/projects/arcade/human-thread/reconcile', env)).toBe(true);
     expect(isAvailableProjectHumanThreadRoute('POST', '/api/projects/arcade/human-thread/approve', env)).toBe(false);
     expect(isAvailableProjectHumanThreadRoute('GET', '/api/projects/arcade/human-thread?x=1', env)).toBe(false);
   });
@@ -101,5 +107,14 @@ describe('ProjectHumanThreadController', () => {
     await expect(pending.replace(owner, 'arcade', 'replace-key-pending', {
       expectedGeneration: 1, reason: 'Replace unavailable thread',
     })).rejects.toThrow(/human interaction is pending/i);
+  });
+
+  it('resumes and reconciles a pending replacement without accepting a new client idempotency key', async () => {
+    const { controller, service } = fixture(false);
+    await expect(controller.resume(owner, 'arcade', { expectedGeneration: 1 })).resolves.toMatchObject({ outcome: 'replacement-pending' });
+    await expect(controller.reconcile(owner, 'arcade', {
+      expectedGeneration: 1, conversationId: binding.conversationId,
+    })).resolves.toMatchObject({ outcome: 'replaced' });
+    expect(service.resume).toHaveBeenCalledWith({ projectId: 'arcade', projectRoot: '/srv/arcade', expectedGeneration: 1 });
   });
 });

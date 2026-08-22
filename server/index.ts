@@ -154,7 +154,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (url.search === '' && isAvailableProjectHumanThreadRoute(req.method, url.pathname)) {
     const auth = requireAuth(req, res);
     if (!auth) return;
-    const match = url.pathname.match(/^\/api\/projects\/([A-Za-z0-9][A-Za-z0-9._:-]{0,159})\/human-thread(?:\/(history|create|adopt|recover|replace))?$/);
+    const match = url.pathname.match(/^\/api\/projects\/([A-Za-z0-9][A-Za-z0-9._:-]{0,159})\/human-thread(?:\/(history|create|adopt|recover|replace|resume|reconcile))?$/);
     if (!match) {
       sendJson(res, 404, { error: { code: 'not_found', message: 'Route not found.' } });
       return;
@@ -178,18 +178,23 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         return;
       }
       const idempotency = req.headers['idempotency-key'];
-      if (typeof idempotency !== 'string') {
+      if (!['resume', 'reconcile'].includes(action ?? '') && typeof idempotency !== 'string') {
         sendJson(res, 400, { error: { code: 'idempotency_required', message: 'A valid idempotency key is required.' } });
         return;
       }
+      const mutationIdempotency = typeof idempotency === 'string' ? idempotency : '';
       const body = await readJson<unknown>(req, 8_192);
       const result = action === 'create'
-        ? await controller.createMissing(auth.user, projectId, idempotency, body)
+        ? await controller.createMissing(auth.user, projectId, mutationIdempotency, body)
         : action === 'adopt'
-          ? await controller.adopt(auth.user, projectId, idempotency, body)
+          ? await controller.adopt(auth.user, projectId, mutationIdempotency, body)
           : action === 'recover'
-            ? await controller.recover(auth.user, projectId, idempotency, body)
-            : await controller.replace(auth.user, projectId, idempotency, body);
+            ? await controller.recover(auth.user, projectId, mutationIdempotency, body)
+            : action === 'replace'
+              ? await controller.replace(auth.user, projectId, mutationIdempotency, body)
+              : action === 'resume'
+                ? await controller.resume(auth.user, projectId, body)
+                : await controller.reconcile(auth.user, projectId, body);
       const reconciliationRequired = typeof result === 'object' && result !== null
         && 'outcome' in result
         && (result.outcome === 'adoption-required' || result.outcome === 'reconciliation-required');

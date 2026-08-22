@@ -39,6 +39,8 @@ function view(overrides: Partial<Parameters<typeof ProjectHumanThreadPanelView>[
       onCreate={vi.fn()}
       onAdopt={vi.fn()}
       onRecover={vi.fn()}
+      onResume={vi.fn()}
+      onReconcile={vi.fn()}
       onReplaceOpen={vi.fn()}
       onReplaceReason={vi.fn()}
       onReplace={vi.fn()}
@@ -96,6 +98,25 @@ describe('project human thread UI', () => {
     expect(html).toContain('Only the project binding lifecycle is available here.');
     expect(html).not.toContain('Approve');
     expect(html).not.toContain('Deploy');
+  });
+
+  it('offers durable resume and explicit candidate reconciliation after a browser restart', () => {
+    const html = view({
+      snapshot: snapshot({
+        current: { ...binding, generation: 1, bindingId: 'project-human-thread:arcade:1', status: 'replacement-pending', predecessorGeneration: null },
+        replacement: { expectedGeneration: 1, reason: 'The current conversation is unavailable.', createPhase: 'reconcile-required' },
+        candidates: [{ conversationId: '22222222-2222-2222-2222-222222222222', canonicalPath: project.root, dev: '1', ino: '2', createdAt: 1 }],
+      }),
+    });
+    expect(html).toContain('Resume replacement');
+    expect(html).toContain('Reconcile candidate');
+    expect(html).toContain('data-testid="project-human-thread-replacement-pending"');
+    expect(html).not.toContain('Confirm replacement');
+    const legacyHtml = view({
+      snapshot: snapshot({ current: { ...binding, generation: 1, bindingId: 'project-human-thread:arcade:1', status: 'replacement-pending', predecessorGeneration: null }, candidates: [{ conversationId: '22222222-2222-2222-2222-222222222222', canonicalPath: project.root, dev: '1', ino: '2', createdAt: 1 }] }),
+    });
+    expect(legacyHtml).toContain('manual reconciliation');
+    expect(legacyHtml).not.toContain('Resume replacement');
   });
 
   it('renders bounded choices and ordinary response entry without approval semantics', () => {

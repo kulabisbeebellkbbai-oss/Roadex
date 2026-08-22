@@ -183,12 +183,18 @@ export type ProjectHumanThreadCandidatePublic = {
   ino: string;
   createdAt: number;
 };
+export type ProjectHumanThreadReplacementPublic = {
+  expectedGeneration: number;
+  reason: string;
+  createPhase: 'not-started' | 'creating' | 'reconcile-required' | 'created';
+  createdConversationId?: string;
+};
 
 export async function getProjectHumanThread(
   token: string | undefined,
   projectId: string,
-): Promise<{ current?: ProjectHumanThreadBinding; candidates: ProjectHumanThreadCandidatePublic[] }> {
-  const response = await request<{ ok: true; current?: ProjectHumanThreadBinding; candidates: ProjectHumanThreadCandidatePublic[] }>(
+): Promise<{ current?: ProjectHumanThreadBinding; candidates: ProjectHumanThreadCandidatePublic[]; replacement?: ProjectHumanThreadReplacementPublic }> {
+  const response = await request<{ ok: true; current?: ProjectHumanThreadBinding; candidates: ProjectHumanThreadCandidatePublic[]; replacement?: ProjectHumanThreadReplacementPublic }>(
     `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread`, { token },
   );
   return { current: response.current, candidates: response.candidates };
@@ -214,6 +220,31 @@ export async function mutateProjectHumanThread(
   const response = await request<{ ok: boolean; result: unknown }>(
     `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread/${action}`,
     { method: 'POST', token, body, requestId: crypto.randomUUID(), headers: { 'idempotency-key': idempotencyKey } },
+  );
+  return response.result;
+}
+
+export async function resumeProjectHumanThread(
+  token: string | undefined,
+  projectId: string,
+  expectedGeneration: number,
+): Promise<unknown> {
+  const response = await request<{ ok: boolean; result: unknown }>(
+    `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread/resume`,
+    { method: 'POST', token, body: { expectedGeneration }, requestId: crypto.randomUUID() },
+  );
+  return response.result;
+}
+
+export async function reconcileProjectHumanThread(
+  token: string | undefined,
+  projectId: string,
+  expectedGeneration: number,
+  conversationId: string,
+): Promise<unknown> {
+  const response = await request<{ ok: boolean; result: unknown }>(
+    `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread/reconcile`,
+    { method: 'POST', token, body: { expectedGeneration, conversationId }, requestId: crypto.randomUUID() },
   );
   return response.result;
 }

@@ -1,5 +1,5 @@
 import { bindingDigest, type ProjectHumanThreadBinding } from '../shared/projectHumanThreadContracts.js';
-import type { ProjectHumanThreadAuthority, ProjectHumanThreadCandidate } from './projectHumanThreadAuthority.js';
+import { isProjectHumanThreadCreateNoSideEffect, type ProjectHumanThreadAuthority, type ProjectHumanThreadCandidate } from './projectHumanThreadAuthority.js';
 import type { ProjectHumanThreadStore } from './projectHumanThreadStore.js';
 
 type Authority = Pick<ProjectHumanThreadAuthority, 'candidates' | 'inspect' | 'create' | 'repair'>;
@@ -14,6 +14,9 @@ type BaseRequest = {
 export type CreateMissingResult =
   | { outcome: 'created' | 'current'; binding: ProjectHumanThreadBinding }
   | { outcome: 'adoption-required'; candidates: ProjectHumanThreadCandidate[] }
+  | { outcome: 'reconciliation-required'; candidates: ProjectHumanThreadCandidate[] };
+export type ReplacementResult =
+  | { outcome: 'replaced' | 'current'; binding: ProjectHumanThreadBinding }
   | { outcome: 'reconciliation-required'; candidates: ProjectHumanThreadCandidate[] };
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
@@ -98,7 +101,67 @@ export class ProjectHumanThreadService {
     }
   }
 
-  async replace(input: BaseRequest & { expectedGeneration: number; reason: string }): Promise<{ outcome: 'replaced' | 'current'; binding: ProjectHumanThreadBinding }> {
+  replacementIntent(projectId: string) {
+    return this.#store.replacementIntent(projectId);
+  }
+
+  replacementCandidates(projectId: string, projectRoot: string): ProjectHumanThreadCandidate[] {
+    const current = this.#store.current(projectId);
+    if (!current || current.status !== 'replacement-pending') return [];
+    const boundIds = new Set(this.#store.history(projectId).map((item) => item.conversationId));
+    return this.#authority.candidates(projectRoot).filter((item) => !boundIds.has(item.conversationId));
+  }
+
+  async resume(input: { projectId: string; projectRoot: string; expectedGeneration: number }): Promise<ReplacementResult> {
+    const intent = this.#store.replacementIntent(input.projectId);
+    if (!intent || intent.state !== 'prepared') throw new Error('Project human thread replacement intent is unavailable.');
+    if (intent.expectedGeneration !== input.expectedGeneration || intent.projectRoot !== input.projectRoot) {
+      throw new Error('Project human thread replacement intent conflict.');
+    }
+    return this.replace({
+      projectId: input.projectId,
+      projectRoot: intent.projectRoot,
+      provenanceDigest: intent.provenanceDigest,
+      idempotencyKey: intent.idempotencyKey,
+      expectedGeneration: intent.expectedGeneration,
+      reason: intent.reason,
+    });
+  }
+
+  async reconcile(input: {
+    projectId: string;
+    projectRoot: string;
+    expectedGeneration: number;
+    conversationId: string;
+  }): Promise<ReplacementResult> {
+    const current = this.#store.current(input.projectId);
+    const intent = this.#store.replacementIntent(input.projectId);
+    if (!current || current.status !== 'replacement-pending' || (intent && intent.state !== 'prepared')) {
+      throw new Error('Project human thread replacement reconciliation is unavailable.');
+    }
+    if (current.generation !== input.expectedGeneration
+      || (intent && (intent.expectedGeneration !== input.expectedGeneration || intent.projectRoot !== input.projectRoot))) {
+      throw new Error('Project human thread replacement intent conflict.');
+    }
+    const boundIds = new Set(this.#store.history(input.projectId).map((item) => item.conversationId));
+    if (boundIds.has(input.conversationId)) throw new Error('Project human thread replacement candidate is already bound.');
+    const candidate = this.#authority.inspect(input.projectRoot, input.conversationId);
+    const reconciliationKey = intent?.idempotencyKey ?? `legacy-reconcile:${input.projectId}:${input.expectedGeneration}`;
+    const next = createBinding(
+      {
+        projectId: input.projectId,
+        projectRoot: input.projectRoot,
+        provenanceDigest: intent?.provenanceDigest ?? current.provenanceDigest,
+        idempotencyKey: reconciliationKey,
+      }, candidate, input.expectedGeneration + 1, input.expectedGeneration, 'adopted',
+      laterTimestamp(this.#now(), current.updatedAt),
+    );
+    const result = this.#store.activateReplacement(next, input.expectedGeneration, `${reconciliationKey}:activate`);
+    if (intent) this.#store.completeReplacementIntent(input.projectId, intent.eventId, result.binding.conversationId);
+    return { outcome: result.inserted ? 'replaced' : 'current', binding: result.binding };
+  }
+
+  async replace(input: BaseRequest & { expectedGeneration: number; reason: string }): Promise<ReplacementResult> {
     requireBase(input);
     if (!Number.isInteger(input.expectedGeneration) || input.expectedGeneration < 1
       || !input.reason || input.reason !== input.reason.trim() || input.reason.length > 1_000) {
@@ -144,12 +207,39 @@ export class ProjectHumanThreadService {
     }
     requireRoot(pending, input.projectRoot);
     const boundIds = new Set(this.#store.history(input.projectId).map((item) => item.conversationId));
-    const candidates = this.#authority.candidates(input.projectRoot).filter((item) => !boundIds.has(item.conversationId));
-    if (candidates.length > 1) throw new Error('Project human thread replacement candidates are ambiguous.');
-    const candidate = candidates[0] ?? await this.#authority.create(input.projectRoot);
+    let candidates = this.#authority.candidates(input.projectRoot).filter((item) => !boundIds.has(item.conversationId));
+    if (candidates.length > 1) return { outcome: 'reconciliation-required', candidates };
+    const activeIntent = this.#store.replacementIntent(input.projectId);
+    const replacementPhase = activeIntent?.createPhase ?? 'not-started';
+    if (candidates.length === 0 && replacementPhase === 'created' && activeIntent?.createdCandidate) {
+      try {
+        const persisted = this.#authority.inspect(input.projectRoot, activeIntent.createdCandidate.conversationId);
+        if (!boundIds.has(persisted.conversationId)) candidates = [persisted];
+      } catch {
+        // A persisted operation identity without an inspectable candidate is
+        // reconciled explicitly; it is never converted into another create.
+      }
+    }
+    if (candidates.length === 0 && replacementPhase !== 'not-started') {
+      return { outcome: 'reconciliation-required', candidates: [] };
+    }
+    let candidate = candidates[0];
+    if (!candidate) {
+      this.#store.markReplacementCreateStarted(input.projectId, beginEventId);
+      try {
+        candidate = await this.#authority.create(input.projectRoot);
+        // A returned candidate is the durable operation identity. Persist it
+        // before activation so a restart can inspect/adopt it without create.
+        this.#store.markReplacementCreated(input.projectId, beginEventId, candidate);
+      } catch (error) {
+        if (isProjectHumanThreadCreateNoSideEffect(error)) this.#store.markReplacementCreateNoSideEffect(input.projectId, beginEventId);
+        else this.#store.markReplacementCreateReconciliationRequired(input.projectId, beginEventId);
+        throw error;
+      }
+    }
     const next = createBinding(
       input, candidate, input.expectedGeneration + 1, input.expectedGeneration,
-      candidates[0] ? 'adopted' : 'created', laterTimestamp(this.#now(), pending.updatedAt),
+      candidates.length > 0 ? 'adopted' : 'created', laterTimestamp(this.#now(), pending.updatedAt),
     );
     const result = this.#store.activateReplacement(next, input.expectedGeneration, `${input.idempotencyKey}:activate`);
     this.#store.completeReplacementIntent(input.projectId, beginEventId, result.binding.conversationId);

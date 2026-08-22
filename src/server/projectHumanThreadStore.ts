@@ -5,6 +5,7 @@ import {
   parseProjectHumanThreadBinding,
   type ProjectHumanThreadBinding,
 } from '../shared/projectHumanThreadContracts.js';
+import type { ProjectHumanThreadCandidate } from './projectHumanThreadAuthority.js';
 
 type EventType = 'created' | 'unavailable' | 'recovered' | 'replacement-pending' | 'replacement-activated';
 type EventRow = { type: EventType; payload_json: string; payload_digest: string };
@@ -30,6 +31,8 @@ export type ReplacementIntent = {
   provenanceDigest: string;
   reason: string;
   conversationId: string | null;
+  createPhase: 'not-started' | 'creating' | 'reconcile-required' | 'created';
+  createdCandidate?: ProjectHumanThreadCandidate;
 };
 
 export class ProjectHumanThreadStore {
@@ -87,9 +90,12 @@ export class ProjectHumanThreadStore {
         request_json TEXT NOT NULL,
         request_digest TEXT NOT NULL CHECK(length(request_digest)=64),
         state TEXT NOT NULL CHECK(state IN ('prepared','completed')),
-        conversation_id TEXT
+        conversation_id TEXT,
+        create_phase TEXT NOT NULL DEFAULT 'not-started' CHECK(create_phase IN ('not-started','creating','reconcile-required','created')),
+        created_candidate_json TEXT
       );
     `);
+    this.#migrateReplacementIntentColumns();
     this.#migrateRecoveredEvent();
   }
 
@@ -199,7 +205,7 @@ export class ProjectHumanThreadStore {
     reason: string,
     occurredAt: string,
     eventId: string,
-    intent?: Omit<ReplacementIntent, 'state' | 'eventId' | 'conversationId'>,
+    intent?: Omit<ReplacementIntent, 'state' | 'eventId' | 'conversationId' | 'createPhase' | 'createdCandidate'>,
   ): ProjectHumanThreadBinding {
     if (!reason || reason !== reason.trim() || reason.length > 1_000) throw new Error('Replacement reason is invalid.');
     return this.#transaction(() => {
@@ -232,8 +238,8 @@ export class ProjectHumanThreadStore {
           this.#db.prepare('DELETE FROM project_human_thread_replacement_intents WHERE project_id=?').run(projectId);
         }
         this.#db.prepare(`INSERT INTO project_human_thread_replacement_intents(
-          project_id,event_id,request_json,request_digest,state,conversation_id
-        ) VALUES (?,?,?,?, 'prepared',NULL)`).run(projectId, eventId, requestJson, sha256(requestJson));
+          project_id,event_id,request_json,request_digest,state,conversation_id,create_phase,created_candidate_json
+        ) VALUES (?,?,?,?, 'prepared',NULL,'not-started',NULL)`).run(projectId, eventId, requestJson, sha256(requestJson));
       }
       const binding = revised(prior, { status: 'replacement-pending', updatedAt: occurredAt });
       this.#insertEvent(eventId, 'replacement-pending', projectId, expectedGeneration, occurredAt, { binding, reason });
@@ -245,11 +251,74 @@ export class ProjectHumanThreadStore {
 
   replacementIntent(projectId: string): ReplacementIntent | undefined {
     const row = this.#db.prepare(`
-      SELECT event_id,request_json,state,conversation_id FROM project_human_thread_replacement_intents WHERE project_id=?
-    `).get(projectId) as { event_id: string; request_json: string; state: 'prepared' | 'completed'; conversation_id: string | null } | undefined;
+      SELECT event_id,request_json,state,conversation_id,create_phase,created_candidate_json
+      FROM project_human_thread_replacement_intents WHERE project_id=?
+    `).get(projectId) as {
+      event_id: string;
+      request_json: string;
+      state: 'prepared' | 'completed';
+      conversation_id: string | null;
+      create_phase: ReplacementIntent['createPhase'];
+      created_candidate_json: string | null;
+    } | undefined;
     if (!row) return undefined;
     const request = JSON.parse(row.request_json) as Omit<ReplacementIntent, 'state' | 'eventId' | 'conversationId'>;
-    return { ...request, state: row.state, eventId: row.event_id, conversationId: row.conversation_id };
+    return {
+      ...request,
+      state: row.state,
+      eventId: row.event_id,
+      conversationId: row.conversation_id,
+      createPhase: row.create_phase,
+      ...(row.created_candidate_json ? { createdCandidate: JSON.parse(row.created_candidate_json) as ProjectHumanThreadCandidate } : {}),
+    };
+  }
+
+  markReplacementCreateStarted(projectId: string, eventId: string): void {
+    const result = this.#db.prepare(`
+      UPDATE project_human_thread_replacement_intents SET create_phase='creating'
+      WHERE project_id=? AND event_id=? AND state='prepared' AND create_phase='not-started'
+    `).run(projectId, eventId);
+    if (Number(result.changes) === 1) return;
+    const existing = this.replacementIntent(projectId);
+    if (existing?.eventId !== eventId || existing.state !== 'prepared') throw new Error('Project human thread replacement intent is missing.');
+    if (existing.createPhase === 'creating') return;
+    throw new Error('Project human thread replacement create phase conflict.');
+  }
+
+  markReplacementCreateNoSideEffect(projectId: string, eventId: string): void {
+    const result = this.#db.prepare(`
+      UPDATE project_human_thread_replacement_intents SET create_phase='not-started',created_candidate_json=NULL
+      WHERE project_id=? AND event_id=? AND state='prepared' AND create_phase='creating'
+    `).run(projectId, eventId);
+    if (Number(result.changes) === 1) return;
+    const existing = this.replacementIntent(projectId);
+    if (existing?.eventId === eventId && existing.createPhase === 'not-started') return;
+    throw new Error('Project human thread replacement create phase conflict.');
+  }
+
+  markReplacementCreateReconciliationRequired(projectId: string, eventId: string): void {
+    const result = this.#db.prepare(`
+      UPDATE project_human_thread_replacement_intents SET create_phase='reconcile-required'
+      WHERE project_id=? AND event_id=? AND state='prepared' AND create_phase IN ('creating','reconcile-required')
+    `).run(projectId, eventId);
+    if (Number(result.changes) === 1) return;
+    const existing = this.replacementIntent(projectId);
+    if (existing?.eventId === eventId && existing.createPhase === 'reconcile-required') return;
+    throw new Error('Project human thread replacement create phase conflict.');
+  }
+
+  markReplacementCreated(projectId: string, eventId: string, candidate: ProjectHumanThreadCandidate): void {
+    const candidateJson = stableJson(candidate);
+    const result = this.#db.prepare(`
+      UPDATE project_human_thread_replacement_intents
+      SET create_phase='created',created_candidate_json=?
+      WHERE project_id=? AND event_id=? AND state='prepared' AND create_phase IN ('creating','created')
+    `).run(candidateJson, projectId, eventId);
+    if (Number(result.changes) === 1) return;
+    const existing = this.replacementIntent(projectId);
+    if (existing?.eventId === eventId && existing.createPhase === 'created'
+      && existing.createdCandidate && stableJson(existing.createdCandidate) === candidateJson) return;
+    throw new Error('Project human thread replacement create phase conflict.');
   }
 
   completeReplacementIntent(projectId: string, eventId: string, conversationId: string): void {
@@ -375,13 +444,36 @@ export class ProjectHumanThreadStore {
     });
   }
 
+  #migrateReplacementIntentColumns(): void {
+    const columns = this.#db.prepare('PRAGMA table_info(project_human_thread_replacement_intents)').all() as unknown as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'create_phase')) {
+      this.#db.exec("ALTER TABLE project_human_thread_replacement_intents ADD COLUMN create_phase TEXT NOT NULL DEFAULT 'not-started'");
+      // Older replacement intents had no durable create phase. If their
+      // binding is still pending, the external create effect is unknowable;
+      // classify it as reconciliation-required rather than allowing a blind
+      // retry after restart.
+      this.#db.exec(`
+        UPDATE project_human_thread_replacement_intents SET create_phase='reconcile-required'
+        WHERE project_id IN (
+          SELECT current.project_id FROM project_human_thread_current current
+          JOIN project_human_thread_bindings binding
+            ON binding.project_id=current.project_id AND binding.generation=current.generation
+          WHERE binding.status='replacement-pending'
+        )
+      `);
+    }
+    if (!columns.some((column) => column.name === 'created_candidate_json')) {
+      this.#db.exec('ALTER TABLE project_human_thread_replacement_intents ADD COLUMN created_candidate_json TEXT');
+    }
+  }
+
   #requireCurrent(projectId: string, generation: number): ProjectHumanThreadBinding {
     const binding = this.current(projectId);
     if (!binding || binding.generation !== generation) throw new Error('Project human thread generation conflict.');
     return binding;
   }
 
-  #assertReplacementIntent(projectId: string, eventId: string, intent: Omit<ReplacementIntent, 'state' | 'eventId' | 'conversationId'>): void {
+  #assertReplacementIntent(projectId: string, eventId: string, intent: Omit<ReplacementIntent, 'state' | 'eventId' | 'conversationId' | 'createPhase' | 'createdCandidate'>): void {
     const existing = this.replacementIntent(projectId);
     const request = {
       idempotencyKey: intent.idempotencyKey,
