@@ -68,4 +68,17 @@ describe('ProjectHumanThreadStore', () => {
     reopened.rebuild();
     expect(reopened.current('arcade')).toEqual(binding());
   });
+
+  it('retains each lifecycle event in a durable relay outbox until its exact receipt', () => {
+    const store = new ProjectHumanThreadStore(':memory:');
+    store.createInitial(binding(), 'create:arcade:1');
+    store.markUnavailable('arcade', 1, 'thread missing', '2026-08-22T12:10:00.000Z', 'unavailable:arcade:1');
+    expect(store.pendingOutbox()).toMatchObject([
+      { eventId: 'create:arcade:1', binding: { generation: 1, status: 'active' } },
+      { eventId: 'unavailable:arcade:1', binding: { generation: 1, status: 'unavailable' } },
+    ]);
+    store.markOutboxDelivered('create:arcade:1');
+    expect(store.pendingOutbox().map((item) => item.eventId)).toEqual(['unavailable:arcade:1']);
+    expect(() => store.markOutboxDelivered('missing')).toThrow(/missing/i);
+  });
 });
