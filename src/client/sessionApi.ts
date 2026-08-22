@@ -197,7 +197,7 @@ export async function getProjectHumanThread(
   const response = await request<{ ok: true; current?: ProjectHumanThreadBinding; candidates: ProjectHumanThreadCandidatePublic[]; replacement?: ProjectHumanThreadReplacementPublic }>(
     `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread`, { token },
   );
-  return { current: response.current, candidates: response.candidates };
+  return { current: response.current, candidates: response.candidates, replacement: response.replacement };
 }
 
 export async function getProjectHumanThreadHistory(
