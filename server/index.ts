@@ -69,6 +69,7 @@ import { ProjectHumanThreadService } from '../src/server/projectHumanThreadServi
 import { ProjectHumanThreadController } from '../src/server/projectHumanThreadController.js';
 import { isAvailableProjectHumanThreadRoute, validProjectHumanThreadCsrf } from '../src/server/projectHumanThreadPolicy.js';
 import { resolveWorkspaceForUser } from '../src/server/workspacePolicy.js';
+import { ProjectHumanThreadRelay, ProjectHumanThreadRelayCoordinator } from '../src/server/projectHumanThreadRelay.js';
 
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8780);
@@ -79,6 +80,8 @@ let projectCreationWorker: ProjectCreationWorker | undefined;
 let appPublicationRequester: AppPublicationRequester | undefined;
 let projectHumanThreadStore: ProjectHumanThreadStore | undefined;
 let projectHumanThreadController: ProjectHumanThreadController | undefined;
+let projectHumanThreadRelay: ProjectHumanThreadRelay | undefined;
+let projectHumanThreadRelayCoordinator: ProjectHumanThreadRelayCoordinator | undefined;
 state.resolveControlledRunnerGrant = (context) =>
   getProjectCreationBroker().resolveControlledRunnerGrant({
     userId: context.userId,
@@ -179,6 +182,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       const adoptionRequired = typeof result === 'object' && result !== null
         && 'outcome' in result && result.outcome === 'adoption-required';
       sendJson(res, adoptionRequired ? 409 : 200, { ok: !adoptionRequired, result });
+      if (!adoptionRequired) scheduleProjectHumanThreadRelay();
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Project human thread request failed.';
@@ -681,6 +685,23 @@ function getProjectHumanThreadController(): ProjectHumanThreadController {
   return projectHumanThreadController;
 }
 
+function getProjectHumanThreadRelayCoordinator(): ProjectHumanThreadRelayCoordinator {
+  if (projectHumanThreadRelayCoordinator) return projectHumanThreadRelayCoordinator;
+  if (!projectHumanThreadStore) getProjectHumanThreadController();
+  projectHumanThreadRelay = new ProjectHumanThreadRelay();
+  projectHumanThreadRelayCoordinator = new ProjectHumanThreadRelayCoordinator(projectHumanThreadStore!, projectHumanThreadRelay);
+  return projectHumanThreadRelayCoordinator;
+}
+
+function scheduleProjectHumanThreadRelay(): void {
+  if (process.env.ROADEX_PROJECT_HUMAN_THREAD_RELAY_ENABLED !== 'true') return;
+  queueMicrotask(() => {
+    void getProjectHumanThreadRelayCoordinator().retryBindings().catch(() => {
+      // The transactional binding outbox remains pending for the next retry.
+    });
+  });
+}
+
 function projectCreationDenied(): { ok: false; error: { code: string; message: string } } {
   return {
     ok: false,
@@ -803,6 +824,10 @@ async function startRoadexApi(): Promise<void> {
   });
   await once(workflowHost, 'listening');
   await coordinator.recover();
+  if (process.env.ROADEX_PROJECT_HUMAN_THREAD_ENABLED === 'true') {
+    getProjectHumanThreadController();
+    scheduleProjectHumanThreadRelay();
+  }
 
   const poller = startApprovalPoller(
     coordinator,
@@ -817,6 +842,7 @@ async function startRoadexApi(): Promise<void> {
           return;
         }
         projectHumanThreadStore?.close();
+        projectHumanThreadRelay?.close();
         resolveClose();
       });
     }),

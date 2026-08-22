@@ -9,6 +9,12 @@ import {
 type EventType = 'created' | 'unavailable' | 'replacement-pending' | 'replacement-activated';
 type EventRow = { type: EventType; payload_json: string; payload_digest: string };
 type BindingRow = { binding_json: string };
+type OutboxRow = { event_id: string; payload_json: string; payload_digest: string; state: 'pending' | 'delivered' };
+
+export type ProjectHumanThreadOutboxRecord = {
+  eventId: string;
+  binding: ProjectHumanThreadBinding;
+};
 
 export type BindingWriteResult = {
   inserted: boolean;
@@ -161,6 +167,26 @@ export class ProjectHumanThreadStore {
       SELECT binding_json FROM project_human_thread_bindings WHERE project_id=? ORDER BY generation
     `).all(projectId) as unknown as BindingRow[];
     return rows.map((row) => parseProjectHumanThreadBinding(JSON.parse(row.binding_json)));
+  }
+
+  pendingOutbox(): ProjectHumanThreadOutboxRecord[] {
+    const rows = this.#db.prepare(`
+      SELECT event_id,payload_json,payload_digest,state FROM project_human_thread_outbox
+      WHERE state='pending' ORDER BY rowid
+    `).all() as unknown as OutboxRow[];
+    return rows.map((row) => {
+      if (sha256(row.payload_json) !== row.payload_digest) throw new Error('Project human thread outbox digest is invalid.');
+      return { eventId: row.event_id, binding: parseProjectHumanThreadBinding(JSON.parse(row.payload_json)) };
+    });
+  }
+
+  markOutboxDelivered(eventId: string): void {
+    const result = this.#db.prepare("UPDATE project_human_thread_outbox SET state='delivered' WHERE event_id=? AND state='pending'")
+      .run(eventId);
+    if (Number(result.changes) === 1) return;
+    const existing = this.#db.prepare('SELECT state FROM project_human_thread_outbox WHERE event_id=?').get(eventId) as { state: string } | undefined;
+    if (existing?.state === 'delivered') return;
+    throw new Error('Project human thread outbox record is missing.');
   }
 
   rebuild(): void {
