@@ -2,7 +2,7 @@ import { bindingDigest, type ProjectHumanThreadBinding } from '../shared/project
 import type { ProjectHumanThreadAuthority, ProjectHumanThreadCandidate } from './projectHumanThreadAuthority.js';
 import type { ProjectHumanThreadStore } from './projectHumanThreadStore.js';
 
-type Authority = Pick<ProjectHumanThreadAuthority, 'candidates' | 'inspect' | 'create'>;
+type Authority = Pick<ProjectHumanThreadAuthority, 'candidates' | 'inspect' | 'create' | 'repair'>;
 type ServiceOptions = { now?: () => string };
 type BaseRequest = {
   projectId: string;
@@ -65,6 +65,7 @@ export class ProjectHumanThreadService {
     try {
       const candidate = this.#authority.inspect(current.root.canonicalPath, current.conversationId);
       if (candidate.dev !== current.root.dev || candidate.ino !== current.root.ino) throw new Error('root identity changed');
+      this.#authority.repair(current);
       return { outcome: 'recovered', binding: current };
     } catch {
       if (current.status === 'unavailable') return { outcome: 'unavailable', binding: current };

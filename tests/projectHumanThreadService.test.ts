@@ -28,6 +28,9 @@ class FakeAuthority {
     this.available.push(value);
     return value;
   }
+  repair(binding: { conversationId: string }) {
+    return this.inspect(root, binding.conversationId);
+  }
 }
 
 function setup() {
