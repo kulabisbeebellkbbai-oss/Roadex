@@ -37,6 +37,7 @@ import { hasBleRuntimeVerification, verifyBleRuntime } from './client/bleRuntime
 import { hasSerialRuntimeVerification, verifySerialRuntime } from './client/serialRuntimeVerifier';
 import { allowsUsbOperation } from './shared/usbDeviceProfileContracts';
 import type { RoadexPolicyExceptionDisplay, WaitingApprovalSummary } from './shared/approvalWorkflowContracts';
+import { ProjectHumanThreadPanel } from './ProjectHumanThreadPanel';
 
 function App() {
   const roadex = useRoadexSession();
@@ -613,6 +614,8 @@ function App() {
             <span>{roadex.notice}</span>
           </section>
         ) : null}
+
+        <ProjectHumanThreadPanel token={roadex.token} project={selectedProject} />
 
         <section className="dashboard-grid live-grid" aria-label="Roadex dashboard">
           <article className="codex-panel">
