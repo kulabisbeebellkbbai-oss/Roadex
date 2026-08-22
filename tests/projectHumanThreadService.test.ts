@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ProjectHumanThreadCandidate } from '../src/server/projectHumanThreadAuthority';
 import { ProjectHumanThreadService } from '../src/server/projectHumanThreadService';
 import { ProjectHumanThreadStore } from '../src/server/projectHumanThreadStore';
@@ -94,5 +94,35 @@ describe('ProjectHumanThreadService', () => {
       idempotencyKey: 'human-thread:arcade:replace-1',
     })).resolves.toEqual({ outcome: 'current', binding: replacement.binding });
     expect(service.history('arcade')).toMatchObject([{ generation: 1, status: 'retired' }, { generation: 2, status: 'active' }]);
+  });
+
+  it('persists create intent and never spawns a second conversation after an ambiguous failure', async () => {
+    const { authority, service, store } = setup();
+    const create = vi.spyOn(authority, 'create').mockRejectedValue(new Error('ambiguous create'));
+    await expect(service.createMissing(request)).rejects.toThrow(/ambiguous/);
+    await expect(service.createMissing(request)).resolves.toEqual({ outcome: 'reconciliation-required', candidates: [] });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(store.creationIntent('arcade')).toMatchObject({ state: 'prepared', eventId: request.idempotencyKey });
+  });
+
+  it('offers explicit adoption when an ambiguous create left one verifiable candidate', async () => {
+    const { authority, service } = setup();
+    vi.spyOn(authority, 'create').mockImplementation(async () => {
+      authority.available.push(first);
+      throw new Error('response lost');
+    });
+    await expect(service.createMissing(request)).rejects.toThrow(/response lost/);
+    await expect(service.createMissing(request)).resolves.toEqual({ outcome: 'adoption-required', candidates: [first] });
+  });
+
+  it('does not repeat replacement creation after a prepared replacement has no candidate', async () => {
+    const { authority, service } = setup();
+    authority.created.push(first);
+    await service.createMissing(request);
+    const create = vi.spyOn(authority, 'create').mockRejectedValue(new Error('ambiguous replacement'));
+    const replacement = { ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered', idempotencyKey: 'replace:arcade:1' };
+    await expect(service.replace(replacement)).rejects.toThrow(/ambiguous replacement/);
+    await expect(service.replace(replacement)).rejects.toThrow(/requires reconciliation/);
+    expect(create).toHaveBeenCalledTimes(1);
   });
 });
