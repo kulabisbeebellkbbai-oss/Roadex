@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, symlinkSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { ProjectHumanThreadAuthority } from '../src/server/projectHumanThreadAuthority';
+import { bindingDigest, type ProjectHumanThreadBinding } from '../src/shared/projectHumanThreadContracts';
 
 const threadId = '01a01569-7874-7f72-bca9-9c91bb869846';
 
@@ -60,5 +61,37 @@ describe('ProjectHumanThreadAuthority', () => {
     });
     await expect(authority.create(fixture.project)).resolves.toMatchObject({ conversationId: threadId });
     expect(calls).toEqual([fixture.project]);
+  });
+
+  it('recreates only the exact same-ID derived launcher from verified registry and state', () => {
+    const fixture = setup();
+    const launchers = join(fixture.root, 'bin'); mkdirSync(launchers); chmodSync(launchers, 0o700);
+    const command = `codex-arcade-${threadId.slice(0, 8)}`;
+    const registry = join(fixture.root, 'codex-projects.csv');
+    writeFileSync(registry, [
+      'conversation_id,label,project,command,launcher,created_at,updated_at,source,notes',
+      `${threadId},Arcade,${fixture.project},${command},${join(launchers, command)},,,,`,
+      '',
+    ].join('\n'));
+    chmodSync(registry, 0o600);
+    const authority = new ProjectHumanThreadAuthority({
+      stateDatabasePath: fixture.state, registryPath: registry, launcherDirectory: launchers,
+      sessionExecutable: '/safe/codex-memory-session', tmuxExecutable: '/usr/bin/tmux',
+    });
+    const candidate = authority.inspect(fixture.project, threadId);
+    const value = {
+      schemaVersion: 'roadex.project-human-thread-binding.v1' as const,
+      bindingId: 'project-human-thread:arcade:1', projectId: 'arcade',
+      root: { canonicalPath: fixture.project, dev: candidate.dev, ino: candidate.ino },
+      purpose: 'human-interaction' as const, conversationId: threadId, generation: 1,
+      status: 'active' as const, predecessorGeneration: null, creationMode: 'adopted' as const,
+      provenanceDigest: 'a'.repeat(64), createdAt: '2026-08-22T12:00:00.000Z',
+      updatedAt: '2026-08-22T12:00:00.000Z', retiredAt: null,
+    };
+    const binding: ProjectHumanThreadBinding = { ...value, recordDigest: bindingDigest(value) };
+    expect(authority.repair(binding)).toMatchObject({ conversationId: threadId });
+    expect(readFileSync(join(launchers, command), 'utf8')).toContain(`resume ${threadId} --cd`);
+    writeFileSync(join(launchers, command), '#!/bin/sh\nexec false\n');
+    expect(() => authority.repair(binding)).toThrow(/launcher/);
   });
 });
