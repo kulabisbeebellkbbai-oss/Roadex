@@ -13,7 +13,8 @@ type BaseRequest = {
 
 export type CreateMissingResult =
   | { outcome: 'created' | 'current'; binding: ProjectHumanThreadBinding }
-  | { outcome: 'adoption-required'; candidates: ProjectHumanThreadCandidate[] };
+  | { outcome: 'adoption-required'; candidates: ProjectHumanThreadCandidate[] }
+  | { outcome: 'reconciliation-required'; candidates: ProjectHumanThreadCandidate[] };
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
@@ -34,13 +35,22 @@ export class ProjectHumanThreadService {
     const current = this.#store.current(input.projectId);
     if (current) {
       requireRoot(current, input.projectRoot);
+      const intent = this.#store.creationIntent(input.projectId);
+      if (intent?.state === 'prepared' && intent.eventId === input.idempotencyKey) {
+        this.#store.completeCreationIntent(input.projectId, input.idempotencyKey, current.conversationId);
+      }
       return { outcome: 'current', binding: current };
     }
     const candidates = this.#authority.candidates(input.projectRoot);
     if (candidates.length > 0) return { outcome: 'adoption-required', candidates };
+    const intent = this.#store.beginCreationIntent(input.projectId, input.idempotencyKey, {
+      projectRoot: input.projectRoot, provenanceDigest: input.provenanceDigest,
+    });
+    if (!intent.inserted) return { outcome: 'reconciliation-required', candidates: [] };
     const candidate = await this.#authority.create(input.projectRoot);
     const binding = createBinding(input, candidate, 1, null, 'created', this.#now());
     const result = this.#store.createInitial(binding, input.idempotencyKey);
+    this.#store.completeCreationIntent(input.projectId, input.idempotencyKey, binding.conversationId);
     return { outcome: result.inserted ? 'created' : 'current', binding: result.binding };
   }
 
@@ -55,6 +65,10 @@ export class ProjectHumanThreadService {
     const candidate = this.#authority.inspect(input.projectRoot, input.conversationId);
     const binding = createBinding(input, candidate, 1, null, 'adopted', this.#now());
     const result = this.#store.createInitial(binding, input.idempotencyKey);
+    const intent = this.#store.creationIntent(input.projectId);
+    if (intent?.state === 'prepared') {
+      this.#store.completeCreationIntent(input.projectId, intent.eventId, binding.conversationId);
+    }
     return { outcome: result.inserted ? 'adopted' : 'current', binding: result.binding };
   }
 
@@ -88,6 +102,7 @@ export class ProjectHumanThreadService {
       && current.provenanceDigest === input.provenanceDigest) {
       return { outcome: 'current', binding: current };
     }
+    const wasPending = current?.status === 'replacement-pending';
     const pending = this.#store.beginReplacement(
       input.projectId, input.expectedGeneration, input.reason, this.#now(), `${input.idempotencyKey}:begin`,
     );
@@ -95,6 +110,9 @@ export class ProjectHumanThreadService {
     const boundIds = new Set(this.#store.history(input.projectId).map((item) => item.conversationId));
     const candidates = this.#authority.candidates(input.projectRoot).filter((item) => !boundIds.has(item.conversationId));
     if (candidates.length > 1) throw new Error('Project human thread replacement candidates are ambiguous.');
+    if (wasPending && candidates.length === 0) {
+      throw new Error('Project human thread replacement requires reconciliation before another create.');
+    }
     const candidate = candidates[0] ?? await this.#authority.create(input.projectRoot);
     const next = createBinding(
       input, candidate, input.expectedGeneration + 1, input.expectedGeneration, 'created', this.#now(),

@@ -181,10 +181,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
           : action === 'recover'
             ? await controller.recover(auth.user, projectId, idempotency, body)
             : await controller.replace(auth.user, projectId, idempotency, body);
-      const adoptionRequired = typeof result === 'object' && result !== null
-        && 'outcome' in result && result.outcome === 'adoption-required';
-      sendJson(res, adoptionRequired ? 409 : 200, { ok: !adoptionRequired, result });
-      if (!adoptionRequired) scheduleProjectHumanThreadRelay();
+      const reconciliationRequired = typeof result === 'object' && result !== null
+        && 'outcome' in result
+        && (result.outcome === 'adoption-required' || result.outcome === 'reconciliation-required');
+      sendJson(res, reconciliationRequired ? 409 : 200, { ok: !reconciliationRequired, result });
+      if (!reconciliationRequired) scheduleProjectHumanThreadRelay();
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Project human thread request failed.';

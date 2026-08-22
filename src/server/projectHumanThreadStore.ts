@@ -63,6 +63,14 @@ export class ProjectHumanThreadStore {
         state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','delivered')),
         attempts INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS project_human_thread_creation_intents (
+        project_id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL UNIQUE,
+        request_json TEXT NOT NULL,
+        request_digest TEXT NOT NULL CHECK(length(request_digest)=64),
+        state TEXT NOT NULL CHECK(state IN ('prepared','completed')),
+        conversation_id TEXT
+      );
     `);
   }
 
@@ -81,6 +89,49 @@ export class ProjectHumanThreadStore {
       this.#enqueue(eventId, binding);
       return { inserted: true, binding };
     });
+  }
+
+  beginCreationIntent(
+    projectId: string,
+    eventId: string,
+    request: { projectRoot: string; provenanceDigest: string },
+  ): { inserted: boolean } {
+    const requestJson = stableJson(request);
+    return this.#transaction(() => {
+      const existing = this.#db.prepare(`
+        SELECT event_id,request_json,request_digest FROM project_human_thread_creation_intents WHERE project_id=?
+      `).get(projectId) as { event_id: string; request_json: string; request_digest: string } | undefined;
+      if (existing) {
+        if (existing.event_id !== eventId || existing.request_json !== requestJson
+          || existing.request_digest !== sha256(requestJson)) throw new Error('Project human thread creation intent conflict.');
+        return { inserted: false };
+      }
+      if (this.current(projectId)) throw new Error('Project already has a current human thread.');
+      this.#db.prepare(`INSERT INTO project_human_thread_creation_intents(
+        project_id,event_id,request_json,request_digest,state,conversation_id
+      ) VALUES (?,?,?,?,'prepared',NULL)`).run(projectId, eventId, requestJson, sha256(requestJson));
+      return { inserted: true };
+    });
+  }
+
+  completeCreationIntent(projectId: string, eventId: string, conversationId: string): void {
+    const result = this.#db.prepare(`
+      UPDATE project_human_thread_creation_intents SET state='completed',conversation_id=?
+      WHERE project_id=? AND event_id=? AND state='prepared'
+    `).run(conversationId, projectId, eventId);
+    if (Number(result.changes) === 1) return;
+    const existing = this.#db.prepare(`
+      SELECT state,conversation_id FROM project_human_thread_creation_intents WHERE project_id=? AND event_id=?
+    `).get(projectId, eventId) as { state: string; conversation_id: string | null } | undefined;
+    if (existing?.state === 'completed' && existing.conversation_id === conversationId) return;
+    throw new Error('Project human thread creation intent is missing.');
+  }
+
+  creationIntent(projectId: string): { state: 'prepared' | 'completed'; eventId: string; conversationId: string | null } | undefined {
+    const row = this.#db.prepare(`
+      SELECT state,event_id,conversation_id FROM project_human_thread_creation_intents WHERE project_id=?
+    `).get(projectId) as { state: 'prepared' | 'completed'; event_id: string; conversation_id: string | null } | undefined;
+    return row ? { state: row.state, eventId: row.event_id, conversationId: row.conversation_id } : undefined;
   }
 
   markUnavailable(
