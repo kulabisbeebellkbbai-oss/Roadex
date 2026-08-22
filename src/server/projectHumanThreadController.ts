@@ -113,6 +113,9 @@ export class ProjectHumanThreadController {
     const body = parseBody(resume, payload);
     const project = this.#owned(user, projectId);
     if (project.activeRun) throw new Error('Project human thread cannot be replaced during an active run.');
+    if (this.#deps.hasPendingInteraction?.(project.projectId)) {
+      throw new Error('Project human thread cannot be replaced while human interaction is pending.');
+    }
     return await this.#service.resume({ projectId: project.projectId, projectRoot: project.root, ...body });
   }
 
@@ -120,6 +123,9 @@ export class ProjectHumanThreadController {
     const body = parseBody(reconcile, payload);
     const project = this.#owned(user, projectId);
     if (project.activeRun) throw new Error('Project human thread cannot be replaced during an active run.');
+    if (this.#deps.hasPendingInteraction?.(project.projectId)) {
+      throw new Error('Project human thread cannot be replaced while human interaction is pending.');
+    }
     return await this.#service.reconcile({ projectId: project.projectId, projectRoot: project.root, ...body });
   }
 

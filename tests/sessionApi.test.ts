@@ -10,13 +10,14 @@ describe('Roadex client CSRF contract', () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       calls.push({ path: String(input), init });
-      return new Response(JSON.stringify({ ok: true, current: undefined, candidates: [], history: [], result: { outcome: 'current' } }), {
+      return new Response(JSON.stringify({ ok: true, current: undefined, candidates: [], replacement: { expectedGeneration: 1, reason: 'Resume safely', createPhase: 'reconcile-required' }, history: [], result: { outcome: 'current' } }), {
         status: 200,
         headers: { 'content-type': 'application/json', 'x-roadex-csrf': 'private-test-value' },
       });
     }));
     const { getProjectHumanThread, getProjectHumanThreadHistory, mutateProjectHumanThread } = await import('../src/client/sessionApi');
-    await getProjectHumanThread(undefined, 'arcade');
+    const thread = await getProjectHumanThread(undefined, 'arcade');
+    expect(thread.replacement).toEqual({ expectedGeneration: 1, reason: 'Resume safely', createPhase: 'reconcile-required' });
     await getProjectHumanThreadHistory(undefined, 'arcade');
     await mutateProjectHumanThread(undefined, 'arcade', 'recover', 'recover-key-0000001', { expectedGeneration: 1 });
     expect(calls.map((call) => call.path)).toEqual([

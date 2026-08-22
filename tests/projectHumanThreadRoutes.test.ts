@@ -117,4 +117,14 @@ describe('ProjectHumanThreadController', () => {
     })).resolves.toMatchObject({ outcome: 'replaced' });
     expect(service.resume).toHaveBeenCalledWith({ projectId: 'arcade', projectRoot: '/srv/arcade', expectedGeneration: 1 });
   });
+
+  it('applies the pending-interaction fence to resume and reconcile as well as replace', async () => {
+    const { controller, service } = fixture(false, true);
+    await expect(controller.resume(owner, 'arcade', { expectedGeneration: 1 })).rejects.toThrow(/human interaction is pending/i);
+    await expect(controller.reconcile(owner, 'arcade', {
+      expectedGeneration: 1, conversationId: binding.conversationId,
+    })).rejects.toThrow(/human interaction is pending/i);
+    expect(service.resume).not.toHaveBeenCalled();
+    expect(service.reconcile).not.toHaveBeenCalled();
+  });
 });
