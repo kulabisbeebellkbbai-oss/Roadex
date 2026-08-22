@@ -1,0 +1,71 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { bindingDigest, type ProjectHumanThreadBinding } from '../src/shared/projectHumanThreadContracts';
+import { ProjectHumanThreadStore } from '../src/server/projectHumanThreadStore';
+
+function binding(overrides: Partial<ProjectHumanThreadBinding> = {}): ProjectHumanThreadBinding {
+  const base = {
+    schemaVersion: 'roadex.project-human-thread-binding.v1' as const,
+    bindingId: 'project-human-thread:arcade:1', projectId: 'arcade',
+    root: { canonicalPath: '/workspace/Arcade', dev: '254', ino: '12345' },
+    purpose: 'human-interaction' as const,
+    conversationId: '01a01569-7874-7f72-bca9-9c91bb869846', generation: 1,
+    status: 'active' as const, predecessorGeneration: null,
+    creationMode: 'created' as const, provenanceDigest: '1'.repeat(64),
+    createdAt: '2026-08-22T12:00:00.000Z', updatedAt: '2026-08-22T12:00:00.000Z', retiredAt: null,
+  };
+  const value = { ...base, ...overrides };
+  return { ...value, recordDigest: bindingDigest(value) } as ProjectHumanThreadBinding;
+}
+
+describe('ProjectHumanThreadStore', () => {
+  it('creates one active binding and replays only the exact idempotent request', () => {
+    const store = new ProjectHumanThreadStore(':memory:');
+    const first = store.createInitial(binding(), 'create:arcade:1');
+    const replay = store.createInitial(binding(), 'create:arcade:1');
+    expect(first).toEqual({ inserted: true, binding: binding() });
+    expect(replay).toEqual({ inserted: false, replay: true, binding: binding() });
+    expect(() => store.createInitial(binding({ conversationId: '01a01569-7874-7f72-bca9-9c91bb869847' }), 'create:arcade:1')).toThrow();
+  });
+
+  it('enforces project and conversation uniqueness under independent requests', () => {
+    const store = new ProjectHumanThreadStore(':memory:');
+    store.createInitial(binding(), 'create:arcade:1');
+    expect(() => store.createInitial(binding({ conversationId: '01a01569-7874-7f72-bca9-9c91bb869847' }), 'create:arcade:2')).toThrow();
+    expect(() => store.createInitial(binding({ bindingId: 'project-human-thread:other:1', projectId: 'other' }), 'create:other:1')).toThrow();
+  });
+
+  it('marks unavailable and atomically replaces with immutable predecessor history', () => {
+    const store = new ProjectHumanThreadStore(':memory:');
+    store.createInitial(binding(), 'create:arcade:1');
+    const unavailable = store.markUnavailable('arcade', 1, 'thread missing', '2026-08-22T12:10:00.000Z', 'unavailable:arcade:1');
+    expect(unavailable.status).toBe('unavailable');
+    const pending = store.beginReplacement('arcade', 1, 'user requested replacement', '2026-08-22T12:11:00.000Z', 'replacement:arcade:1');
+    expect(pending.status).toBe('replacement-pending');
+    const next = binding({
+      bindingId: 'project-human-thread:arcade:2',
+      conversationId: '01a01569-7874-7f72-bca9-9c91bb869847', generation: 2,
+      predecessorGeneration: 1, createdAt: '2026-08-22T12:12:00.000Z', updatedAt: '2026-08-22T12:12:00.000Z',
+    });
+    store.activateReplacement(next, 1, 'activate:arcade:2');
+    expect(store.current('arcade')).toEqual(next);
+    expect(store.history('arcade')).toMatchObject([
+      { generation: 1, status: 'retired', retiredAt: '2026-08-22T12:12:00.000Z' },
+      { generation: 2, status: 'active' },
+    ]);
+    expect(() => store.activateReplacement(binding({ generation: 3 }), 1, 'stale')).toThrow();
+  });
+
+  it('reopens durable state and rebuilds projections from append-only events', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'roadex-human-thread-')), 'state.sqlite');
+    const first = new ProjectHumanThreadStore(path);
+    first.createInitial(binding(), 'create:arcade:1');
+    first.close();
+    const reopened = new ProjectHumanThreadStore(path);
+    expect(reopened.current('arcade')).toEqual(binding());
+    reopened.rebuild();
+    expect(reopened.current('arcade')).toEqual(binding());
+  });
+});
