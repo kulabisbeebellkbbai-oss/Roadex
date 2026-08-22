@@ -80,7 +80,10 @@ export class ProjectHumanThreadService {
       const candidate = this.#authority.inspect(current.root.canonicalPath, current.conversationId);
       if (candidate.dev !== current.root.dev || candidate.ino !== current.root.ino) throw new Error('root identity changed');
       this.#authority.repair(current);
-      return { outcome: 'recovered', binding: current };
+      const binding = current.status === 'unavailable'
+        ? this.#store.markRecovered(projectId, expectedGeneration, this.#now(), idempotencyKey)
+        : current;
+      return { outcome: 'recovered', binding };
     } catch {
       if (current.status === 'unavailable') return { outcome: 'unavailable', binding: current };
       const binding = this.#store.markUnavailable(
@@ -115,7 +118,7 @@ export class ProjectHumanThreadService {
     }
     const candidate = candidates[0] ?? await this.#authority.create(input.projectRoot);
     const next = createBinding(
-      input, candidate, input.expectedGeneration + 1, input.expectedGeneration, 'created', this.#now(),
+      input, candidate, input.expectedGeneration + 1, input.expectedGeneration, 'created', laterTimestamp(this.#now(), pending.updatedAt),
     );
     const result = this.#store.activateReplacement(next, input.expectedGeneration, `${input.idempotencyKey}:activate`);
     return { outcome: result.inserted ? 'replaced' : 'current', binding: result.binding };
@@ -165,4 +168,10 @@ function requireIdentity(projectId: string, idempotencyKey: string): void {
 }
 function requireRoot(binding: ProjectHumanThreadBinding, projectRoot: string): void {
   if (binding.root.canonicalPath !== projectRoot) throw new Error('Project human thread root conflict.');
+}
+function laterTimestamp(candidate: string, prior: string): string {
+  const candidateTime = Date.parse(candidate);
+  const priorTime = Date.parse(prior);
+  if (Number.isNaN(candidateTime) || Number.isNaN(priorTime)) throw new Error('Project human thread timestamp is invalid.');
+  return new Date(Math.max(candidateTime, priorTime + 1)).toISOString();
 }

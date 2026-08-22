@@ -70,13 +70,19 @@ describe('ProjectHumanThreadService', () => {
   });
 
   it('recovers the same identity or marks the binding unavailable', async () => {
-    const { authority, service } = setup();
+    const { authority, service, store } = setup();
     authority.created.push(first);
     const created = await service.createMissing(request);
     if (!('binding' in created)) throw new Error('binding missing');
     expect(service.recover('arcade', 1, 'recover:arcade:1')).toEqual({ outcome: 'recovered', binding: created.binding });
     authority.available.length = 0;
     expect(service.recover('arcade', 1, 'recover:arcade:2')).toMatchObject({ outcome: 'unavailable', binding: { status: 'unavailable' } });
+    authority.available.push(first);
+    const recovered = service.recover('arcade', 1, 'recover:arcade:3');
+    expect(recovered).toMatchObject({ outcome: 'recovered', binding: { status: 'active', conversationId: first.conversationId } });
+    store.rebuild();
+    expect(service.current('arcade')).toEqual(recovered.binding);
+    expect(store.pendingOutbox().at(-1)).toMatchObject({ eventId: 'recover:arcade:3', binding: { status: 'active' } });
   });
 
   it('replaces by generation and reuses an exact unbound candidate after a crash boundary', async () => {

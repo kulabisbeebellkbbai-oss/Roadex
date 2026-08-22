@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -21,6 +23,23 @@ function binding(overrides: Partial<ProjectHumanThreadBinding> = {}): ProjectHum
 }
 
 describe('ProjectHumanThreadStore', () => {
+  it('migrates the pre-recovery event constraint without losing history', () => {
+    const path = join(tmpdir(), `roadex-human-thread-v1-${randomUUID()}.sqlite`);
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`CREATE TABLE project_human_thread_events (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,
+      type TEXT NOT NULL CHECK(type IN ('created','unavailable','replacement-pending','replacement-activated')),
+      project_id TEXT NOT NULL,generation INTEGER NOT NULL,payload_json TEXT NOT NULL,
+      payload_digest TEXT NOT NULL CHECK(length(payload_digest)=64),occurred_at TEXT NOT NULL
+    );`);
+    legacy.close();
+    const store = new ProjectHumanThreadStore(path);
+    const schema = new DatabaseSync(path, { readOnly: true });
+    const sql = (schema.prepare("SELECT sql FROM sqlite_master WHERE name='project_human_thread_events'").get() as { sql: string }).sql;
+    expect(sql).toContain("'recovered'");
+    schema.close();
+    store.close();
+  });
   it('creates one active binding and replays only the exact idempotent request', () => {
     const store = new ProjectHumanThreadStore(':memory:');
     const first = store.createInitial(binding(), 'create:arcade:1');

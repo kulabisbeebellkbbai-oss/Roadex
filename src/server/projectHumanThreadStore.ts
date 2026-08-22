@@ -6,7 +6,7 @@ import {
   type ProjectHumanThreadBinding,
 } from '../shared/projectHumanThreadContracts.js';
 
-type EventType = 'created' | 'unavailable' | 'replacement-pending' | 'replacement-activated';
+type EventType = 'created' | 'unavailable' | 'recovered' | 'replacement-pending' | 'replacement-activated';
 type EventRow = { type: EventType; payload_json: string; payload_digest: string };
 type BindingRow = { binding_json: string };
 type OutboxRow = { event_id: string; payload_json: string; payload_digest: string; state: 'pending' | 'delivered' };
@@ -32,7 +32,7 @@ export class ProjectHumanThreadStore {
       CREATE TABLE IF NOT EXISTS project_human_thread_events (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
         event_id TEXT NOT NULL UNIQUE,
-        type TEXT NOT NULL CHECK(type IN ('created','unavailable','replacement-pending','replacement-activated')),
+        type TEXT NOT NULL CHECK(type IN ('created','unavailable','recovered','replacement-pending','replacement-activated')),
         project_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
         payload_json TEXT NOT NULL,
@@ -72,6 +72,7 @@ export class ProjectHumanThreadStore {
         conversation_id TEXT
       );
     `);
+    this.#migrateRecoveredEvent();
   }
 
   createInitial(raw: ProjectHumanThreadBinding, eventId: string): BindingWriteResult {
@@ -149,6 +150,25 @@ export class ProjectHumanThreadStore {
       if (prior.status !== 'active') throw new Error('Project human thread is not active.');
       const binding = revised(prior, { status: 'unavailable', updatedAt: occurredAt });
       this.#insertEvent(eventId, 'unavailable', projectId, expectedGeneration, occurredAt, { binding, reason });
+      this.#updateBinding(binding);
+      this.#enqueue(eventId, binding);
+      return binding;
+    });
+  }
+
+  markRecovered(
+    projectId: string,
+    expectedGeneration: number,
+    occurredAt: string,
+    eventId: string,
+  ): ProjectHumanThreadBinding {
+    return this.#transaction(() => {
+      const replay = this.#replay(eventId, 'recovered');
+      if (replay) return replay.binding;
+      const prior = this.#requireCurrent(projectId, expectedGeneration);
+      if (prior.status !== 'unavailable') throw new Error('Project human thread is not unavailable.');
+      const binding = revised(prior, { status: 'active', updatedAt: laterTimestamp(occurredAt, prior.updatedAt) });
+      this.#insertEvent(eventId, 'recovered', projectId, expectedGeneration, occurredAt, { binding });
       this.#updateBinding(binding);
       this.#enqueue(eventId, binding);
       return binding;
@@ -252,7 +272,7 @@ export class ProjectHumanThreadStore {
         if (row.type === 'created') {
           const binding = parseProjectHumanThreadBinding(payload.binding);
           this.#insertBinding(binding); this.#setCurrent(binding);
-        } else if (row.type === 'unavailable' || row.type === 'replacement-pending') {
+        } else if (row.type === 'unavailable' || row.type === 'recovered' || row.type === 'replacement-pending') {
           this.#updateBinding(parseProjectHumanThreadBinding(payload.binding));
         } else {
           this.#updateBinding(parseProjectHumanThreadBinding(payload.retired));
@@ -264,6 +284,29 @@ export class ProjectHumanThreadStore {
   }
 
   close(): void { this.#db.close(); }
+
+  #migrateRecoveredEvent(): void {
+    const row = this.#db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='project_human_thread_events'")
+      .get() as { sql: string } | undefined;
+    if (!row || row.sql.includes("'recovered'")) return;
+    this.#transaction(() => {
+      this.#db.exec(`
+        ALTER TABLE project_human_thread_events RENAME TO project_human_thread_events_v1;
+        CREATE TABLE project_human_thread_events (
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+          event_id TEXT NOT NULL UNIQUE,
+          type TEXT NOT NULL CHECK(type IN ('created','unavailable','recovered','replacement-pending','replacement-activated')),
+          project_id TEXT NOT NULL,
+          generation INTEGER NOT NULL,
+          payload_json TEXT NOT NULL,
+          payload_digest TEXT NOT NULL CHECK(length(payload_digest)=64),
+          occurred_at TEXT NOT NULL
+        );
+        INSERT INTO project_human_thread_events SELECT * FROM project_human_thread_events_v1;
+        DROP TABLE project_human_thread_events_v1;
+      `);
+    });
+  }
 
   #requireCurrent(projectId: string, generation: number): ProjectHumanThreadBinding {
     const binding = this.current(projectId);
@@ -325,6 +368,12 @@ function revised(
 }
 
 function stableRoot(value: ProjectHumanThreadBinding['root']): string { return stableJson(value); }
+function laterTimestamp(candidate: string, prior: string): string {
+  const candidateTime = Date.parse(candidate);
+  const priorTime = Date.parse(prior);
+  if (Number.isNaN(candidateTime) || Number.isNaN(priorTime)) throw new Error('Project human thread timestamp is invalid.');
+  return new Date(Math.max(candidateTime, priorTime + 1)).toISOString();
+}
 function sha256(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
