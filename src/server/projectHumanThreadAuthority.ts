@@ -18,6 +18,16 @@ export type ProjectHumanThreadCandidate = {
   createdAt: number;
 };
 
+export type ProjectHumanThreadCreateFailure = Error & {
+  createEffect: 'none' | 'ambiguous';
+};
+
+/** Only an explicit typed `createEffect: 'none'` proof permits create retry. */
+export function isProjectHumanThreadCreateNoSideEffect(error: unknown): error is ProjectHumanThreadCreateFailure {
+  return error instanceof Error
+    && (error as Partial<ProjectHumanThreadCreateFailure>).createEffect === 'none';
+}
+
 type AuthorityOptions = {
   stateDatabasePath?: string;
   env?: NodeJS.ProcessEnv;
