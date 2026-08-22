@@ -1,0 +1,95 @@
+import { describe, expect, it } from 'vitest';
+import type { ProjectHumanThreadCandidate } from '../src/server/projectHumanThreadAuthority';
+import { ProjectHumanThreadService } from '../src/server/projectHumanThreadService';
+import { ProjectHumanThreadStore } from '../src/server/projectHumanThreadStore';
+
+const root = '/workspace/Arcade';
+const first: ProjectHumanThreadCandidate = {
+  conversationId: '01a01569-7874-7f72-bca9-9c91bb869846',
+  canonicalPath: root, dev: '254', ino: '12345', createdAt: 1,
+};
+const second: ProjectHumanThreadCandidate = {
+  ...first, conversationId: '01a01569-7874-7f72-bca9-9c91bb869847', createdAt: 2,
+};
+
+class FakeAuthority {
+  available: ProjectHumanThreadCandidate[] = [];
+  created: ProjectHumanThreadCandidate[] = [];
+  candidates(projectRoot: string) { return projectRoot === root ? [...this.available] : []; }
+  inspect(projectRoot: string, conversationId: string) {
+    const value = this.available.find((item) => item.conversationId === conversationId);
+    if (!value || projectRoot !== root) throw new Error('unavailable');
+    return value;
+  }
+  async create(projectRoot: string) {
+    if (projectRoot !== root) throw new Error('wrong root');
+    const value = this.created.shift();
+    if (!value) throw new Error('no controlled candidate');
+    this.available.push(value);
+    return value;
+  }
+}
+
+function setup() {
+  const store = new ProjectHumanThreadStore(':memory:');
+  const authority = new FakeAuthority();
+  const service = new ProjectHumanThreadService(store, authority, {
+    now: () => '2026-08-22T12:00:00.000Z',
+  });
+  return { store, authority, service };
+}
+
+const request = {
+  projectId: 'arcade', projectRoot: root,
+  provenanceDigest: '1'.repeat(64), idempotencyKey: 'human-thread:arcade:create-1',
+};
+
+describe('ProjectHumanThreadService', () => {
+  it('creates a missing thread once and returns the exact binding on retry', async () => {
+    const { authority, service } = setup();
+    authority.created.push(first);
+    const created = await service.createMissing(request);
+    const replay = await service.createMissing(request);
+    expect(created).toMatchObject({ outcome: 'created', binding: { projectId: 'arcade', generation: 1, conversationId: first.conversationId } });
+    expect(replay).toEqual({ outcome: 'current', binding: created.binding });
+  });
+
+  it('requires explicit adoption when any candidate exists', async () => {
+    const { authority, service } = setup();
+    authority.available.push(first, second);
+    await expect(service.createMissing(request)).resolves.toEqual({
+      outcome: 'adoption-required',
+      candidates: [first, second],
+    });
+    await expect(service.adopt({ ...request, conversationId: first.conversationId })).resolves.toMatchObject({
+      outcome: 'adopted', binding: { creationMode: 'adopted', conversationId: first.conversationId },
+    });
+  });
+
+  it('recovers the same identity or marks the binding unavailable', async () => {
+    const { authority, service } = setup();
+    authority.created.push(first);
+    const created = await service.createMissing(request);
+    if (!('binding' in created)) throw new Error('binding missing');
+    expect(service.recover('arcade', 1, 'recover:arcade:1')).toEqual({ outcome: 'recovered', binding: created.binding });
+    authority.available.length = 0;
+    expect(service.recover('arcade', 1, 'recover:arcade:2')).toMatchObject({ outcome: 'unavailable', binding: { status: 'unavailable' } });
+  });
+
+  it('replaces by generation and reuses an exact unbound candidate after a crash boundary', async () => {
+    const { authority, service } = setup();
+    authority.created.push(first);
+    await service.createMissing(request);
+    authority.created.push(second);
+    const replacement = await service.replace({
+      ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered',
+      idempotencyKey: 'human-thread:arcade:replace-1',
+    });
+    expect(replacement).toMatchObject({ outcome: 'replaced', binding: { generation: 2, conversationId: second.conversationId } });
+    await expect(service.replace({
+      ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered',
+      idempotencyKey: 'human-thread:arcade:replace-1',
+    })).resolves.toEqual({ outcome: 'current', binding: replacement.binding });
+    expect(service.history('arcade')).toMatchObject([{ generation: 1, status: 'retired' }, { generation: 2, status: 'active' }]);
+  });
+});
