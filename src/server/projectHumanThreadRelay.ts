@@ -16,7 +16,7 @@ const REQUEST_SCHEMA = 'roadex.overseer.project-human-thread-relay.v1' as const;
 const RECEIPT_SCHEMA = 'overseer.roadex.project-human-thread-relay-receipt.v1' as const;
 const REQUEST_DOMAIN = 'roadex.overseer.project-human-thread-relay.request.v1';
 const RECEIPT_DOMAIN = 'overseer.roadex.project-human-thread-relay.receipt.v1';
-const DEFAULT_ENDPOINT = 'http://127.0.0.1:8787/api/roadex/project-human-thread-relay';
+export const PROJECT_HUMAN_THREAD_RELAY_ENDPOINT = 'http://127.0.0.1:8766/api/roadex/project-human-thread-relay';
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 
@@ -77,7 +77,7 @@ export class ProjectHumanThreadRelay {
     validateSecret(this.#secret);
     this.#now = options.now ?? (() => new Date().toISOString());
     this.#createNonce = options.createNonce ?? (() => `relay-${randomUUID()}`);
-    const endpoint = options.endpoint ?? process.env.ROADEX_PROJECT_HUMAN_THREAD_RELAY_ENDPOINT ?? DEFAULT_ENDPOINT;
+    const endpoint = options.endpoint ?? process.env.ROADEX_PROJECT_HUMAN_THREAD_RELAY_ENDPOINT ?? PROJECT_HUMAN_THREAD_RELAY_ENDPOINT;
     requireEndpoint(endpoint);
     this.#send = options.send ?? defaultSender(endpoint);
     this.#db = new DatabaseSync(options.databasePath
@@ -319,7 +319,7 @@ function defaultSender(endpoint: string): Sender {
   };
 }
 function requireEndpoint(value: string): void {
-  if (value !== DEFAULT_ENDPOINT) throw new Error('Project human thread relay endpoint is invalid.');
+  if (value !== PROJECT_HUMAN_THREAD_RELAY_ENDPOINT) throw new Error('Project human thread relay endpoint is invalid.');
 }
 function readRelaySecret(): string {
   const path = process.env.ROADEX_PROJECT_HUMAN_THREAD_RELAY_SECRET_FILE;

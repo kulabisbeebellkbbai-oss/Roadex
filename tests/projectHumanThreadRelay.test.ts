@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { messageDigest, type ProjectHumanThreadMessage } from '../src/shared/projectHumanThreadContracts';
-import { ProjectHumanThreadRelay, ProjectHumanThreadRelayCoordinator, relayStableJson, relaySha256 } from '../src/server/projectHumanThreadRelay';
+import { PROJECT_HUMAN_THREAD_RELAY_ENDPOINT, ProjectHumanThreadRelay, ProjectHumanThreadRelayCoordinator, relayStableJson, relaySha256 } from '../src/server/projectHumanThreadRelay';
 import { ProjectHumanThreadStore } from '../src/server/projectHumanThreadStore';
 import { bindingDigest, type ProjectHumanThreadBinding } from '../src/shared/projectHumanThreadContracts';
 
@@ -65,6 +65,29 @@ function accepted(body: string, headers: Record<string, string>) {
 }
 
 describe('ProjectHumanThreadRelay', () => {
+  it('allows only the direct Overseer API authority endpoint', () => {
+    expect(PROJECT_HUMAN_THREAD_RELAY_ENDPOINT).toBe('http://127.0.0.1:8766/api/roadex/project-human-thread-relay');
+    expect(() => new ProjectHumanThreadRelay({ databasePath: database(), secret, endpoint: 'http://127.0.0.1:8787/api/roadex/project-human-thread-relay', send: async () => accepted('{}', {}) })).toThrow(/endpoint/i);
+    const relay = new ProjectHumanThreadRelay({ databasePath: database(), secret, endpoint: PROJECT_HUMAN_THREAD_RELAY_ENDPOINT, send: async () => accepted('{}', {}) });
+    relay.close();
+  });
+
+  it('uses the direct authority URL when the default sender is selected', async () => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      expect(String(input)).toBe(PROJECT_HUMAN_THREAD_RELAY_ENDPOINT);
+      const headers = Object.fromEntries(new Headers(init?.headers).entries());
+      const response = accepted(String(init?.body), headers);
+      return new Response(response.body, { status: response.status, headers: response.headers });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const relay = new ProjectHumanThreadRelay({ databasePath: database(), secret,
+      now: () => '2026-08-22T12:00:00.000Z', createNonce: () => 'request-nonce-endpoint' });
+    relay.enqueueMessage(message);
+    await relay.deliver(message.messageId);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    relay.close();
+  });
+
   it('persists an exact message before send and marks only an authenticated receipt delivered', async () => {
     const send = vi.fn(async (body: string, headers: Record<string, string>) => accepted(body, headers));
     const relay = new ProjectHumanThreadRelay({ databasePath: database(), secret, send,
