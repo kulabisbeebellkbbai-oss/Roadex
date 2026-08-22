@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, History, Link2, Plus, RefreshCw, RotateCcw, ShieldCheck } from 'lucide-react';
 import {
   getProjectHumanThread,
@@ -46,6 +46,7 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
   const [error, setError] = useState('');
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [replaceReason, setReplaceReason] = useState('');
+  const idempotencyKeys = useRef(new Map<string, string>());
 
   async function refresh(): Promise<void> {
     if (!project) return;
@@ -77,8 +78,12 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
     if (!project) return;
     setBusyAction(action);
     setError('');
+    const requestSignature = `${action}:${JSON.stringify(body)}`;
+    const idempotencyKey = idempotencyKeys.current.get(requestSignature) ?? makeIdempotencyKey(action);
+    idempotencyKeys.current.set(requestSignature, idempotencyKey);
     try {
-      await mutateProjectHumanThread(token, project.id, action, makeIdempotencyKey(action), body);
+      await mutateProjectHumanThread(token, project.id, action, idempotencyKey, body);
+      idempotencyKeys.current.delete(requestSignature);
       setReplaceOpen(false);
       setReplaceReason('');
       await refresh();
