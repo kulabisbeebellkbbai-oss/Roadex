@@ -16,7 +16,12 @@ export class ProjectHumanThreadTranscriptRelayCoordinator {
     for (const entry of this.#store.pendingResponseOutbox()) {
       try {
         this.#relay.enqueueResponse(entry.response);
-        const result = await this.#relay.deliver(entry.eventId);
+        // The transcript outbox event is `response:${responseId}`, while the
+        // relay outbox is keyed by the response record identity itself. Keep
+        // the two durable identities distinct and deliver the one we just
+        // enqueued; using entry.eventId makes every response miss the relay
+        // row and retry forever.
+        const result = await this.#relay.deliver(entry.response.responseId);
         if (result.state !== 'delivered') throw new Error('Project human thread response receipt is incomplete.');
         this.#store.markResponseOutboxDelivered(entry.eventId);
         delivered += 1;

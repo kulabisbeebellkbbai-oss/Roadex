@@ -21,6 +21,16 @@ export type BindingWriteResult = {
   replay?: true;
   binding: ProjectHumanThreadBinding;
 };
+export type ReplacementIntent = {
+  state: 'prepared' | 'completed';
+  eventId: string;
+  idempotencyKey: string;
+  expectedGeneration: number;
+  projectRoot: string;
+  provenanceDigest: string;
+  reason: string;
+  conversationId: string | null;
+};
 
 export class ProjectHumanThreadStore {
   readonly #db: DatabaseSync;
@@ -64,6 +74,14 @@ export class ProjectHumanThreadStore {
         attempts INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS project_human_thread_creation_intents (
+        project_id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL UNIQUE,
+        request_json TEXT NOT NULL,
+        request_digest TEXT NOT NULL CHECK(length(request_digest)=64),
+        state TEXT NOT NULL CHECK(state IN ('prepared','completed')),
+        conversation_id TEXT
+      );
+      CREATE TABLE IF NOT EXISTS project_human_thread_replacement_intents (
         project_id TEXT PRIMARY KEY,
         event_id TEXT NOT NULL UNIQUE,
         request_json TEXT NOT NULL,
@@ -181,19 +199,68 @@ export class ProjectHumanThreadStore {
     reason: string,
     occurredAt: string,
     eventId: string,
+    intent?: Omit<ReplacementIntent, 'state' | 'eventId' | 'conversationId'>,
   ): ProjectHumanThreadBinding {
     if (!reason || reason !== reason.trim() || reason.length > 1_000) throw new Error('Replacement reason is invalid.');
     return this.#transaction(() => {
       const replay = this.#replay(eventId, 'replacement-pending');
-      if (replay) return replay.binding;
+      if (replay) {
+        if (intent) this.#assertReplacementIntent(projectId, eventId, intent);
+        return replay.binding;
+      }
       const prior = this.#requireCurrent(projectId, expectedGeneration);
       if (prior.status !== 'active' && prior.status !== 'unavailable') throw new Error('Project human thread cannot be replaced.');
+      if (intent) {
+        const request = {
+          idempotencyKey: intent.idempotencyKey,
+          expectedGeneration: intent.expectedGeneration,
+          projectRoot: intent.projectRoot,
+          provenanceDigest: intent.provenanceDigest,
+          reason: intent.reason,
+        };
+        const requestJson = stableJson(request);
+        const existingIntent = this.#db.prepare(`
+          SELECT event_id,request_json,state FROM project_human_thread_replacement_intents WHERE project_id=?
+        `).get(projectId) as { event_id: string; request_json: string; state: 'prepared' | 'completed' } | undefined;
+        if (existingIntent?.state === 'prepared') {
+          throw new Error('Project human thread replacement intent conflict.');
+        }
+        // Keep the durable record for the in-flight operation, while allowing
+        // a later generation to start a distinct replacement after the prior
+        // intent has completed.
+        if (existingIntent?.state === 'completed') {
+          this.#db.prepare('DELETE FROM project_human_thread_replacement_intents WHERE project_id=?').run(projectId);
+        }
+        this.#db.prepare(`INSERT INTO project_human_thread_replacement_intents(
+          project_id,event_id,request_json,request_digest,state,conversation_id
+        ) VALUES (?,?,?,?, 'prepared',NULL)`).run(projectId, eventId, requestJson, sha256(requestJson));
+      }
       const binding = revised(prior, { status: 'replacement-pending', updatedAt: occurredAt });
       this.#insertEvent(eventId, 'replacement-pending', projectId, expectedGeneration, occurredAt, { binding, reason });
       this.#updateBinding(binding);
       this.#enqueue(eventId, binding);
       return binding;
     });
+  }
+
+  replacementIntent(projectId: string): ReplacementIntent | undefined {
+    const row = this.#db.prepare(`
+      SELECT event_id,request_json,state,conversation_id FROM project_human_thread_replacement_intents WHERE project_id=?
+    `).get(projectId) as { event_id: string; request_json: string; state: 'prepared' | 'completed'; conversation_id: string | null } | undefined;
+    if (!row) return undefined;
+    const request = JSON.parse(row.request_json) as Omit<ReplacementIntent, 'state' | 'eventId' | 'conversationId'>;
+    return { ...request, state: row.state, eventId: row.event_id, conversationId: row.conversation_id };
+  }
+
+  completeReplacementIntent(projectId: string, eventId: string, conversationId: string): void {
+    const result = this.#db.prepare(`
+      UPDATE project_human_thread_replacement_intents SET state='completed',conversation_id=?
+      WHERE project_id=? AND event_id=? AND state='prepared'
+    `).run(conversationId, projectId, eventId);
+    if (Number(result.changes) === 1) return;
+    const existing = this.replacementIntent(projectId);
+    if (existing?.state === 'completed' && existing.eventId === eventId && existing.conversationId === conversationId) return;
+    throw new Error('Project human thread replacement intent is missing.');
   }
 
   activateReplacement(
@@ -312,6 +379,24 @@ export class ProjectHumanThreadStore {
     const binding = this.current(projectId);
     if (!binding || binding.generation !== generation) throw new Error('Project human thread generation conflict.');
     return binding;
+  }
+
+  #assertReplacementIntent(projectId: string, eventId: string, intent: Omit<ReplacementIntent, 'state' | 'eventId' | 'conversationId'>): void {
+    const existing = this.replacementIntent(projectId);
+    const request = {
+      idempotencyKey: intent.idempotencyKey,
+      expectedGeneration: intent.expectedGeneration,
+      projectRoot: intent.projectRoot,
+      provenanceDigest: intent.provenanceDigest,
+      reason: intent.reason,
+    };
+    if (!existing || existing.eventId !== eventId || stableJson(request) !== stableJson({
+      idempotencyKey: existing.idempotencyKey,
+      expectedGeneration: existing.expectedGeneration,
+      projectRoot: existing.projectRoot,
+      provenanceDigest: existing.provenanceDigest,
+      reason: existing.reason,
+    })) throw new Error('Project human thread replacement intent conflict.');
   }
 
   #replay(eventId: string, type: EventType, expected?: Record<string, unknown>): { binding: ProjectHumanThreadBinding } | undefined {

@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { ProjectHumanThreadCandidate } from '../src/server/projectHumanThreadAuthority';
 import { ProjectHumanThreadService } from '../src/server/projectHumanThreadService';
@@ -34,7 +37,11 @@ class FakeAuthority {
 }
 
 function setup() {
-  const store = new ProjectHumanThreadStore(':memory:');
+  return setupAt(':memory:');
+}
+
+function setupAt(path: string) {
+  const store = new ProjectHumanThreadStore(path);
   const authority = new FakeAuthority();
   const service = new ProjectHumanThreadService(store, authority, {
     now: () => '2026-08-22T12:00:00.000Z',
@@ -121,14 +128,81 @@ describe('ProjectHumanThreadService', () => {
     await expect(service.createMissing(request)).resolves.toEqual({ outcome: 'adoption-required', candidates: [first] });
   });
 
-  it('does not repeat replacement creation after a prepared replacement has no candidate', async () => {
+  it('retries the exact replacement intent after create fails before the authority result', async () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'roadex-replacement-restart-')), 'state.sqlite');
+    const { authority, service, store } = setupAt(path);
+    authority.created.push(first);
+    await service.createMissing(request);
+    authority.created.push(second);
+    const create = vi.spyOn(authority, 'create')
+      .mockRejectedValueOnce(new Error('ambiguous replacement'))
+      .mockImplementation(async (projectRoot) => {
+        const value = authority.created.shift();
+        if (!value || projectRoot !== root) throw new Error('no controlled candidate');
+        authority.available.push(value);
+        return value;
+    });
+    const replacement = { ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered', idempotencyKey: 'replace:arcade:1' };
+    await expect(service.replace(replacement)).rejects.toThrow(/ambiguous replacement/);
+    expect(store.current('arcade')).toMatchObject({ status: 'replacement-pending' });
+    store.close();
+    const reopenedStore = new ProjectHumanThreadStore(path);
+    const reopenedService = new ProjectHumanThreadService(reopenedStore, authority, {
+      now: () => '2026-08-22T12:00:00.000Z',
+    });
+    await expect(reopenedService.replace(replacement)).resolves.toMatchObject({ outcome: 'replaced', binding: { generation: 2, creationMode: 'created' } });
+    expect(create).toHaveBeenCalledTimes(2);
+    reopenedStore.close();
+  });
+
+  it('fails closed for a divergent retry while a replacement intent is pending', async () => {
     const { authority, service } = setup();
     authority.created.push(first);
     await service.createMissing(request);
-    const create = vi.spyOn(authority, 'create').mockRejectedValue(new Error('ambiguous replacement'));
-    const replacement = { ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered', idempotencyKey: 'replace:arcade:1' };
-    await expect(service.replace(replacement)).rejects.toThrow(/ambiguous replacement/);
-    await expect(service.replace(replacement)).rejects.toThrow(/requires reconciliation/);
-    expect(create).toHaveBeenCalledTimes(1);
+    const replacement = { ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered', idempotencyKey: 'replace:arcade:2' };
+    vi.spyOn(authority, 'create').mockRejectedValue(new Error('create interrupted'));
+    await expect(service.replace(replacement)).rejects.toThrow(/interrupted/);
+    await expect(service.replace({ ...replacement, idempotencyKey: 'replace:arcade:other' })).rejects.toThrow(/intent conflict/);
+  });
+
+  it('adopts a candidate left behind when activation crashes and never creates a duplicate', async () => {
+    const { authority, service, store } = setup();
+    authority.created.push(first);
+    await service.createMissing(request);
+    authority.created.push(second);
+    const activate = vi.spyOn(store, 'activateReplacement').mockImplementationOnce(() => {
+      throw new Error('activation interrupted');
+    });
+    const replacement = { ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered', idempotencyKey: 'replace:arcade:3' };
+    await expect(service.replace(replacement)).rejects.toThrow(/activation interrupted/);
+    await expect(service.replace(replacement)).resolves.toMatchObject({ outcome: 'replaced', binding: { conversationId: second.conversationId, creationMode: 'adopted' } });
+    expect(activate).toHaveBeenCalledTimes(2);
+  });
+
+  it('reconciles an activation that committed before intent completion', async () => {
+    const { authority, service, store } = setup();
+    authority.created.push(first, second);
+    await service.createMissing(request);
+    const complete = vi.spyOn(store, 'completeReplacementIntent').mockImplementationOnce(() => {
+      throw new Error('completion interrupted');
+    });
+    const replacement = { ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered', idempotencyKey: 'replace:arcade:complete' };
+    await expect(service.replace(replacement)).rejects.toThrow(/completion interrupted/);
+    await expect(service.replace(replacement)).resolves.toMatchObject({ outcome: 'current', binding: { generation: 2 } });
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(store.replacementIntent('arcade')).toMatchObject({ state: 'completed', conversationId: second.conversationId });
+  });
+
+  it('reports a replacement-pending binding honestly instead of converting it to unavailable', async () => {
+    const { authority, service } = setup();
+    authority.created.push(first);
+    await service.createMissing(request);
+    authority.created.push(second);
+    vi.spyOn(authority, 'create').mockRejectedValue(new Error('create interrupted'));
+    const replacement = { ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered', idempotencyKey: 'replace:arcade:4' };
+    await expect(service.replace(replacement)).rejects.toThrow(/create interrupted/);
+    expect(service.recover('arcade', 1, 'recover:arcade:pending')).toMatchObject({
+      outcome: 'replacement-pending', binding: { status: 'replacement-pending' },
+    });
   });
 });

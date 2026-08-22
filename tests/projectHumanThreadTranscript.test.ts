@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -194,5 +195,35 @@ describe('project human thread transcript', () => {
     expect(controller.submit(owner, project.id, choice.messageId, 'choice-good', { content: 'Deploy' }).content).toBe('Deploy');
     expect(() => controller.submit(owner, project.id, notice.messageId, 'notice-response', { content: 'Okay' })).toThrow(/informational notices/i);
     store.close();
+  });
+
+  it('projects informational notices as terminal history and keeps them out of replacement fences', () => {
+    const { store } = setup();
+    const receiver = new ProjectHumanThreadQuestionReceiver(store, { secret, now: () => now, createNonce: () => 'receipt-notice' });
+    const notice = message({ messageId: 'question-terminal-notice', kind: 'informational-notice', content: 'Deployment is paused.', choices: [] });
+    const incoming = request(notice, 'question-nonce-terminal-notice');
+    receiver.receive(incoming.body, incoming.headers);
+    expect(store.pending(project.id)).toEqual([]);
+    expect(store.history(project.id)).toMatchObject([{ message: { messageId: notice.messageId }, state: 'answered' }]);
+    store.rebuild();
+    expect(store.pending(project.id)).toEqual([]);
+    expect(store.history(project.id)).toMatchObject([{ message: { messageId: notice.messageId }, state: 'answered' }]);
+    store.close();
+  });
+
+  it('reconciles a legacy pending informational notice when the transcript store reopens', () => {
+    const { store, path } = setup();
+    const receiver = new ProjectHumanThreadQuestionReceiver(store, { secret, now: () => now, createNonce: () => 'receipt-legacy' });
+    const notice = message({ messageId: 'question-legacy-notice', kind: 'informational-notice', content: 'Legacy notice.', choices: [] });
+    const incoming = request(notice, 'question-nonce-legacy-notice');
+    receiver.receive(incoming.body, incoming.headers);
+    store.close();
+    const legacy = new DatabaseSync(path);
+    legacy.prepare(`UPDATE project_human_thread_transcript_questions SET state='pending' WHERE message_id=?`).run(notice.messageId);
+    legacy.close();
+    const reopened = setup(() => binding, path).store;
+    expect(reopened.pending(project.id)).toEqual([]);
+    expect(reopened.history(project.id)).toMatchObject([{ message: { messageId: notice.messageId }, state: 'answered' }]);
+    reopened.close();
   });
 });
