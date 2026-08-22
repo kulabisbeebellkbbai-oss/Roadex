@@ -72,10 +72,15 @@ export class ProjectHumanThreadService {
     return { outcome: result.inserted ? 'adopted' : 'current', binding: result.binding };
   }
 
-  recover(projectId: string, expectedGeneration: number, idempotencyKey: string): { outcome: 'recovered' | 'unavailable'; binding: ProjectHumanThreadBinding } {
+  recover(projectId: string, expectedGeneration: number, idempotencyKey: string): { outcome: 'recovered' | 'unavailable' | 'replacement-pending'; binding: ProjectHumanThreadBinding } {
     requireIdentity(projectId, idempotencyKey);
     const current = this.#store.current(projectId);
     if (!current || current.generation !== expectedGeneration) throw new Error('Project human thread generation conflict.');
+    // A replacement transition is deliberately not convertible to
+    // unavailable: the durable replacement intent owns the recovery path.
+    // The caller must retry that exact request so an external create can be
+    // adopted or resumed without inventing a second operation.
+    if (current.status === 'replacement-pending') return { outcome: 'replacement-pending', binding: current };
     try {
       const candidate = this.#authority.inspect(current.root.canonicalPath, current.conversationId);
       if (candidate.dev !== current.root.dev || candidate.ino !== current.root.ino) throw new Error('root identity changed');
@@ -103,24 +108,51 @@ export class ProjectHumanThreadService {
     if (current?.generation === input.expectedGeneration + 1
       && current.predecessorGeneration === input.expectedGeneration
       && current.provenanceDigest === input.provenanceDigest) {
+      const intent = this.#store.replacementIntent(input.projectId);
+      if (intent && !sameReplacementIntent(intent, input)) {
+        throw new Error('Project human thread replacement intent conflict.');
+      }
+      if (intent?.state === 'prepared') {
+        // Activation and intent completion are separate durable writes. A
+        // restart between them must reconcile the intent to the already
+        // authoritative binding before returning the idempotent result.
+        this.#store.completeReplacementIntent(input.projectId, intent.eventId, current.conversationId);
+      }
       return { outcome: 'current', binding: current };
     }
-    const wasPending = current?.status === 'replacement-pending';
-    const pending = this.#store.beginReplacement(
-      input.projectId, input.expectedGeneration, input.reason, this.#now(), `${input.idempotencyKey}:begin`,
-    );
+    const beginEventId = `${input.idempotencyKey}:begin`;
+    const intent = {
+      idempotencyKey: input.idempotencyKey,
+      expectedGeneration: input.expectedGeneration,
+      projectRoot: input.projectRoot,
+      provenanceDigest: input.provenanceDigest,
+      reason: input.reason,
+    };
+    const existingIntent = this.#store.replacementIntent(input.projectId);
+    let pending: ProjectHumanThreadBinding;
+    if (current?.status === 'replacement-pending') {
+      // Only the exact operation that created the pending transition may
+      // resume it. A new idempotency key or changed provenance is fail-closed.
+      if (!existingIntent || existingIntent.state !== 'prepared' || !sameReplacementIntent(existingIntent, input)) {
+        throw new Error('Project human thread replacement intent conflict.');
+      }
+      pending = current;
+    } else {
+      pending = this.#store.beginReplacement(
+        input.projectId, input.expectedGeneration, input.reason, this.#now(), beginEventId, intent,
+      );
+    }
     requireRoot(pending, input.projectRoot);
     const boundIds = new Set(this.#store.history(input.projectId).map((item) => item.conversationId));
     const candidates = this.#authority.candidates(input.projectRoot).filter((item) => !boundIds.has(item.conversationId));
     if (candidates.length > 1) throw new Error('Project human thread replacement candidates are ambiguous.');
-    if (wasPending && candidates.length === 0) {
-      throw new Error('Project human thread replacement requires reconciliation before another create.');
-    }
     const candidate = candidates[0] ?? await this.#authority.create(input.projectRoot);
     const next = createBinding(
-      input, candidate, input.expectedGeneration + 1, input.expectedGeneration, 'created', laterTimestamp(this.#now(), pending.updatedAt),
+      input, candidate, input.expectedGeneration + 1, input.expectedGeneration,
+      candidates[0] ? 'adopted' : 'created', laterTimestamp(this.#now(), pending.updatedAt),
     );
     const result = this.#store.activateReplacement(next, input.expectedGeneration, `${input.idempotencyKey}:activate`);
+    this.#store.completeReplacementIntent(input.projectId, beginEventId, result.binding.conversationId);
     return { outcome: result.inserted ? 'replaced' : 'current', binding: result.binding };
   }
 
@@ -168,6 +200,16 @@ function requireIdentity(projectId: string, idempotencyKey: string): void {
 }
 function requireRoot(binding: ProjectHumanThreadBinding, projectRoot: string): void {
   if (binding.root.canonicalPath !== projectRoot) throw new Error('Project human thread root conflict.');
+}
+function sameReplacementIntent(
+  intent: { idempotencyKey: string; expectedGeneration: number; projectRoot: string; provenanceDigest: string; reason: string },
+  input: BaseRequest & { expectedGeneration: number; reason: string },
+): boolean {
+  return intent.idempotencyKey === input.idempotencyKey
+    && intent.expectedGeneration === input.expectedGeneration
+    && intent.projectRoot === input.projectRoot
+    && intent.provenanceDigest === input.provenanceDigest
+    && intent.reason === input.reason;
 }
 function laterTimestamp(candidate: string, prior: string): string {
   const candidateTime = Date.parse(candidate);

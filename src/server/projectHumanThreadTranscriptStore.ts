@@ -96,6 +96,7 @@ export class ProjectHumanThreadTranscriptStore {
         state TEXT NOT NULL CHECK(state IN ('pending','delivered'))
       );
     `);
+    this.#reconcileInformationalNotices();
   }
 
   receiveQuestion(message: ProjectHumanThreadMessage, requestNonce: string, requestTimestamp: string, eventId = `question:${sha256(message.messageId).slice(0, 48)}`): ReceiveQuestionResult {
@@ -122,7 +123,7 @@ export class ProjectHumanThreadTranscriptStore {
       this.#db.prepare('INSERT INTO project_human_thread_transcript_nonces(nonce,message_id,message_digest,request_timestamp) VALUES (?,?,?,?)')
         .run(requestNonce, parsed.messageId, parsed.messageDigest, requestTimestamp);
       this.#db.prepare('INSERT INTO project_human_thread_transcript_questions(message_id,message_digest,project_id,state,message_json,response_id) VALUES (?,?,?,?,?,NULL)')
-        .run(parsed.messageId, parsed.messageDigest, parsed.projectId, 'pending', stableJson(parsed));
+        .run(parsed.messageId, parsed.messageDigest, parsed.projectId, parsed.kind === 'informational-notice' ? 'answered' : 'pending', stableJson(parsed));
       return { outcome: 'received' as const, question: this.#requireQuestion(parsed.messageId) };
     });
   }
@@ -241,7 +242,7 @@ export class ProjectHumanThreadTranscriptStore {
         if (row.type === 'question-received' && payload.message && payload.nonce && payload.requestTimestamp) {
           const message = parseProjectHumanThreadMessage(payload.message);
           this.#db.prepare('INSERT INTO project_human_thread_transcript_nonces(nonce,message_id,message_digest,request_timestamp) VALUES (?,?,?,?)').run(payload.nonce, message.messageId, message.messageDigest, payload.requestTimestamp);
-          this.#db.prepare('INSERT INTO project_human_thread_transcript_questions(message_id,message_digest,project_id,state,message_json,response_id) VALUES (?,?,?,?,?,NULL)').run(message.messageId, message.messageDigest, message.projectId, 'pending', stableJson(message));
+          this.#db.prepare('INSERT INTO project_human_thread_transcript_questions(message_id,message_digest,project_id,state,message_json,response_id) VALUES (?,?,?,?,?,NULL)').run(message.messageId, message.messageDigest, message.projectId, message.kind === 'informational-notice' ? 'answered' : 'pending', stableJson(message));
         } else if (row.type === 'response-submitted' && payload.response) {
           const response = parseProjectHumanThreadResponse(payload.response);
           this.#db.prepare('INSERT OR IGNORE INTO project_human_thread_transcript_responses(response_id,message_id,response_digest,response_json,state) VALUES (?,?,?,?,?)').run(response.responseId, response.messageId, response.responseDigest, stableJson(response), 'pending');
@@ -253,6 +254,21 @@ export class ProjectHumanThreadTranscriptStore {
   }
 
   close(): void { this.#db.close(); }
+
+  #reconcileInformationalNotices(): void {
+    this.#transaction(() => {
+      const rows = this.#db.prepare(`
+        SELECT message_id,message_json FROM project_human_thread_transcript_questions WHERE state='pending'
+      `).all() as unknown as Array<{ message_id: string; message_json: string }>;
+      for (const row of rows) {
+        const message = parseProjectHumanThreadMessage(JSON.parse(row.message_json));
+        if (message.kind !== 'informational-notice') continue;
+        this.#db.prepare(`
+          UPDATE project_human_thread_transcript_questions SET state='answered' WHERE message_id=? AND state='pending'
+        `).run(row.message_id);
+      }
+    });
+  }
 
   #questions(projectId: string, state?: ProjectHumanThreadQuestionState): ProjectHumanThreadQuestionRecord[] {
     const rows = state

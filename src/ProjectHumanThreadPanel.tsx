@@ -202,7 +202,7 @@ export function ProjectHumanThreadPanelView({
 }: ProjectHumanThreadPanelViewProps) {
   const current = snapshot.current;
   const hasBinding = Boolean(current);
-  const canReplace = Boolean(current) && !busyAction;
+  const canReplace = Boolean(current) && current?.status !== 'replacement-pending' && !busyAction;
   return (
     <section className="section-card human-thread-panel" aria-label="Project Roadex human interaction thread" data-testid="project-human-thread-panel">
       <div className="panel-heading compact human-thread-heading">
@@ -253,6 +253,9 @@ export function ProjectHumanThreadPanelView({
               <button className="secondary-action" disabled={Boolean(busyAction)} onClick={onRecover} type="button">
                 <RotateCcw size={16} /> {busyAction === 'recover' ? 'Recovering…' : 'Recover thread'}
               </button>
+            ) : null}
+            {current.status === 'replacement-pending' ? (
+              <p className="human-thread-pending-note">Replacement is pending. Retry the original request to resume it; a new replacement request is rejected.</p>
             ) : null}
             <button className="secondary-action" disabled={!canReplace} onClick={() => onReplaceOpen(!replaceOpen)} type="button">
               <RefreshCw size={16} /> Replace binding
@@ -337,7 +340,10 @@ export function ProjectHumanThreadPanelView({
             <summary>Answered conversation history ({transcriptHistory.filter((question) => question.state === 'answered').length})</summary>
             <ol>
               {transcriptHistory.filter((question) => question.state === 'answered').map((question) => (
-                <li key={question.messageId}><strong>{question.content}</strong><span>{question.response?.content ?? 'Answered'}</span></li>
+                <li key={question.messageId}>
+                  <strong>{question.content}</strong>
+                  <span>{question.kind === 'informational-notice' ? 'Notice acknowledged — no response requested.' : question.response?.content ?? 'Answered'}</span>
+                </li>
               ))}
             </ol>
           </details>
