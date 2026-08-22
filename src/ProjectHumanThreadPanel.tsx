@@ -1,11 +1,16 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, CheckCircle2, History, Link2, Plus, RefreshCw, RotateCcw, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, History, Link2, MessageSquare, Plus, RefreshCw, RotateCcw, ShieldCheck } from 'lucide-react';
 import {
   getProjectHumanThread,
   getProjectHumanThreadHistory,
   mutateProjectHumanThread,
   type ProjectHumanThreadCandidatePublic,
 } from './client/sessionApi';
+import {
+  getProjectHumanThreadTranscript,
+  submitProjectHumanThreadResponse,
+  type ProjectHumanThreadPublicQuestion,
+} from './client/projectHumanThreadTranscriptApi';
 import type { ProjectHumanThreadBinding } from './shared/projectHumanThreadContracts';
 import type { WorkspaceRef } from './shared/sessionContracts';
 
@@ -18,6 +23,7 @@ export type ProjectHumanThreadSnapshot = {
 type ProjectHumanThreadPanelProps = {
   token?: string;
   project?: WorkspaceRef;
+  onOpenConversation?: (conversationId: string) => void;
 };
 
 type ProjectHumanThreadPanelViewProps = {
@@ -35,11 +41,19 @@ type ProjectHumanThreadPanelViewProps = {
   onReplaceOpen: (open: boolean) => void;
   onReplaceReason: (reason: string) => void;
   onReplace: (event: FormEvent<HTMLFormElement>) => void;
+  pendingQuestions?: ProjectHumanThreadPublicQuestion[];
+  transcriptHistory?: ProjectHumanThreadPublicQuestion[];
+  responseDrafts?: Record<string, string>;
+  respondingMessageId?: string;
+  transcriptError?: string;
+  onResponseDraft?: (messageId: string, content: string) => void;
+  onRespond?: (messageId: string, content: string) => void;
+  onOpenConversation?: (conversationId: string) => void;
 };
 
 const emptySnapshot: ProjectHumanThreadSnapshot = { candidates: [], history: [] };
 
-export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPanelProps) {
+export function ProjectHumanThreadPanel({ token, project, onOpenConversation }: ProjectHumanThreadPanelProps) {
   const [snapshot, setSnapshot] = useState<ProjectHumanThreadSnapshot>(emptySnapshot);
   const [loading, setLoading] = useState(false);
   const [busyAction, setBusyAction] = useState<ProjectHumanThreadPanelViewProps['busyAction']>();
@@ -47,6 +61,26 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [replaceReason, setReplaceReason] = useState('');
   const idempotencyKeys = useRef(new Map<string, string>());
+  const [pendingQuestions, setPendingQuestions] = useState<ProjectHumanThreadPublicQuestion[]>([]);
+  const [transcriptHistory, setTranscriptHistory] = useState<ProjectHumanThreadPublicQuestion[]>([]);
+  const [transcriptError, setTranscriptError] = useState('');
+  const [responseDrafts, setResponseDrafts] = useState<Record<string, string>>({});
+  const [respondingMessageId, setRespondingMessageId] = useState('');
+
+  async function refreshTranscript(): Promise<void> {
+    if (!project) return;
+    try {
+      const [pending, history] = await Promise.all([
+        getProjectHumanThreadTranscript(token, project.id, 'pending'),
+        getProjectHumanThreadTranscript(token, project.id, 'history'),
+      ]);
+      setPendingQuestions(pending);
+      setTranscriptHistory(history);
+      setTranscriptError('');
+    } catch (cause) {
+      setTranscriptError(cause instanceof Error ? cause.message : 'Project conversation could not be loaded.');
+    }
+  }
 
   async function refresh(): Promise<void> {
     if (!project) return;
@@ -58,6 +92,7 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
         getProjectHumanThreadHistory(token, project.id),
       ]);
       setSnapshot({ current: thread.current, candidates: thread.candidates, history });
+      await refreshTranscript();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Project human thread status could not be loaded.');
     } finally {
@@ -69,6 +104,9 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
     setSnapshot(emptySnapshot);
     setReplaceOpen(false);
     setReplaceReason('');
+    setPendingQuestions([]);
+    setTranscriptHistory([]);
+    setTranscriptError('');
     void refresh();
   // refresh intentionally tracks project identity and token only.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -116,6 +154,24 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
           void mutate('replace', { expectedGeneration: snapshot.current.generation, reason: replaceReason.trim() });
         }
       }}
+      pendingQuestions={pendingQuestions}
+      transcriptHistory={transcriptHistory}
+      responseDrafts={responseDrafts}
+      respondingMessageId={respondingMessageId}
+      transcriptError={transcriptError}
+      onResponseDraft={(messageId, content) => setResponseDrafts((current) => ({ ...current, [messageId]: content }))}
+      onRespond={(messageId, content) => {
+        if (!project || !content.trim()) return;
+        setRespondingMessageId(messageId);
+        void submitProjectHumanThreadResponse(token, project.id, messageId, content.trim(), makeIdempotencyKey('respond'))
+          .then(() => {
+            setResponseDrafts((current) => ({ ...current, [messageId]: '' }));
+            return refreshTranscript();
+          })
+          .catch((cause) => setTranscriptError(cause instanceof Error ? cause.message : 'Project response could not be submitted.'))
+          .finally(() => setRespondingMessageId(''));
+      }}
+      onOpenConversation={onOpenConversation}
     />
   );
 }
@@ -135,6 +191,14 @@ export function ProjectHumanThreadPanelView({
   onReplaceOpen,
   onReplaceReason,
   onReplace,
+  pendingQuestions = [],
+  transcriptHistory = [],
+  responseDrafts = {},
+  respondingMessageId = '',
+  transcriptError,
+  onResponseDraft,
+  onRespond,
+  onOpenConversation,
 }: ProjectHumanThreadPanelViewProps) {
   const current = snapshot.current;
   const hasBinding = Boolean(current);
@@ -180,6 +244,11 @@ export function ProjectHumanThreadPanelView({
             <div><dt>Binding mode</dt><dd>{current.creationMode}</dd></div>
           </dl>
           <div className="human-thread-actions">
+            {onOpenConversation ? (
+              <button className="secondary-action" disabled={current.status !== 'active'} onClick={() => onOpenConversation(current.conversationId)} type="button">
+                <Link2 size={16} /> Open project conversation
+              </button>
+            ) : null}
             {current.status === 'unavailable' ? (
               <button className="secondary-action" disabled={Boolean(busyAction)} onClick={onRecover} type="button">
                 <RotateCcw size={16} /> {busyAction === 'recover' ? 'Recovering…' : 'Recover thread'}
@@ -247,6 +316,34 @@ export function ProjectHumanThreadPanelView({
         </form>
       ) : null}
 
+      <section className="human-thread-inbox" aria-label="Project conversation" data-testid="project-human-thread-inbox">
+        <div className="human-thread-history-heading">
+          <div><MessageSquare size={17} /><strong>Project conversation</strong></div>
+          <span>{pendingQuestions.length ? `${pendingQuestions.length} pending` : 'No pending questions'}</span>
+        </div>
+        {transcriptError ? <p className="human-thread-transcript-error" role="alert">{transcriptError}</p> : null}
+        {pendingQuestions.length ? pendingQuestions.map((question) => (
+          <PendingQuestion
+            key={question.messageId}
+            question={question}
+            draft={responseDrafts[question.messageId] ?? ''}
+            responding={respondingMessageId === question.messageId}
+            onDraft={onResponseDraft}
+            onRespond={onRespond}
+          />
+        )) : <p>No new project questions are waiting for your response.</p>}
+        {transcriptHistory.some((question) => question.state === 'answered') ? (
+          <details className="human-thread-conversation-history">
+            <summary>Answered conversation history ({transcriptHistory.filter((question) => question.state === 'answered').length})</summary>
+            <ol>
+              {transcriptHistory.filter((question) => question.state === 'answered').map((question) => (
+                <li key={question.messageId}><strong>{question.content}</strong><span>{question.response?.content ?? 'Answered'}</span></li>
+              ))}
+            </ol>
+          </details>
+        ) : null}
+      </section>
+
       <div className="human-thread-history" data-testid="project-human-thread-history">
         <div className="human-thread-history-heading">
           <div><History size={17} /><strong>Predecessor history</strong></div>
@@ -267,6 +364,44 @@ export function ProjectHumanThreadPanelView({
 
       <div className="human-thread-note"><ShieldCheck size={16} /><span>Only the project binding lifecycle is available here. Overseer approvals are never created or changed by this panel.</span></div>
     </section>
+  );
+}
+
+function PendingQuestion({
+  question,
+  draft,
+  responding,
+  onDraft,
+  onRespond,
+}: {
+  question: ProjectHumanThreadPublicQuestion;
+  draft: string;
+  responding: boolean;
+  onDraft?: (messageId: string, content: string) => void;
+  onRespond?: (messageId: string, content: string) => void;
+}) {
+  const isInformational = question.kind === 'informational-notice';
+  return (
+    <article className="human-thread-question" data-testid={`project-human-thread-question-${question.messageId}`}>
+      <div className="human-thread-question-content">
+        <span className="section-label">{question.kind === 'bounded-choice' ? 'Choice requested' : isInformational ? 'Notice' : 'Question'}</span>
+        <p>{question.content}</p>
+      </div>
+      {question.kind === 'bounded-choice' ? (
+        <div className="human-thread-choice-list" role="group" aria-label="Response choices">
+          {question.choices.map((choice) => (
+            <button className="secondary-action" disabled={responding} key={choice} onClick={() => onRespond?.(question.messageId, choice)} type="button">{choice}</button>
+          ))}
+        </div>
+      ) : isInformational ? (
+        <span className="human-thread-no-response">Informational notice — no response is requested.</span>
+      ) : (
+        <form className="human-thread-response-form" onSubmit={(event) => { event.preventDefault(); onRespond?.(question.messageId, draft); }}>
+          <label><span>Your response</span><textarea aria-label={`Response to ${question.content}`} onChange={(event) => onDraft?.(question.messageId, event.target.value)} value={draft} /></label>
+          <button className="primary-action" disabled={!draft.trim() || responding} type="submit">{responding ? 'Sending…' : 'Send response'}</button>
+        </form>
+      )}
+    </article>
   );
 }
 

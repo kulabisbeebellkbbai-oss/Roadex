@@ -24,7 +24,7 @@ const binding = {
   recordDigest: 'b'.repeat(64),
 };
 
-function fixture(activeRun = false) {
+function fixture(activeRun = false, pendingInteraction = false) {
   const service = {
     current: vi.fn(() => binding),
     history: vi.fn(() => [binding]),
@@ -38,6 +38,7 @@ function fixture(activeRun = false) {
     resolveOwnedProject: (user, projectId) => user.id === owner.id && projectId === 'arcade'
       ? { projectId, root: '/srv/arcade', activeRun }
       : undefined,
+    hasPendingInteraction: () => pendingInteraction,
   });
   return { controller, service };
 }
@@ -93,5 +94,12 @@ describe('ProjectHumanThreadController', () => {
     await expect(inactive.replace(owner, 'arcade', 'replace-key-0000001', {
       expectedGeneration: 1, reason: 'Replace unavailable thread', approved: true,
     })).rejects.toThrow(/invalid/i);
+  });
+
+  it('blocks replacement while the project has pending human interaction', async () => {
+    const pending = fixture(false, true).controller;
+    await expect(pending.replace(owner, 'arcade', 'replace-key-pending', {
+      expectedGeneration: 1, reason: 'Replace unavailable thread',
+    })).rejects.toThrow(/human interaction is pending/i);
   });
 });

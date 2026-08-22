@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import {
@@ -72,8 +73,8 @@ export class ProjectHumanThreadRelay {
   readonly #createNonce: () => string;
 
   constructor(options: Options = {}) {
-    this.#secret = options.secret ?? process.env.ROADEX_PROJECT_HUMAN_THREAD_RELAY_SECRET ?? '';
-    if (Buffer.byteLength(this.#secret) < 32) throw new Error('Project human thread relay secret is unavailable.');
+    this.#secret = options.secret ?? readRelaySecret();
+    validateSecret(this.#secret);
     this.#now = options.now ?? (() => new Date().toISOString());
     this.#createNonce = options.createNonce ?? (() => `relay-${randomUUID()}`);
     const endpoint = options.endpoint ?? process.env.ROADEX_PROJECT_HUMAN_THREAD_RELAY_ENDPOINT ?? DEFAULT_ENDPOINT;
@@ -319,6 +320,34 @@ function defaultSender(endpoint: string): Sender {
 }
 function requireEndpoint(value: string): void {
   if (value !== DEFAULT_ENDPOINT) throw new Error('Project human thread relay endpoint is invalid.');
+}
+function readRelaySecret(): string {
+  const path = process.env.ROADEX_PROJECT_HUMAN_THREAD_RELAY_SECRET_FILE;
+  if (!path || !path.startsWith('/') || path.includes('\0')) throw new Error('Project human thread relay secret is unavailable.');
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const descriptor = fstatSync(fd);
+    const lexical = lstatSync(path);
+    if (!descriptor.isFile() || !lexical.isFile() || lexical.isSymbolicLink()
+      || descriptor.uid !== process.getuid?.() || lexical.uid !== descriptor.uid
+      || descriptor.dev !== lexical.dev || descriptor.ino !== lexical.ino
+      || (descriptor.mode & 0o077) !== 0 || descriptor.size < 32 || descriptor.size > 4_096) throw new Error('invalid secret file');
+    const raw = readFileSync(fd);
+    const value = raw.toString('utf8');
+    if (!Buffer.from(value, 'utf8').equals(raw)) throw new Error('invalid secret encoding');
+    validateSecret(value);
+    return value;
+  } catch {
+    throw new Error('Project human thread relay secret is unavailable.');
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+function validateSecret(value: string): void {
+  if (Buffer.byteLength(value) < 32 || Buffer.byteLength(value) > 4_096 || [...value].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) {
+    throw new Error('Project human thread relay secret is unavailable.');
+  }
 }
 function hmac(secret: string, parts: string[]): string {
   return createHmac('sha256', secret).update(parts.join('\n')).digest('hex');
