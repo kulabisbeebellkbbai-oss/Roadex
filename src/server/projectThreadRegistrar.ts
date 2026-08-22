@@ -98,7 +98,7 @@ export function controlledBootstrapEnvironment(env: NodeJS.ProcessEnv): NodeJS.P
   );
 }
 
-async function bootstrapControlledThread(projectRoot: string, env: NodeJS.ProcessEnv): Promise<string> {
+export async function bootstrapControlledThread(projectRoot: string, env: NodeJS.ProcessEnv): Promise<string> {
   const child = spawn(CODEX_BIN, controlledBootstrapArgs(projectRoot), {
     cwd: projectRoot,
     env: controlledBootstrapEnvironment(env),
