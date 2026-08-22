@@ -14,6 +14,13 @@ type AdapterEvent =
   | { type: 'failed'; classification: string; reconcileRequired: boolean };
 
 type WorkerBroker = Pick<ProjectCreationBroker, 'claimExecution' | 'advanceExecution'>;
+type HumanThreadProvisioner = {
+  provision(
+    user: UserProfile,
+    lease: ProjectCreationExecutionLease,
+    finalization: ProjectThreadFinalization,
+  ): Promise<void>;
+};
 
 export type ProjectAdapterExecutor = (
   lease: ProjectCreationExecutionLease,
@@ -25,6 +32,7 @@ export class ProjectCreationWorker {
     private readonly broker: WorkerBroker,
     private readonly execute: ProjectAdapterExecutor = executeFixedAdapter,
     private readonly finalizer: ProjectThreadFinalizer = createProjectThreadFinalizer(),
+    private readonly humanThreads?: HumanThreadProvisioner,
   ) {}
 
   async run(user: UserProfile, proposalId: string): Promise<boolean> {
@@ -32,11 +40,21 @@ export class ProjectCreationWorker {
     const lease = await this.broker.claimExecution(user, proposalId);
     if (!lease) return false;
     if (lease.startPhase === 'thread-started') {
+      if (!lease.finalization) return false;
+      try {
+        await this.humanThreads?.provision(user, lease, lease.finalization);
+      } catch {
+        await this.broker.advanceExecution(
+          user, lease.operationId, lease.leaseToken, 'failed-retryable', 'human_thread_binding_failed',
+        );
+        return false;
+      }
       return this.broker.advanceExecution(
         user, lease.operationId, lease.leaseToken, 'completed',
       );
     }
     let terminal = false;
+    let threadCheckpointed = false;
     let attemptedPhase: ProjectCreationOperationPhase = lease.startPhase;
     try {
       await this.execute(lease, async (event) => {
@@ -48,6 +66,8 @@ export class ProjectCreationWorker {
             user, lease.operationId, lease.leaseToken, 'thread-started', undefined, finalization,
           );
           if (!registered) throw new Error('worker_checkpoint_denied');
+          threadCheckpointed = true;
+          await this.humanThreads?.provision(user, lease, finalization);
           const completed = await this.broker.advanceExecution(
             user, lease.operationId, lease.leaseToken, 'completed',
           );
@@ -81,7 +101,9 @@ export class ProjectCreationWorker {
           user,
           lease.operationId,
           lease.leaseToken,
-          ['remote-created', 'thread-started', 'completed'].includes(attemptedPhase)
+          threadCheckpointed
+            ? 'failed-retryable'
+            : ['remote-created', 'thread-started', 'completed'].includes(attemptedPhase)
             ? 'reconcile-required'
             : 'failed-retryable',
           'worker_protocol_failed',

@@ -121,6 +121,7 @@ export type ProjectCreationExecutionLease = {
     summaryMarkdown: string;
     aTeamPlanMarkdown: string;
   };
+  finalization?: ControlledRunnerGrantEvidence;
 };
 
 export class ProjectCreationBroker {
@@ -362,6 +363,11 @@ export class ProjectCreationBroker {
       return undefined;
     }
     const summary = JSON.parse(proposal.summary_json) as ProjectSummary;
+    const finalization = validStoredGrantEvidence(operation) ? {
+      workspaceId: operation.workspace_id,
+      workspaceRoot: operation.workspace_root,
+      managedThreadId: operation.managed_thread_id,
+    } : undefined;
     return {
       operationId: operation.id,
       proposalId: proposal.id,
@@ -376,6 +382,7 @@ export class ProjectCreationBroker {
         summaryMarkdown: renderSummary(proposal.project_name, summary),
         aTeamPlanMarkdown: renderTeam(team),
       },
+      finalization,
     };
   }
 
