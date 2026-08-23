@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chmodSync, mkdtempSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -89,7 +89,10 @@ describe('controlled project thread finalizer', () => {
 
   it('persists one exact operation-bound bootstrap receipt for restart recovery', () => {
     const directory = mkdtempSync(join(tmpdir(), 'roadex-bootstrap-receipts-'));
-    const env = { ROADEX_PROJECT_HUMAN_THREAD_BOOTSTRAP_RECEIPT_DIR: directory };
+    const env = {
+      ROADEX_PROJECT_HUMAN_THREAD_BOOTSTRAP_RECEIPT_DIR: directory,
+      ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY: 'k'.repeat(32),
+    };
     const operationId = 'human-thread:arcade:create-1';
     const projectRoot = '/workspace/Arcade';
     const threadId = '01a01569-7874-7f72-bca9-9c91bb869846';
@@ -102,5 +105,13 @@ describe('controlled project thread finalizer', () => {
     const receipt = join(directory, `${createHash('sha256').update(operationId).digest('hex')}.json`);
     chmodSync(receipt, 0o644);
     expect(() => readBootstrapReceipt(operationId, projectRoot, env)).toThrow(/receipt_invalid/);
+
+    const tamperOperationId = 'human-thread:arcade:create-2';
+    persistBootstrapReceipt(tamperOperationId, projectRoot, threadId, env);
+    const tamperPath = join(directory, `${createHash('sha256').update(tamperOperationId).digest('hex')}.json`);
+    const tampered = JSON.parse(readFileSync(tamperPath, 'utf8')) as Record<string, unknown>;
+    tampered.threadId = '01a01569-7874-7f72-bca9-9c91bb869847';
+    writeFileSync(tamperPath, JSON.stringify(tampered), { mode: 0o600 });
+    expect(() => readBootstrapReceipt(tamperOperationId, projectRoot, env)).toThrow(/receipt_invalid/);
   });
 });

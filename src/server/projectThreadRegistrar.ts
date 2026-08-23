@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { createHash, createHmac } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import {
   closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
   openSync, readFileSync, realpathSync, writeSync,
@@ -287,18 +287,31 @@ export function readBootstrapReceipt(
   const fd = openSync(receiptPath, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const opened = fstatSync(fd);
-    if (opened.dev !== lexical.dev || opened.ino !== lexical.ino) throw new Error('project_human_thread_bootstrap_receipt_changed');
+    if (!sameReceiptStat(opened, lexical)) throw new Error('project_human_thread_bootstrap_receipt_changed');
     const value = JSON.parse(readFileSync(fd, 'utf8')) as unknown;
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('project_human_thread_bootstrap_receipt_invalid');
     const record = value as Record<string, unknown>;
-    if (Object.keys(record).sort().join(',') !== 'operationId,projectRoot,schemaVersion,threadId'
+    if (Object.keys(record).sort().join(',') !== 'operationId,projectRoot,receiptDigest,schemaVersion,threadId'
       || record.schemaVersion !== 'roadex.project-human-thread-bootstrap-receipt.v1'
       || record.operationId !== operationId || record.projectRoot !== projectRoot
-      || typeof record.threadId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(record.threadId)) {
+      || typeof record.threadId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(record.threadId)
+      || typeof record.receiptDigest !== 'string' || !/^[a-f0-9]{64}$/.test(record.receiptDigest)
+      || !validBootstrapReceiptDigest(record, env)) {
       throw new Error('project_human_thread_bootstrap_receipt_invalid');
+    }
+    const finalOpened = fstatSync(fd);
+    const finalLexical = lstatSync(receiptPath);
+    if (!sameReceiptStat(opened, finalOpened) || !sameReceiptStat(opened, finalLexical)) {
+      throw new Error('project_human_thread_bootstrap_receipt_changed');
     }
     return record.threadId;
   } finally { closeSync(fd); }
+}
+
+function sameReceiptStat(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof fstatSync>): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid
+    && left.mode === right.mode && left.nlink === right.nlink && left.size === right.size
+    && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
 }
 
 export function persistBootstrapReceipt(
@@ -308,11 +321,15 @@ export function persistBootstrapReceipt(
   env: NodeJS.ProcessEnv,
 ): void {
   const receiptPath = bootstrapReceiptPath(operationId, env);
-  const content = JSON.stringify({
+  const receipt = {
     schemaVersion: 'roadex.project-human-thread-bootstrap-receipt.v1',
     operationId,
     projectRoot,
     threadId,
+  };
+  const content = JSON.stringify({
+    ...receipt,
+    receiptDigest: bootstrapReceiptDigest(receipt, env),
   });
   try {
     const fd = openSync(receiptPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
@@ -329,6 +346,25 @@ export function persistBootstrapReceipt(
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST'
       || readBootstrapReceipt(operationId, projectRoot, env) !== threadId) throw error;
   }
+}
+
+function bootstrapReceiptDigest(
+  receipt: { schemaVersion: string; operationId: string; projectRoot: string; threadId: string },
+  env: NodeJS.ProcessEnv,
+): string {
+  const key = env.ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY ?? '';
+  if (Buffer.byteLength(key) < 32) throw new Error('project_human_thread_bootstrap_receipt_key_invalid');
+  return createHmac('sha256', key).update(JSON.stringify(receipt)).digest('hex');
+}
+
+function validBootstrapReceiptDigest(record: Record<string, unknown>, env: NodeJS.ProcessEnv): boolean {
+  const expected = bootstrapReceiptDigest({
+    schemaVersion: String(record.schemaVersion),
+    operationId: String(record.operationId),
+    projectRoot: String(record.projectRoot),
+    threadId: String(record.threadId),
+  }, env);
+  return timingSafeEqual(Buffer.from(expected, 'ascii'), Buffer.from(String(record.receiptDigest), 'ascii'));
 }
 
 function bootstrapReceiptPath(operationId: string, env: NodeJS.ProcessEnv): string {
