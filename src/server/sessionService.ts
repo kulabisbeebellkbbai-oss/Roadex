@@ -153,6 +153,17 @@ export type RoadexState = {
   approvalWorkflowRuntime?: ApprovalWorkflowRunRuntime;
   approvalLifecycleRuntime?: ApprovalLifecycleRuntime;
   isProjectHumanThreadConversation?: (conversationId: string) => boolean;
+  /**
+   * Returns whether a canonical project root is governed by the single
+   * Roadex project-human-thread invariant.  A governed root is never
+   * exposed through the ordinary session/managed-thread APIs; the dedicated
+   * project-human-thread controller is its only Roadex entry point.
+   *
+   * This is deliberately a root-level decision rather than a conversation
+   * decision.  Fencing only the currently bound conversation left ordinary
+   * sessions for the same project able to create a second writer.
+   */
+  isProjectHumanThreadProject?: (canonicalRoot: string) => boolean;
 };
 
 type StreamSubscriber = {
@@ -619,6 +630,23 @@ export function createSessionFromApi(
     }
     saveState(state);
     return Promise.resolve(deny(denied.gate, denied.reason));
+  }
+
+  // A project governed by the dedicated human-interaction thread has exactly
+  // one Roadex entry point.  The ordinary session API must not create an
+  // unbound session for an imported project, nor attach a second writer to a
+  // project whose binding already exists.
+  if (projectHumanThreadProjectReservation(state, workspaceDecision.workspace.root) !== 'ordinary') {
+    appendAudit(
+      state.audit,
+      user,
+      'security.denied',
+      'project-human-thread',
+      'denied',
+      'Ordinary Roadex session creation is fenced for a project governed by its dedicated human-interaction thread.',
+    );
+    saveState(state);
+    return Promise.resolve(deny('project-human-thread', 'Use the project human-interaction thread for this project.'));
   }
 
   const humanThreadReservation = request.managedThreadId
@@ -3138,6 +3166,10 @@ function isVisibleSessionForUser(state: RoadexState, session: RoadexSession, use
 }
 
 function isManagedSessionAuthorized(state: RoadexState, user: UserProfile, session: RoadexSession): boolean {
+  if (projectHumanThreadProjectReservation(state, session.workspace.root) !== 'ordinary') {
+    revokeManagedSessionAccess(state, session);
+    return false;
+  }
   if (projectHumanThreadSessionReservation(state, session) !== 'ordinary') {
     revokeManagedSessionAccess(state, session);
     return false;
@@ -3161,6 +3193,7 @@ function activeSessionCountForUser(state: RoadexState, userId: string): number {
   return state.sessions.sessions.filter(
     (session) => session.userId === userId
       && isVisibleSession(session)
+      && projectHumanThreadProjectReservation(state, session.workspace.root) === 'ordinary'
       && projectHumanThreadSessionReservation(state, session) !== 'reserved',
   ).length;
 }
@@ -3170,7 +3203,9 @@ function safeManagedThreads(state: RoadexState, user: UserProfile) {
     const workspaces = getApprovedWorkspaces(user);
     return loadManagedCodexThreads().flatMap((thread) => {
       const workspace = workspaces.find((candidate) => candidate.root === thread.project.root);
-      return workspace && projectHumanThreadReservation(state, thread.id) === 'ordinary'
+      return workspace
+        && projectHumanThreadProjectReservation(state, workspace.root) === 'ordinary'
+        && projectHumanThreadReservation(state, thread.id) === 'ordinary'
         ? [{ ...thread, project: workspace }]
         : [];
     });
@@ -3192,6 +3227,34 @@ function projectHumanThreadReservation(
   try {
     return state.isProjectHumanThreadConversation(conversationId) ? 'reserved' : 'ordinary';
   } catch {
+    return 'unavailable';
+  }
+}
+
+type ProjectHumanThreadProjectReservation = 'reserved' | 'ordinary' | 'unavailable';
+
+/**
+ * Root-level reservation check.  Conversation-level checks alone are not
+ * sufficient: a stale/ordinary Codex thread in the same project can still be
+ * used as a second writer.  The callback is owned by the project-human-thread
+ * authority and receives only the canonical root.
+ */
+function projectHumanThreadProjectReservation(
+  state: RoadexState,
+  projectRoot: string,
+): ProjectHumanThreadProjectReservation {
+  if (!state.isProjectHumanThreadProject) return 'ordinary';
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = realpathSync(projectRoot);
+  } catch {
+    return 'unavailable';
+  }
+  try {
+    return state.isProjectHumanThreadProject(canonicalRoot) ? 'reserved' : 'ordinary';
+  } catch {
+    // If root ownership cannot be established, fail closed so an alias or an
+    // unavailable binding store cannot create a bypass writer.
     return 'unavailable';
   }
 }
