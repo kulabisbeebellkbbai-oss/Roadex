@@ -30,6 +30,7 @@ describe('project human conversation turns', () => {
     const { store } = setup();
     const first = store.enqueue(owner.id, binding, 'ping', 'turn-key-1', 'corr-1');
     expect(first.outcome).toBe('queued');
+    expect(store.hasActiveTurn(binding.projectId)).toBe(true);
     expect(store.enqueue(owner.id, binding, 'ping', 'turn-key-1', 'corr-1').outcome).toBe('replayed');
     expect(() => store.enqueue(owner.id, binding, 'second', 'turn-key-2', 'corr-2')).toThrow(/already queued or running/i);
     store.close();
@@ -40,6 +41,7 @@ describe('project human conversation turns', () => {
     const turn = store.enqueue(owner.id, binding, 'ping', 'turn-key-1', 'corr-1').turn;
     store.claim(turn.turnId);
     store.complete(turn.turnId, binding.conversationId, 'pong');
+    expect(store.hasActiveTurn(binding.projectId)).toBe(false);
     expect(store.history(binding.projectId)[0]).toMatchObject({ state: 'completed', assistantOutput: 'pong' });
     expect(() => store.complete(turn.turnId, '22222222-2222-2222-2222-222222222222', 'wrong')).toThrow(/not running/i);
     store.rebuild();
@@ -67,6 +69,31 @@ describe('project human conversation turns', () => {
     await expect(controller.enqueue(owner, 'arcade', 'turn-key-2', { content: 'ping', correlationId: 'corr-2' })).resolves.toMatchObject({ state: 'queued' });
     await expect(controller.enqueue({ ...owner, id: 'other' }, 'arcade', 'turn-key-3', { content: 'ping', correlationId: 'corr-3' })).rejects.toThrow(/not found/i);
     await expect(controller.enqueue(owner, 'arcade', 'turn-key-4', { content: 'ping', correlationId: 'corr-4', approved: true })).rejects.toThrow(/invalid/i);
+    store.close();
+  });
+
+  it('projects only the current binding generation after replacement', async () => {
+    let current = binding;
+    const path = join(mkdtempSync(join(tmpdir(), 'roadex-human-turn-generation-')), 'turns.sqlite');
+    const store = new ProjectHumanThreadConversationStore(() => current, { databasePath: path, now: () => now });
+    const old = store.enqueue(owner.id, binding, 'old message', 'old-turn-key', 'old-corr').turn;
+    store.claim(old.turnId);
+    store.complete(old.turnId, binding.conversationId, 'old answer');
+    current = {
+      ...binding,
+      bindingId: 'project-human-thread:arcade:2',
+      conversationId: '22222222-2222-2222-2222-222222222222',
+      generation: 2,
+      predecessorGeneration: 1,
+    };
+    const controller = new ProjectHumanThreadConversationController(store, {
+      resolveOwnedProject: () => ({ projectId: binding.projectId }),
+    }, () => current);
+    await expect(controller.read(owner, binding.projectId)).resolves.toMatchObject({
+      conversationId: current.conversationId,
+      generation: 2,
+      turns: [],
+    });
     store.close();
   });
 

@@ -838,7 +838,8 @@ function getProjectHumanThreadController(): ProjectHumanThreadController {
     },
     hasPendingInteraction(projectId) {
       return Boolean(projectHumanThreadTranscriptStore?.pending(projectId).length)
-        || Boolean(projectHumanThreadTranscriptStore?.pendingResponseOutbox(projectId).length);
+        || Boolean(projectHumanThreadTranscriptStore?.pendingResponseOutbox(projectId).length)
+        || Boolean(projectHumanThreadConversationStore?.hasActiveTurn(projectId));
     },
   });
   return projectHumanThreadController;

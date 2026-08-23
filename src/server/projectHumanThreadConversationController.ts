@@ -23,7 +23,13 @@ export class ProjectHumanThreadConversationController {
     const project = this.#owned(user, projectId);
     const binding = this.#current(project.projectId);
     if (!binding || binding.status !== 'active') throw new Error('Project human thread is unavailable.');
-    return { conversationId: binding.conversationId, generation: binding.generation, turns: this.#store.history(project.projectId).map(publicTurn) };
+    return {
+      conversationId: binding.conversationId,
+      generation: binding.generation,
+      turns: this.#store.history(project.projectId)
+        .filter((turn) => turn.conversationId === binding.conversationId && turn.generation === binding.generation)
+        .map(publicTurn),
+    };
   }
 
   async enqueue(user: UserProfile, projectId: string, idempotencyKey: string, payload: unknown): Promise<ReturnType<typeof publicTurn>> {

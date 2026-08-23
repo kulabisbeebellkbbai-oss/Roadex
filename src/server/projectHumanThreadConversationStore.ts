@@ -137,6 +137,10 @@ export class ProjectHumanThreadConversationStore {
     const rows = this.#db.prepare('SELECT turn_json FROM project_human_thread_turns WHERE project_id=? ORDER BY rowid').all(projectId) as unknown as TurnRow[];
     return rows.map((row) => parseProjectHumanThreadTurn(JSON.parse(row.turn_json)));
   }
+  hasActiveTurn(projectId: string): boolean {
+    requireId(projectId, 'project id');
+    return Boolean(this.#db.prepare("SELECT 1 FROM project_human_thread_turns WHERE project_id=? AND state IN ('queued','running') LIMIT 1").get(projectId));
+  }
   pendingOutbox(projectId?: string): ProjectHumanThreadTurn[] {
     const rows = projectId
       ? this.#db.prepare("SELECT turn_json,turn_digest FROM project_human_thread_turn_outbox WHERE project_id=? AND state='pending' ORDER BY rowid").all(projectId)

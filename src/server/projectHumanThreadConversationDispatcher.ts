@@ -74,7 +74,15 @@ export class ProjectHumanThreadConversationDispatcher {
     return new Promise((resolve, reject) => {
       let buffer = ''; let stderr = ''; let bytes = 0; let returned: string | undefined; let terminal = ''; let finished = false;
       const finishReject = (error: Error): void => { if (finished) return; finished = true; reject(error); };
-      const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch { /* process may already be gone */ } setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* best effort */ } }, 2_000).unref(); finishReject(new Error('Codex conversation dispatch timed out.')); }, this.#timeoutMs);
+      let timeoutError: Error | undefined;
+      const timer = setTimeout(() => {
+        timeoutError = new Error('Codex conversation dispatch timed out.');
+        try { child.kill('SIGTERM'); } catch { /* process may already be gone */ }
+        // Keep the dispatcher promise and writer lease alive until the child
+        // actually closes. Releasing either while a timed-out writer may still
+        // run would permit a replacement generation to overlap it.
+        setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* best effort */ } }, 2_000).unref();
+      }, this.#timeoutMs);
       timer.unref();
       const consume = (chunk: string): void => {
         bytes += Buffer.byteLength(chunk, 'utf8');
@@ -92,6 +100,7 @@ export class ProjectHumanThreadConversationDispatcher {
         clearTimeout(timer);
         if (buffer.trim()) { const parsed = parseCodexJsonlEvents(`${buffer}\n`); if (parsed.codexThreadId) returned = parsed.codexThreadId; terminal = terminalMessage(parsed.events.map((event) => event.message).filter((message): message is string => Boolean(message)), terminal); }
         if (finished) return;
+        if (timeoutError) { finishReject(timeoutError); return; }
         if (code !== 0) { finishReject(new Error(stderr.trim() || `Codex exited with status ${code ?? 'unknown'}.`)); return; }
         if (!returned) { finishReject(new Error('Codex did not return a conversation identity.')); return; }
         finished = true; resolve({ returnedConversationId: returned, assistantOutput: terminal.trim() });
