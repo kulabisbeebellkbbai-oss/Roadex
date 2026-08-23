@@ -11,6 +11,7 @@ import {
   persistBootstrapReceipt,
   PROJECT_HUMAN_THREAD_SOURCE,
   readBootstrapReceipt,
+  resolveControlledBootstrap,
 } from '../src/server/projectThreadRegistrar';
 
 describe('controlled project thread finalizer', () => {
@@ -113,5 +114,22 @@ describe('controlled project thread finalizer', () => {
     tampered.threadId = '01a01569-7874-7f72-bca9-9c91bb869847';
     writeFileSync(tamperPath, JSON.stringify(tampered), { mode: 0o600 });
     expect(() => readBootstrapReceipt(tamperOperationId, projectRoot, env)).toThrow(/receipt_invalid/);
+  });
+
+  it('resumes project finalization from the exact receipt without a second bootstrap', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'roadex-finalizer-receipts-'));
+    const env = {
+      ROADEX_PROJECT_HUMAN_THREAD_BOOTSTRAP_RECEIPT_DIR: directory,
+      ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY: 'k'.repeat(32),
+    };
+    const operationId = 'project-operation-finalizer-retry';
+    const projectRoot = '/workspace/Imported';
+    const threadId = '01a01569-7874-7f72-bca9-9c91bb869848';
+    persistBootstrapReceipt(operationId, projectRoot, threadId, env);
+    let bootstraps = 0;
+    await expect(resolveControlledBootstrap(
+      projectRoot, operationId, env, async () => { bootstraps += 1; return 'unexpected'; },
+    )).resolves.toBe(threadId);
+    expect(bootstraps).toBe(0);
   });
 });

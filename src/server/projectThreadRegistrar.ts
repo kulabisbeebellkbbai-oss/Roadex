@@ -175,7 +175,9 @@ export function createProjectThreadFinalizer(
     async finalize(lease) {
       if (!this.ready()) throw new Error('thread_finalizer_disabled');
       const projectRoot = path.join(lease.spec.workspaceRoot, lease.spec.projectName);
-      const threadId = await bootstrapControlledThread(projectRoot, env);
+      const threadId = await resolveControlledBootstrap(
+        projectRoot, lease.operationId, env,
+      );
       const projectIdentityDigest = projectIdentity(lease);
       await registerControlledHumanThread(
         projectRoot, threadId, env, lease.operationId, projectIdentityDigest,
@@ -270,6 +272,16 @@ export async function bootstrapControlledThread(
     throw error;
   }
   return threadId;
+}
+
+export async function resolveControlledBootstrap(
+  projectRoot: string,
+  operationId: string,
+  env: NodeJS.ProcessEnv,
+  bootstrap: typeof bootstrapControlledThread = bootstrapControlledThread,
+): Promise<string> {
+  return readBootstrapReceipt(operationId, projectRoot, env)
+    ?? await bootstrap(projectRoot, env, operationId);
 }
 
 export function readBootstrapReceipt(
