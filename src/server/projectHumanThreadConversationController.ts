@@ -4,31 +4,31 @@ import type { ProjectHumanThreadBinding } from '../shared/projectHumanThreadCont
 import type { ProjectHumanThreadTurn } from '../shared/projectHumanThreadConversationContracts.js';
 import type { ProjectHumanThreadConversationStore } from './projectHumanThreadConversationStore.js';
 
-type OwnedProject = { projectId: string };
+type OwnedProject = { projectId: string; root?: string };
 type Dependencies = { resolveOwnedProject(user: UserProfile, projectId: string): OwnedProject | undefined };
 const bodySchema = z.object({ content: z.string().trim().min(1).max(6_000), correlationId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/) }).strict();
 
 export class ProjectHumanThreadConversationController {
   readonly #store: ProjectHumanThreadConversationStore;
   readonly #deps: Dependencies;
-  readonly #current: (projectId: string) => ProjectHumanThreadBinding | undefined;
+  readonly #current: (projectId: string, projectRoot?: string) => ProjectHumanThreadBinding | undefined;
 
-  constructor(store: ProjectHumanThreadConversationStore, dependencies: Dependencies, current?: (projectId: string) => ProjectHumanThreadBinding | undefined) {
+  constructor(store: ProjectHumanThreadConversationStore, dependencies: Dependencies, current?: (projectId: string, projectRoot?: string) => ProjectHumanThreadBinding | undefined) {
     this.#store = store;
     this.#deps = dependencies;
     this.#current = current ?? (() => undefined);
   }
 
-  async read(user: UserProfile, projectId: string): Promise<{ conversationId: string; generation: number; turns: Array<ReturnType<typeof publicTurn>> }> {
+  async read(user: UserProfile, projectId: string): Promise<{ conversationId: string; generation: number; hasEarlierTurns: boolean; turns: Array<ReturnType<typeof publicTurn>> }> {
     const project = this.#owned(user, projectId);
-    const binding = this.#current(project.projectId);
+    const binding = this.#current(project.projectId, project.root) ?? this.#current(project.projectId);
     if (!binding || binding.status !== 'active') throw new Error('Project human thread is unavailable.');
+    const history = this.#store.historyForBinding(project.projectId, binding.conversationId, binding.generation);
     return {
       conversationId: binding.conversationId,
       generation: binding.generation,
-      turns: this.#store.history(project.projectId)
-        .filter((turn) => turn.conversationId === binding.conversationId && turn.generation === binding.generation)
-        .map(publicTurn),
+      hasEarlierTurns: history.hasEarlierTurns,
+      turns: history.turns.map(publicTurn),
     };
   }
 
@@ -37,7 +37,7 @@ export class ProjectHumanThreadConversationController {
     const parsed = bodySchema.safeParse(payload);
     if (!parsed.success) throw new Error('Project human thread turn request is invalid.');
     const body = parsed.data;
-    const binding = this.#current(project.projectId);
+    const binding = this.#current(project.projectId, project.root) ?? this.#current(project.projectId);
     if (!binding || binding.status !== 'active') throw new Error('Project human thread is unavailable.');
     return publicTurn(this.#store.enqueue(user.id, binding, body.content, idempotencyKey, body.correlationId).turn);
   }

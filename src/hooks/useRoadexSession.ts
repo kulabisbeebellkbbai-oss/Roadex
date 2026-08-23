@@ -51,6 +51,7 @@ import { allowsUsbOperation, type UsbDeviceProfile } from '../shared/usbDevicePr
 export type ConnectionState = 'loading' | 'connected' | 'streaming' | 'error';
 
 export type RoadexSessionState = {
+  projectThreadMode?: 'single-human-thread';
   connectionState: ConnectionState;
   token?: string;
   user?: UserProfile;
@@ -99,6 +100,7 @@ export function useRoadexSession(): RoadexSessionState {
   const [connectionState, setConnectionState] = useState<ConnectionState>('loading');
   const [token, setToken] = useState<string>();
   const [user, setUser] = useState<UserProfile>();
+  const [projectThreadMode, setProjectThreadMode] = useState<'single-human-thread'>();
   const [workspaces, setWorkspaces] = useState<WorkspaceRef[]>([]);
   const [sessions, setSessions] = useState<RoadexSession[]>([]);
   const [managedThreads, setManagedThreads] = useState<ManagedCodexThread[]>([]);
@@ -146,6 +148,7 @@ export function useRoadexSession(): RoadexSessionState {
     const archived = await listArchivedSessions(result.token);
     activeStreamSessionId.current = preferredSession?.id;
     setToken(result.token);
+    setProjectThreadMode(result.bootstrap.projectThreadMode);
     setUser(result.bootstrap.user);
     setWorkspaces(result.bootstrap.workspaces);
     setSessions(result.bootstrap.sessions);
@@ -791,6 +794,7 @@ export function useRoadexSession(): RoadexSessionState {
       connectionState,
       token,
       user,
+      projectThreadMode,
       workspaces,
       sessions,
       managedThreads,
@@ -871,6 +875,7 @@ export function useRoadexSession(): RoadexSessionState {
       token,
       transcript,
       user,
+      projectThreadMode,
       workspaces,
     ],
   );

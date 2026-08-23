@@ -41,6 +41,7 @@ import { ProjectHumanThreadPanel } from './ProjectHumanThreadPanel';
 
 function App() {
   const roadex = useRoadexSession();
+  const singleProjectThread = roadex.projectThreadMode === 'single-human-thread';
   const [prompt, setPrompt] = useState('');
   const [sidebarPanel, setSidebarPanel] = useState<'projects' | 'sessions' | 'devices' | 'security'>('projects');
   const [selectedProjectId, setSelectedProjectId] = useState('');
@@ -343,7 +344,7 @@ function App() {
         </div>
 
         <nav className="nav-list">
-          {navItems.map((item) => (
+          {navItems.filter((item) => !singleProjectThread || (item.label !== 'Sessions' && item.label !== 'Devices')).map((item) => (
             <button
               aria-expanded={item.label === 'Projects' ? sidebarPanel === 'projects' : undefined}
               aria-label={item.label}
@@ -369,7 +370,7 @@ function App() {
                 <span>Connection</span>
                 <strong>Projects</strong>
               </div>
-              <button
+              {!singleProjectThread ? <button
                 aria-label="Create new thread"
                 disabled={!selectedProject || roadex.connectionState === 'loading'}
                 onClick={() => selectedProject && void roadex.createThread(selectedProject.id)}
@@ -377,7 +378,7 @@ function App() {
                 type="button"
               >
                 <Plus size={17} />
-              </button>
+              </button> : null}
             </div>
             <label>
               <span>Project</span>
@@ -393,7 +394,7 @@ function App() {
                 ))}
               </select>
             </label>
-            <label>
+            {!singleProjectThread ? <label>
               <span>Thread</span>
               <select
                 data-testid="thread-selector"
@@ -417,12 +418,17 @@ function App() {
                   </option>
                 ))}
               </select>
-            </label>
+            </label> : (
+              <div className="sidebar-project-meta" data-testid="single-project-thread-mode">
+                <span>Conversation</span>
+                <strong>Human interaction thread</strong>
+              </div>
+            )}
             <div className="sidebar-project-meta" title={selectedProject?.root}>
               <span>{selectedProject?.name ?? 'No project selected'}</span>
               <strong>{session && session.workspace.id === selectedProject?.id ? session.lifecycle : 'browse'}</strong>
             </div>
-            <div className="thread-actions-list" aria-label="Active thread management">
+            {!singleProjectThread ? <div className="thread-actions-list" aria-label="Active thread management">
               {activeProjectThreads.map((candidate) => (
                 <div className="thread-action-row" key={candidate.id}>
                   <button
@@ -456,7 +462,7 @@ function App() {
                   </button>
                 </div>
               ))}
-            </div>
+            </div> : null}
             <button
               className="project-create-command"
               disabled={!canProposeProject}
@@ -584,7 +590,7 @@ function App() {
           </button>
         </header>
 
-        <section className="session-header">
+        {!singleProjectThread ? <section className="session-header">
           <div>
             <span className="eyebrow">Live Roadex session</span>
             <h1>{session?.workspace.name ?? 'Attaching session'}</h1>
@@ -596,7 +602,7 @@ function App() {
             <span>{session?.runnerMode ?? 'mock'} runner</span>
             <span>{session?.codexThreadId ? 'thread linked' : 'new thread'}</span>
           </div>
-        </section>
+        </section> : null}
 
         {roadex.error ? (
           <section className="error-banner" role="alert">
@@ -621,7 +627,7 @@ function App() {
           project={selectedProject}
         />
 
-        <section className="dashboard-grid live-grid" aria-label="Roadex dashboard">
+        {!singleProjectThread ? <section className="dashboard-grid live-grid" aria-label="Roadex dashboard">
           <article className="codex-panel">
             <div className="panel-heading">
               <div>
@@ -763,7 +769,7 @@ function App() {
               </div>
             </article>
           </aside>
-        </section>
+        </section> : null}
 
         <section className="lower-grid">
           <article className="section-card security-card" id="security-checks">

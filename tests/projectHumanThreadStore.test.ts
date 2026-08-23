@@ -58,6 +58,18 @@ describe('ProjectHumanThreadStore', () => {
     expect(() => store.createInitial(binding({ bindingId: 'project-human-thread:other:1', projectId: 'other' }), 'create:other:1')).toThrow();
   });
 
+  it('enforces one current human thread per durable root identity across project ids and paths', () => {
+    const store = new ProjectHumanThreadStore(':memory:');
+    store.createInitial(binding(), 'create:arcade:1');
+    const alias = binding({
+      bindingId: 'project-human-thread:alias:1', projectId: 'alias',
+      root: { canonicalPath: '/workspace/Arcade-link', dev: '254', ino: '12345' },
+      conversationId: '01a01569-7874-7f72-bca9-9c91bb869847',
+    });
+    expect(store.currentByRoot({ canonicalPath: '/workspace/Arcade', dev: '254', ino: '12345' })).toEqual(binding());
+    expect(() => store.createInitial(alias, 'create:alias:1')).toThrow(/root/i);
+  });
+
   it('marks unavailable and atomically replaces with immutable predecessor history', () => {
     const store = new ProjectHumanThreadStore(':memory:');
     store.createInitial(binding(), 'create:arcade:1');
@@ -90,6 +102,37 @@ describe('ProjectHumanThreadStore', () => {
     expect(reopened.current('arcade')).toEqual(binding());
     reopened.rebuild();
     expect(reopened.current('arcade')).toEqual(binding());
+  });
+
+  it('fails closed when a legacy projection contains two current aliases for one root', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'roadex-human-thread-conflict-')), 'state.sqlite');
+    const first = binding();
+    const second = binding({
+      bindingId: 'project-human-thread:alias:1', projectId: 'alias',
+      conversationId: '01a01569-7874-7f72-bca9-9c91bb869847',
+      root: { canonicalPath: '/workspace/Arcade-link', dev: '254', ino: '12345' },
+    });
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      CREATE TABLE project_human_thread_bindings (
+        project_id TEXT NOT NULL,generation INTEGER NOT NULL,conversation_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL,binding_json TEXT NOT NULL,binding_digest TEXT NOT NULL,
+        PRIMARY KEY(project_id,generation)
+      );
+      CREATE TABLE project_human_thread_current (
+        project_id TEXT PRIMARY KEY,generation INTEGER NOT NULL,conversation_id TEXT NOT NULL UNIQUE
+      );
+    `);
+    legacy.prepare('INSERT INTO project_human_thread_bindings VALUES (?,?,?,?,?,?)').run(
+      first.projectId, first.generation, first.conversationId, first.status, JSON.stringify(first), first.recordDigest,
+    );
+    legacy.prepare('INSERT INTO project_human_thread_bindings VALUES (?,?,?,?,?,?)').run(
+      second.projectId, second.generation, second.conversationId, second.status, JSON.stringify(second), second.recordDigest,
+    );
+    legacy.prepare('INSERT INTO project_human_thread_current VALUES (?,?,?)').run(first.projectId, first.generation, first.conversationId);
+    legacy.prepare('INSERT INTO project_human_thread_current VALUES (?,?,?)').run(second.projectId, second.generation, second.conversationId);
+    legacy.close();
+    expect(() => new ProjectHumanThreadStore(path)).toThrow(/root identity conflict/i);
   });
 
   it('retains each lifecycle event in a durable relay outbox until its exact receipt', () => {

@@ -137,6 +137,28 @@ export class ProjectHumanThreadConversationStore {
     const rows = this.#db.prepare('SELECT turn_json FROM project_human_thread_turns WHERE project_id=? ORDER BY rowid').all(projectId) as unknown as TurnRow[];
     return rows.map((row) => parseProjectHumanThreadTurn(JSON.parse(row.turn_json)));
   }
+  historyForBinding(
+    projectId: string,
+    conversationId: string,
+    generation: number,
+    limit = 500,
+  ): { turns: ProjectHumanThreadTurn[]; hasEarlierTurns: boolean } {
+    requireId(projectId, 'project id');
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(conversationId)
+      || !Number.isInteger(generation) || generation < 1 || !Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error('Project human thread history binding is invalid.');
+    }
+    const rows = this.#db.prepare(`
+      SELECT turn_json FROM project_human_thread_turns
+      WHERE project_id=? AND generation=?
+      ORDER BY rowid DESC LIMIT ?
+    `).all(projectId, generation, limit + 1) as unknown as TurnRow[];
+    const selected = rows.slice(0, limit).reverse().map((row) => parseProjectHumanThreadTurn(JSON.parse(row.turn_json)));
+    if (selected.some((turn) => turn.conversationId !== conversationId)) {
+      throw new Error('Project human thread history conflicts with the active binding.');
+    }
+    return { turns: selected, hasEarlierTurns: rows.length > limit };
+  }
   hasActiveTurn(projectId: string): boolean {
     requireId(projectId, 'project id');
     return Boolean(this.#db.prepare("SELECT 1 FROM project_human_thread_turns WHERE project_id=? AND state IN ('queued','running') LIMIT 1").get(projectId));

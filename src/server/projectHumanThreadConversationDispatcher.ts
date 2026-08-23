@@ -53,7 +53,7 @@ export class ProjectHumanThreadConversationDispatcher {
         return this.#store.complete(turnId, result.returnedConversationId, result.assistantOutput);
       } catch (error) {
         if (/reconciliation-required/.test(error instanceof Error ? error.message : '')) throw error;
-        const failed = this.#store.fail(turnId, error instanceof Error ? error.message : 'Codex conversation dispatch failed.', true);
+        const failed = this.#store.fail(turnId, persistedFailure(error), true);
         throw new Error(`Project human thread turn is reconciliation-required: ${failed.error}`);
       }
     } finally { lease.release(); }
@@ -72,7 +72,7 @@ export class ProjectHumanThreadConversationDispatcher {
     const args = buildCodexExecArgs(projectRoot, turn.content, turn.conversationId);
     const child = this.#spawn(this.#executable, args, { cwd: projectRoot, env: safeCodexEnvironment(), stdio: ['ignore', 'pipe', 'pipe'] });
     return new Promise((resolve, reject) => {
-      let buffer = ''; let stderr = ''; let bytes = 0; let returned: string | undefined; let terminal = ''; let finished = false;
+      let buffer = ''; let stderr = ''; let bytes = 0; let returned: string | undefined; let terminal = ''; let finished = false; let terminalError: Error | undefined;
       const finishReject = (error: Error): void => { if (finished) return; finished = true; reject(error); };
       let timeoutError: Error | undefined;
       const timer = setTimeout(() => {
@@ -86,7 +86,12 @@ export class ProjectHumanThreadConversationDispatcher {
       timer.unref();
       const consume = (chunk: string): void => {
         bytes += Buffer.byteLength(chunk, 'utf8');
-        if (bytes > 64_000) { clearTimeout(timer); try { child.kill('SIGKILL'); } catch { /* best effort */ } finishReject(new Error('Codex conversation output is too large.')); return; }
+        if (bytes > 64_000) {
+          terminalError = new Error('Codex conversation output is too large.');
+          clearTimeout(timer);
+          try { child.kill('SIGKILL'); } catch { /* best effort */ }
+          return;
+        }
         const parsed = parseCodexJsonlStream(buffer + chunk); buffer = parsed.remainder;
         if (parsed.codexThreadId) returned = parsed.codexThreadId;
         terminal = terminalMessage(parsed.events.map((event) => event.message).filter((message): message is string => Boolean(message)), terminal);
@@ -101,6 +106,7 @@ export class ProjectHumanThreadConversationDispatcher {
         if (buffer.trim()) { const parsed = parseCodexJsonlEvents(`${buffer}\n`); if (parsed.codexThreadId) returned = parsed.codexThreadId; terminal = terminalMessage(parsed.events.map((event) => event.message).filter((message): message is string => Boolean(message)), terminal); }
         if (finished) return;
         if (timeoutError) { finishReject(timeoutError); return; }
+        if (terminalError) { finishReject(terminalError); return; }
         if (code !== 0) { finishReject(new Error(stderr.trim() || `Codex exited with status ${code ?? 'unknown'}.`)); return; }
         if (!returned) { finishReject(new Error('Codex did not return a conversation identity.')); return; }
         finished = true; resolve({ returnedConversationId: returned, assistantOutput: terminal.trim() });
@@ -121,5 +127,12 @@ function acquireLease(directory: string, binding: ProjectHumanThreadBinding, tur
 function safeCodexEnvironment(): NodeJS.ProcessEnv {
   const names = ['CODEX_HOME', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'SHELL', 'TERM', 'USER'];
   return Object.fromEntries(names.flatMap((name) => typeof process.env[name] === 'string' ? [[name, process.env[name]!]] : []));
+}
+function persistedFailure(error: unknown): string {
+  const raw = error instanceof Error ? error.message : '';
+  if (/timed out/i.test(raw)) return 'Codex conversation dispatch timed out; exact reconciliation is required.';
+  if (/output is too large/i.test(raw)) return 'Codex conversation output exceeded the safe limit; exact reconciliation is required.';
+  if (/conversation identity/i.test(raw)) return 'Codex conversation identity did not match the active project binding.';
+  return 'Codex conversation dispatch failed; inspect the private server audit before retrying.';
 }
 function terminalMessage(messages: string[], prior: string): string { return messages.length ? messages[messages.length - 1]! : prior; }

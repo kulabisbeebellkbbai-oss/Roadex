@@ -90,6 +90,7 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
   const [conversation, setConversation] = useState<ProjectHumanThreadConversationPublic>();
   const [turnDraft, setTurnDraft] = useState('');
   const [turnSending, setTurnSending] = useState(false);
+  const turnRequests = useRef(new Map<string, { idempotencyKey: string; correlationId: string }>());
   const refreshFence = useRef(new ProjectHumanThreadRefreshFence());
   const transcriptRefreshFence = useRef(new ProjectHumanThreadRefreshFence());
   const transcriptEnabledRef = useRef(false);
@@ -180,6 +181,7 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
     setConversation(undefined);
     setTurnDraft('');
     setTurnSending(false);
+    turnRequests.current.clear();
     setTranscriptError('');
     transcriptEnabledRef.current = false;
     void refresh();
@@ -291,11 +293,25 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
         if (!project || !content.trim() || turnSending) return;
         const selectedProject = { id: project.id, root: project.root, authEpoch: token ?? '' };
         if (!sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) return;
+        const cleanContent = content.trim();
+        const requestSignature = projectHumanThreadIdempotencyScope(selectedProject.authEpoch, 'turn', {
+          projectId: project.id,
+          root: project.root,
+          content: cleanContent,
+        });
+        const request = turnRequests.current.get(requestSignature) ?? {
+          idempotencyKey: makeIdempotencyKey('turn'),
+          correlationId: makeIdempotencyKey('turn-correlation'),
+        };
+        turnRequests.current.set(requestSignature, request);
         setTurnSending(true);
-        void submitProjectHumanThreadTurn(token, project.id, content.trim(), `roadex-human-${Date.now()}`, makeIdempotencyKey('turn'))
+        void submitProjectHumanThreadTurn(token, project.id, cleanContent, request.correlationId, request.idempotencyKey)
           .then((turn) => {
             if (!sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) return;
-            setConversation((current) => current ? { ...current, turns: [...current.turns, turn] } : current);
+            turnRequests.current.delete(requestSignature);
+            setConversation((current) => current && !current.turns.some((item) => item.turnId === turn.turnId)
+              ? { ...current, turns: [...current.turns, turn] }
+              : current);
             setTurnDraft('');
             return refreshTranscript();
           })
@@ -341,6 +357,14 @@ export function ProjectHumanThreadPanelView({
 }: ProjectHumanThreadPanelViewProps) {
   const current = snapshot.current;
   const canReplace = lifecycleValidated && !loading && Boolean(current) && current?.status !== 'replacement-pending' && !busyAction;
+  const conversationReady = Boolean(current?.status === 'active'
+    && conversation
+    && conversation.conversationId === current.conversationId
+    && conversation.generation === current.generation
+    && !transcriptError);
+  const conversationBlocked = Boolean(conversation?.turns.some((turn) => (
+    turn.state === 'queued' || turn.state === 'running' || turn.state === 'reconciliation-required'
+  )));
   return (
     <section className="section-card human-thread-panel" aria-label="Project Roadex human interaction thread" data-testid="project-human-thread-panel">
       <div className="panel-heading compact human-thread-heading">
@@ -529,10 +553,12 @@ export function ProjectHumanThreadPanelView({
         <section className="human-thread-turn-composer" aria-label="Send a message to the project thread" data-testid="project-human-thread-turn-composer">
           <div className="human-thread-history-heading"><div><MessageSquare size={17} /><strong>Message the project thread</strong></div><span>Dedicated writer</span></div>
           <p>Send a normal conversation message to this project’s dedicated Roadex thread. Overseer approvals remain separate.</p>
-          <form onSubmit={(event) => { event.preventDefault(); onSendTurn?.(turnDraft); }}>
+          {!conversationReady ? <p className="human-thread-transcript-error">A complete current conversation snapshot is required before sending.</p> : null}
+          <form onSubmit={(event) => { event.preventDefault(); if (conversationReady && !conversationBlocked) onSendTurn?.(turnDraft); }}>
             <label><span>Your message</span><textarea aria-label="Message the project thread" value={turnDraft} onChange={(event) => onTurnDraft?.(event.target.value)} /></label>
-            <button className="primary-action" disabled={!turnDraft.trim() || turnSending} type="submit">{turnSending ? 'Sending…' : 'Send message'}</button>
+            <button className="primary-action" disabled={!conversationReady || conversationBlocked || !turnDraft.trim() || turnSending} type="submit">{turnSending ? 'Sending…' : conversationBlocked ? 'Conversation requires completion or reconciliation' : 'Send message'}</button>
           </form>
+          {conversation?.hasEarlierTurns ? <p className="human-thread-paging-note">Earlier turns remain in durable history; this view shows the most recent 500.</p> : null}
           {conversation?.turns.length ? <ol className="human-thread-turn-history">{conversation.turns.map((turn) => <li key={turn.turnId} data-testid={`project-human-thread-turn-${turn.turnId}`}><div><strong>{turn.content}</strong><span>{turn.state}</span></div>{turn.assistantOutput ? <p>{turn.assistantOutput}</p> : null}{turn.error ? <p className="human-thread-transcript-error">{turn.error}</p> : null}</li>)}</ol> : <p>No direct Roadex messages have been sent in this conversation.</p>}
         </section>
       ) : null}

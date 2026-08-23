@@ -44,12 +44,13 @@ describe('ProjectHumanThreadAuthority', () => {
     expect(() => authority.inspect(fixture.root, threadId)).toThrow(/does not bind/);
   });
 
-  it('rejects symlink roots and detects a substituted project directory', () => {
+  it('resolves a symlink alias to the same canonical root identity', () => {
     const fixture = setup();
     const linked = join(fixture.root, 'Linked');
     symlinkSync(fixture.project, linked, 'dir');
     const authority = new ProjectHumanThreadAuthority({ stateDatabasePath: fixture.state });
-    expect(() => authority.inspect(linked, threadId)).toThrow(/root/);
+    expect(authority.inspect(linked, threadId)).toMatchObject({ conversationId: threadId, canonicalPath: fixture.project });
+    expect(authority.rootIdentity(linked)).toEqual(authority.rootIdentity(fixture.project));
   });
 
   it('creates through the injected controlled creator and verifies the returned identity', async () => {

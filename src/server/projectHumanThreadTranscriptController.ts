@@ -2,8 +2,11 @@ import { z } from 'zod';
 import type { UserProfile } from '../shared/sessionContracts.js';
 import { ProjectHumanThreadTranscriptStore, type ProjectHumanThreadQuestionRecord } from './projectHumanThreadTranscriptStore.js';
 
-type OwnedProject = { projectId: string };
-type Dependencies = { resolveOwnedProject(user: UserProfile, projectId: string): OwnedProject | undefined };
+type OwnedProject = { projectId: string; root?: string };
+type Dependencies = {
+  resolveOwnedProject(user: UserProfile, projectId: string): OwnedProject | undefined;
+  resolveHumanThreadProjectId?: (project: OwnedProject) => string;
+};
 const responseBody = z.object({ content: z.string().trim().min(1).max(6_000) }).strict();
 
 export class ProjectHumanThreadTranscriptController {
@@ -17,18 +20,18 @@ export class ProjectHumanThreadTranscriptController {
 
   pending(user: UserProfile, projectId: string): ReturnType<typeof publicQuestion>[] {
     const project = this.#owned(user, projectId);
-    return this.#store.pending(project.projectId).map(publicQuestion);
+    return this.#store.pending(this.#threadProjectId(project)).map(publicQuestion);
   }
 
   history(user: UserProfile, projectId: string): ReturnType<typeof publicQuestion>[] {
     const project = this.#owned(user, projectId);
-    return this.#store.history(project.projectId).map(publicQuestion);
+    return this.#store.history(this.#threadProjectId(project)).map(publicQuestion);
   }
 
   submit(user: UserProfile, projectId: string, messageId: string, idempotencyKey: string, payload: unknown): ReturnType<typeof publicResponse> {
     const project = this.#owned(user, projectId);
     const body = responseBody.parse(payload);
-    return publicResponse(this.#store.submitResponse(project.projectId, messageId, body.content, idempotencyKey).response);
+    return publicResponse(this.#store.submitResponse(this.#threadProjectId(project), messageId, body.content, idempotencyKey).response);
   }
 
   #owned(user: UserProfile, projectId: string): OwnedProject {
@@ -36,6 +39,10 @@ export class ProjectHumanThreadTranscriptController {
     const project = this.#deps.resolveOwnedProject(user, projectId);
     if (!project || project.projectId !== projectId) throw new Error('Project not found.');
     return project;
+  }
+
+  #threadProjectId(project: OwnedProject): string {
+    return this.#deps.resolveHumanThreadProjectId?.(project) ?? project.projectId;
   }
 }
 

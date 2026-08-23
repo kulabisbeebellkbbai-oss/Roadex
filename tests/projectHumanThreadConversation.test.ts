@@ -136,4 +136,28 @@ describe('project human conversation turns', () => {
     expect(store.history(binding.projectId)[0]).toMatchObject({ state: 'reconciliation-required' });
     store.close();
   });
+
+  it('stores a stable public failure instead of raw noisy Codex stderr', async () => {
+    const { store } = setup();
+    const dispatcher = new ProjectHumanThreadConversationDispatcher(store, {
+      current: () => binding,
+      hasLiveLocator: () => false,
+    }, {
+      spawnProcess: () => {
+        const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; exitCode: number | null; kill: () => boolean };
+        child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.kill = () => true;
+        queueMicrotask(() => {
+          child.stderr.emit('data', `secret-local-path-${'x'.repeat(2_000)}`);
+          child.exitCode = 1; child.emit('close', 1);
+        });
+        return child as never;
+      },
+      executable: '/codex',
+    });
+    const turn = store.enqueue(owner.id, binding, 'ping', 'turn-key-noisy', 'corr-noisy').turn;
+    await expect(dispatcher.dispatch(turn.turnId)).rejects.toThrow(/reconciliation-required/i);
+    expect(store.get(turn.turnId)?.error).toBe('Codex conversation dispatch failed; inspect the private server audit before retrying.');
+    expect(store.get(turn.turnId)?.error).not.toContain('secret-local-path');
+    store.close();
+  });
 });

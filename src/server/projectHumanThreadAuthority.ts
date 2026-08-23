@@ -60,6 +60,10 @@ export class ProjectHumanThreadAuthority {
     this.#tmuxExecutable = options.tmuxExecutable ?? '/usr/bin/tmux';
   }
 
+  rootIdentity(projectRoot: string): { canonicalPath: string; dev: string; ino: string } {
+    return this.#withRoot(projectRoot, (root) => root);
+  }
+
   inspect(projectRoot: string, conversationId: string): ProjectHumanThreadCandidate {
     if (!CONVERSATION_ID.test(conversationId)) throw new Error('Project human thread conversation identity is invalid.');
     return this.#withRoot(projectRoot, (root) => {
@@ -206,21 +210,23 @@ export class ProjectHumanThreadAuthority {
 
   #withRoot<T>(projectRoot: string, action: (root: Omit<ProjectHumanThreadCandidate, 'conversationId' | 'createdAt'>) => T): T {
     if (!isAbsolute(projectRoot) || projectRoot !== projectRoot.trim()) throw new Error('Project human thread root is invalid.');
-    const lexical = lstatSync(projectRoot);
-    if (!lexical.isDirectory() || lexical.isSymbolicLink() || realpathSync(projectRoot) !== projectRoot) {
+    let canonicalPath: string;
+    try { canonicalPath = realpathSync(projectRoot); } catch { throw new Error('Project human thread root is unavailable.'); }
+    const lexical = lstatSync(canonicalPath);
+    if (!lexical.isDirectory() || lexical.isSymbolicLink() || realpathSync(canonicalPath) !== canonicalPath) {
       throw new Error('Project human thread root is unsafe.');
     }
-    const fd = openSync(projectRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    const fd = openSync(canonicalPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     try {
       const opened = fstatSync(fd);
-      const current = lstatSync(projectRoot);
+      const current = lstatSync(canonicalPath);
       if (!opened.isDirectory() || current.isSymbolicLink()
         || opened.dev !== current.dev || opened.ino !== current.ino
         || opened.uid !== current.uid || opened.mode !== current.mode) {
         throw new Error('Project human thread root identity changed.');
       }
-      const result = action({ canonicalPath: projectRoot, dev: String(opened.dev), ino: String(opened.ino) });
-      const final = lstatSync(projectRoot);
+      const result = action({ canonicalPath, dev: String(opened.dev), ino: String(opened.ino) });
+      const final = lstatSync(canonicalPath);
       const finalOpened = fstatSync(fd);
       if (final.dev !== finalOpened.dev || final.ino !== finalOpened.ino || final.mode !== finalOpened.mode) {
         throw new Error('Project human thread root identity changed.');

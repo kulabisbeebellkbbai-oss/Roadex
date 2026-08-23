@@ -16,17 +16,17 @@ describe('project human thread conversation client', () => {
   afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); });
 
   it('accepts an exact conversation and binds every turn to its conversation generation', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, conversationId, generation: 1, turns: [turn()] }), { status: 200, headers: { 'content-type': 'application/json' } })));
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, conversationId, generation: 1, hasEarlierTurns: false, turns: [turn()] }), { status: 200, headers: { 'content-type': 'application/json' } })));
     const { getProjectHumanThreadConversation } = await import('../src/client/projectHumanThreadConversationApi');
     await expect(getProjectHumanThreadConversation(undefined, projectId)).resolves.toMatchObject({ conversationId, generation: 1 });
   });
 
   it('rejects cross-conversation, cross-generation, extra-field, and impossible-state responses', async () => {
     const payloads = [
-      { ok: true, conversationId, generation: 1, turns: [turn({ conversationId: '22222222-2222-2222-2222-222222222222' })] },
-      { ok: true, conversationId, generation: 1, turns: [turn({ generation: 2 })] },
-      { ok: true, conversationId, generation: 1, turns: [turn()], unexpected: true },
-      { ok: true, conversationId, generation: 1, turns: [turn({ state: 'completed' })] },
+      { ok: true, conversationId, generation: 1, hasEarlierTurns: false, turns: [turn({ conversationId: '22222222-2222-2222-2222-222222222222' })] },
+      { ok: true, conversationId, generation: 1, hasEarlierTurns: false, turns: [turn({ generation: 2 })] },
+      { ok: true, conversationId, generation: 1, hasEarlierTurns: false, turns: [turn()], unexpected: true },
+      { ok: true, conversationId, generation: 1, hasEarlierTurns: false, turns: [turn({ state: 'completed' })] },
     ];
     const fetch = vi.fn(async () => new Response(JSON.stringify(payloads.shift()), { status: 200, headers: { 'content-type': 'application/json' } }));
     vi.stubGlobal('fetch', fetch);

@@ -103,6 +103,7 @@ let projectHumanThreadConversationStore: ProjectHumanThreadConversationStore | u
 let projectHumanThreadConversationController: ProjectHumanThreadConversationController | undefined;
 let projectHumanThreadConversationDispatcher: ProjectHumanThreadConversationDispatcher | undefined;
 let projectHumanThreadConversationDispatchRunning = false;
+let projectHumanThreadConversationDispatchRequested = false;
 state.resolveControlledRunnerGrant = (context) =>
   getProjectCreationBroker().resolveControlledRunnerGrant({
     userId: context.userId,
@@ -854,9 +855,11 @@ function getProjectHumanThreadConversationController(): ProjectHumanThreadConver
   projectHumanThreadConversationController = new ProjectHumanThreadConversationController(projectHumanThreadConversationStore, {
     resolveOwnedProject(user, projectId) {
       const decision = resolveWorkspaceForUser(user, projectId);
-      return decision.ok ? { projectId: decision.workspace.id } : undefined;
+      return decision.ok ? { projectId: decision.workspace.id, root: decision.workspace.root } : undefined;
     },
-  }, (projectId) => projectHumanThreadService?.current(projectId));
+  }, (projectId, projectRoot) => projectRoot
+    ? projectHumanThreadService?.currentForRoot(projectRoot) ?? projectHumanThreadService?.current(projectId)
+    : projectHumanThreadService?.current(projectId));
   projectHumanThreadConversationDispatcher = new ProjectHumanThreadConversationDispatcher(
     projectHumanThreadConversationStore,
     {
@@ -868,13 +871,24 @@ function getProjectHumanThreadConversationController(): ProjectHumanThreadConver
 }
 
 function scheduleProjectHumanThreadConversationDispatch(): void {
-  if (process.env.ROADEX_PROJECT_HUMAN_THREAD_ENABLED !== 'true' || projectHumanThreadConversationDispatchRunning) return;
+  if (process.env.ROADEX_PROJECT_HUMAN_THREAD_ENABLED !== 'true') return;
+  projectHumanThreadConversationDispatchRequested = true;
+  if (projectHumanThreadConversationDispatchRunning) return;
   projectHumanThreadConversationDispatchRunning = true;
   queueMicrotask(() => {
     getProjectHumanThreadConversationController();
-    void projectHumanThreadConversationDispatcher?.dispatchPending().catch(() => {
+    void (async () => {
+      do {
+        projectHumanThreadConversationDispatchRequested = false;
+        await projectHumanThreadConversationDispatcher?.dispatchPending();
+      } while (projectHumanThreadConversationDispatchRequested
+        || Boolean(projectHumanThreadConversationStore?.pendingOutbox().length));
+    })().catch(() => {
       // Turn state records remain durable and expose failed/reconciliation-required status.
-    }).finally(() => { projectHumanThreadConversationDispatchRunning = false; });
+    }).finally(() => {
+      projectHumanThreadConversationDispatchRunning = false;
+      if (projectHumanThreadConversationDispatchRequested) scheduleProjectHumanThreadConversationDispatch();
+    });
   });
 }
 
@@ -884,7 +898,10 @@ function getProjectHumanThreadTranscriptController(): ProjectHumanThreadTranscri
     projectHumanThreadTranscriptController = new ProjectHumanThreadTranscriptController(projectHumanThreadTranscriptStore!, {
       resolveOwnedProject(user, projectId) {
         const decision = resolveWorkspaceForUser(user, projectId);
-        return decision.ok ? { projectId: decision.workspace.id } : undefined;
+        return decision.ok ? { projectId: decision.workspace.id, root: decision.workspace.root } : undefined;
+      },
+      resolveHumanThreadProjectId(project) {
+        return project.root ? projectHumanThreadService?.currentForRoot(project.root)?.projectId ?? project.projectId : project.projectId;
       },
     });
   }

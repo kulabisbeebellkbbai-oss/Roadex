@@ -585,6 +585,7 @@ export async function bootstrap(state: RoadexState, user: UserProfile): Promise<
   }
   const visibleSessionIds = new Set(userSessions.map((session) => session.id));
   return {
+    projectThreadMode: 'single-human-thread',
     user,
     workspaces: approvedWorkspaces,
     sessions: userSessions,
@@ -1693,6 +1694,7 @@ export function authorizeDeviceBridgeWrite(
   if (
     deviceBridgeWriteEnabled() && auditHmacKey && identityHmacKey && user.authMode === 'protected-gateway' && parsed && writeTokenDigest &&
     operation?.userId === user.id && operation.phase === 'destructive' && operation.destructiveNonceDigest &&
+    session && isManagedSessionAuthorized(state, user, session) && session.lifecycle === 'ready' &&
     usbProfileAllowsOperation(state, operation.projectId, 'esp32.flash') &&
     timingSafeEqual(Buffer.from(writeTokenDigest), Buffer.from(operation.destructiveNonceDigest))
   ) return { ok: true, operation: publicDeviceBridgeOperation(operation) };
@@ -1728,16 +1730,19 @@ export function reportDeviceBridgeWrite(
 ): DeviceBridgeProbeResponse {
   const auditHmacKey = deviceBridgeAuditHmacKey();
   const operation = state.deviceBridgeOperations.get(operationId);
+  const session = operation && getOwnedSession(state.sessions, user.id, operation.sessionId);
   const parsed = parseWriteReportPayload(payload);
   const writeTokenDigest = parsed && createHash('sha256').update(parsed.writeToken).digest('hex');
   if (
     deviceBridgeWriteEnabled() && auditHmacKey && user.authMode === 'protected-gateway' && parsed && writeTokenDigest &&
     operation?.userId === user.id && operation.phase === parsed.outcome && operation.destructiveNonceDigest &&
+    session && isManagedSessionAuthorized(state, user, session) && session.lifecycle === 'ready' &&
     timingSafeEqual(Buffer.from(writeTokenDigest), Buffer.from(operation.destructiveNonceDigest))
   ) return { ok: true, operation: publicDeviceBridgeOperation(operation) };
   if (
     !deviceBridgeWriteEnabled() || !auditHmacKey || user.authMode !== 'protected-gateway' || !parsed || !writeTokenDigest ||
     !operation || operation.userId !== user.id || operation.phase !== 'destructive' ||
+    !session || !isManagedSessionAuthorized(state, user, session) || session.lifecycle !== 'ready' ||
     !operation.destructiveNonceDigest || expiredIso(operation.reportingExpiresAt) ||
     parsed.artifactSha256 !== operation.verifiedArtifactSha256 ||
     !timingSafeEqual(

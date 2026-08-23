@@ -164,6 +164,7 @@ export type ManagedCodexThread = {
 };
 
 export type RoadexBootstrap = {
+  projectThreadMode: 'single-human-thread';
   user: UserProfile;
   workspaces: WorkspaceRef[];
   sessions: RoadexSession[];

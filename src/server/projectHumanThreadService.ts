@@ -1,8 +1,10 @@
 import { bindingDigest, type ProjectHumanThreadBinding } from '../shared/projectHumanThreadContracts.js';
 import { isProjectHumanThreadCreateNoSideEffect, type ProjectHumanThreadAuthority, type ProjectHumanThreadCandidate } from './projectHumanThreadAuthority.js';
-import type { ProjectHumanThreadStore } from './projectHumanThreadStore.js';
+import type { ProjectHumanThreadStore, ProjectRootIdentity } from './projectHumanThreadStore.js';
 
-type Authority = Pick<ProjectHumanThreadAuthority, 'candidates' | 'inspect' | 'create' | 'repair'>;
+type Authority = Pick<ProjectHumanThreadAuthority, 'candidates' | 'inspect' | 'create' | 'repair'> & {
+  rootIdentity?: (projectRoot: string) => ProjectRootIdentity;
+};
 type ServiceOptions = { now?: () => string };
 type BaseRequest = {
   projectId: string;
@@ -33,40 +35,51 @@ export class ProjectHumanThreadService {
     this.#now = options.now ?? (() => new Date().toISOString());
   }
 
+  currentForRoot(projectRoot: string): ProjectHumanThreadBinding | undefined {
+    return this.#store.currentByRoot(this.#rootIdentity(projectRoot));
+  }
+
+  historyForRoot(projectRoot: string): ProjectHumanThreadBinding[] {
+    const current = this.currentForRoot(projectRoot);
+    return current ? this.#store.history(current.projectId) : [];
+  }
+
   async createMissing(input: BaseRequest): Promise<CreateMissingResult> {
     requireBase(input);
-    const current = this.#store.current(input.projectId);
+    const prepared = this.#prepare(input);
+    const current = this.#store.currentByRoot(prepared.root) ?? this.#store.current(input.projectId);
     if (current) {
-      requireRoot(current, input.projectRoot);
-      const intent = this.#store.creationIntent(input.projectId);
+      requireRoot(current, prepared.projectRoot);
+      const intent = this.#store.creationIntent(current.projectId);
       if (intent?.state === 'prepared' && intent.eventId === input.idempotencyKey) {
-        this.#store.completeCreationIntent(input.projectId, input.idempotencyKey, current.conversationId);
+        this.#store.completeCreationIntent(current.projectId, input.idempotencyKey, current.conversationId);
       }
       return { outcome: 'current', binding: current };
     }
-    const candidates = this.#authority.candidates(input.projectRoot);
+    const candidates = this.#authority.candidates(prepared.projectRoot);
     if (candidates.length > 0) return { outcome: 'adoption-required', candidates };
-    const intent = this.#store.beginCreationIntent(input.projectId, input.idempotencyKey, {
-      projectRoot: input.projectRoot, provenanceDigest: input.provenanceDigest,
-    });
+    const intent = this.#store.beginCreationIntent(prepared.projectId, input.idempotencyKey, {
+      projectRoot: prepared.projectRoot, provenanceDigest: input.provenanceDigest,
+    }, prepared.root);
     if (!intent.inserted) return { outcome: 'reconciliation-required', candidates: [] };
-    const candidate = await this.#authority.create(input.projectRoot);
-    const binding = createBinding(input, candidate, 1, null, 'created', this.#now());
+    const candidate = await this.#authority.create(prepared.projectRoot);
+    const binding = createBinding(prepared, candidate, 1, null, 'created', this.#now());
     const result = this.#store.createInitial(binding, input.idempotencyKey);
-    this.#store.completeCreationIntent(input.projectId, input.idempotencyKey, binding.conversationId);
+    this.#store.completeCreationIntent(prepared.projectId, input.idempotencyKey, binding.conversationId);
     return { outcome: result.inserted ? 'created' : 'current', binding: result.binding };
   }
 
   async adopt(input: BaseRequest & { conversationId: string }): Promise<{ outcome: 'adopted' | 'current'; binding: ProjectHumanThreadBinding }> {
     requireBase(input);
-    const current = this.#store.current(input.projectId);
+    const prepared = this.#prepare(input);
+    const current = this.#store.currentByRoot(prepared.root) ?? this.#store.current(input.projectId);
     if (current) {
-      requireRoot(current, input.projectRoot);
+      requireRoot(current, prepared.projectRoot);
       if (current.conversationId !== input.conversationId) throw new Error('Project already has a different human thread.');
       return { outcome: 'current', binding: current };
     }
-    const candidate = this.#authority.inspect(input.projectRoot, input.conversationId);
-    const binding = createBinding(input, candidate, 1, null, 'adopted', this.#now());
+    const candidate = this.#authority.inspect(prepared.projectRoot, input.conversationId);
+    const binding = createBinding(prepared, candidate, 1, null, 'adopted', this.#now());
     const result = this.#store.createInitial(binding, input.idempotencyKey);
     const intent = this.#store.creationIntent(input.projectId);
     if (intent?.state === 'prepared') {
@@ -75,9 +88,10 @@ export class ProjectHumanThreadService {
     return { outcome: result.inserted ? 'adopted' : 'current', binding: result.binding };
   }
 
-  recover(projectId: string, expectedGeneration: number, idempotencyKey: string): { outcome: 'recovered' | 'unavailable' | 'replacement-pending'; binding: ProjectHumanThreadBinding } {
+  recover(projectId: string, expectedGeneration: number, idempotencyKey: string, projectRoot?: string): { outcome: 'recovered' | 'unavailable' | 'replacement-pending'; binding: ProjectHumanThreadBinding } {
     requireIdentity(projectId, idempotencyKey);
-    const current = this.#store.current(projectId);
+    const root = projectRoot ? this.#rootIdentity(projectRoot, projectId) : undefined;
+    const current = (root ? this.#store.currentByRoot(root) : undefined) ?? this.#store.current(projectId);
     if (!current || current.generation !== expectedGeneration) throw new Error('Project human thread generation conflict.');
     // A replacement transition is deliberately not convertible to
     // unavailable: the durable replacement intent owns the recovery path.
@@ -89,13 +103,13 @@ export class ProjectHumanThreadService {
       if (candidate.dev !== current.root.dev || candidate.ino !== current.root.ino) throw new Error('root identity changed');
       this.#authority.repair(current);
       const binding = current.status === 'unavailable'
-        ? this.#store.markRecovered(projectId, expectedGeneration, this.#now(), idempotencyKey)
+        ? this.#store.markRecovered(current.projectId, expectedGeneration, this.#now(), idempotencyKey)
         : current;
       return { outcome: 'recovered', binding };
     } catch {
       if (current.status === 'unavailable') return { outcome: 'unavailable', binding: current };
       const binding = this.#store.markUnavailable(
-        projectId, expectedGeneration, 'Thread cannot be recovered', this.#now(), idempotencyKey,
+        current.projectId, expectedGeneration, 'Thread cannot be recovered', this.#now(), idempotencyKey,
       );
       return { outcome: 'unavailable', binding };
     }
@@ -113,14 +127,17 @@ export class ProjectHumanThreadService {
   }
 
   async resume(input: { projectId: string; projectRoot: string; expectedGeneration: number }): Promise<ReplacementResult> {
-    const intent = this.#store.replacementIntent(input.projectId);
+    const root = this.#rootIdentity(input.projectRoot, input.projectId);
+    const current = this.#store.currentByRoot(root);
+    const projectId = current?.projectId ?? input.projectId;
+    const intent = this.#store.replacementIntent(projectId);
     if (!intent || intent.state !== 'prepared') throw new Error('Project human thread replacement intent is unavailable.');
-    if (intent.expectedGeneration !== input.expectedGeneration || intent.projectRoot !== input.projectRoot) {
+    if (intent.expectedGeneration !== input.expectedGeneration || intent.projectRoot !== root.canonicalPath) {
       throw new Error('Project human thread replacement intent conflict.');
     }
     return this.replace({
-      projectId: input.projectId,
-      projectRoot: intent.projectRoot,
+      projectId,
+      projectRoot: root.canonicalPath,
       provenanceDigest: intent.provenanceDigest,
       idempotencyKey: intent.idempotencyKey,
       expectedGeneration: intent.expectedGeneration,
@@ -134,30 +151,32 @@ export class ProjectHumanThreadService {
     expectedGeneration: number;
     conversationId: string;
   }): Promise<ReplacementResult> {
-    const current = this.#store.current(input.projectId);
-    const intent = this.#store.replacementIntent(input.projectId);
+    const root = this.#rootIdentity(input.projectRoot, input.projectId);
+    const current = this.#store.currentByRoot(root) ?? this.#store.current(input.projectId);
+    const projectId = current?.projectId ?? input.projectId;
+    const intent = this.#store.replacementIntent(projectId);
     if (!current || current.status !== 'replacement-pending' || (intent && intent.state !== 'prepared')) {
       throw new Error('Project human thread replacement reconciliation is unavailable.');
     }
     if (current.generation !== input.expectedGeneration
-      || (intent && (intent.expectedGeneration !== input.expectedGeneration || intent.projectRoot !== input.projectRoot))) {
+      || (intent && (intent.expectedGeneration !== input.expectedGeneration || intent.projectRoot !== root.canonicalPath))) {
       throw new Error('Project human thread replacement intent conflict.');
     }
-    const boundIds = new Set(this.#store.history(input.projectId).map((item) => item.conversationId));
+    const boundIds = new Set(this.#store.history(projectId).map((item) => item.conversationId));
     if (boundIds.has(input.conversationId)) throw new Error('Project human thread replacement candidate is already bound.');
-    const candidate = this.#authority.inspect(input.projectRoot, input.conversationId);
-    const reconciliationKey = intent?.idempotencyKey ?? `legacy-reconcile:${input.projectId}:${input.expectedGeneration}`;
+    const candidate = this.#authority.inspect(root.canonicalPath, input.conversationId);
+    const reconciliationKey = intent?.idempotencyKey ?? `legacy-reconcile:${projectId}:${input.expectedGeneration}`;
     const next = createBinding(
       {
-        projectId: input.projectId,
-        projectRoot: input.projectRoot,
+        projectId,
+        projectRoot: root.canonicalPath,
         provenanceDigest: intent?.provenanceDigest ?? current.provenanceDigest,
         idempotencyKey: reconciliationKey,
       }, candidate, input.expectedGeneration + 1, input.expectedGeneration, 'adopted',
       laterTimestamp(this.#now(), current.updatedAt),
     );
     const result = this.#store.activateReplacement(next, input.expectedGeneration, `${reconciliationKey}:activate`);
-    if (intent) this.#store.completeReplacementIntent(input.projectId, intent.eventId, result.binding.conversationId);
+    if (intent) this.#store.completeReplacementIntent(projectId, intent.eventId, result.binding.conversationId);
     return { outcome: result.inserted ? 'replaced' : 'current', binding: result.binding };
   }
 
@@ -167,19 +186,21 @@ export class ProjectHumanThreadService {
       || !input.reason || input.reason !== input.reason.trim() || input.reason.length > 1_000) {
       throw new Error('Project human thread replacement request is invalid.');
     }
-    const current = this.#store.current(input.projectId);
+    const prepared = this.#prepare(input);
+    const operation = { ...input, projectId: prepared.projectId, projectRoot: prepared.projectRoot };
+    const current = this.#store.currentByRoot(prepared.root) ?? this.#store.current(input.projectId);
     if (current?.generation === input.expectedGeneration + 1
       && current.predecessorGeneration === input.expectedGeneration
       && current.provenanceDigest === input.provenanceDigest) {
-      const intent = this.#store.replacementIntent(input.projectId);
-      if (intent && !sameReplacementIntent(intent, input)) {
+      const intent = this.#store.replacementIntent(operation.projectId);
+      if (intent && !sameReplacementIntent(intent, operation)) {
         throw new Error('Project human thread replacement intent conflict.');
       }
       if (intent?.state === 'prepared') {
         // Activation and intent completion are separate durable writes. A
         // restart between them must reconcile the intent to the already
         // authoritative binding before returning the idempotent result.
-        this.#store.completeReplacementIntent(input.projectId, intent.eventId, current.conversationId);
+        this.#store.completeReplacementIntent(operation.projectId, intent.eventId, current.conversationId);
       }
       return { outcome: 'current', binding: current };
     }
@@ -187,33 +208,33 @@ export class ProjectHumanThreadService {
     const intent = {
       idempotencyKey: input.idempotencyKey,
       expectedGeneration: input.expectedGeneration,
-      projectRoot: input.projectRoot,
+      projectRoot: operation.projectRoot,
       provenanceDigest: input.provenanceDigest,
       reason: input.reason,
     };
-    const existingIntent = this.#store.replacementIntent(input.projectId);
+    const existingIntent = this.#store.replacementIntent(operation.projectId);
     let pending: ProjectHumanThreadBinding;
     if (current?.status === 'replacement-pending') {
       // Only the exact operation that created the pending transition may
       // resume it. A new idempotency key or changed provenance is fail-closed.
-      if (!existingIntent || existingIntent.state !== 'prepared' || !sameReplacementIntent(existingIntent, input)) {
+      if (!existingIntent || existingIntent.state !== 'prepared' || !sameReplacementIntent(existingIntent, operation)) {
         throw new Error('Project human thread replacement intent conflict.');
       }
       pending = current;
     } else {
       pending = this.#store.beginReplacement(
-        input.projectId, input.expectedGeneration, input.reason, this.#now(), beginEventId, intent,
+        operation.projectId, input.expectedGeneration, input.reason, this.#now(), beginEventId, intent, prepared.root,
       );
     }
-    requireRoot(pending, input.projectRoot);
-    const boundIds = new Set(this.#store.history(input.projectId).map((item) => item.conversationId));
-    let candidates = this.#authority.candidates(input.projectRoot).filter((item) => !boundIds.has(item.conversationId));
+    requireRoot(pending, operation.projectRoot);
+    const boundIds = new Set(this.#store.history(operation.projectId).map((item) => item.conversationId));
+    let candidates = this.#authority.candidates(operation.projectRoot).filter((item) => !boundIds.has(item.conversationId));
     if (candidates.length > 1) return { outcome: 'reconciliation-required', candidates };
-    const activeIntent = this.#store.replacementIntent(input.projectId);
+    const activeIntent = this.#store.replacementIntent(operation.projectId);
     const replacementPhase = activeIntent?.createPhase ?? 'not-started';
     if (candidates.length === 0 && replacementPhase === 'created' && activeIntent?.createdCandidate) {
       try {
-        const persisted = this.#authority.inspect(input.projectRoot, activeIntent.createdCandidate.conversationId);
+        const persisted = this.#authority.inspect(operation.projectRoot, activeIntent.createdCandidate.conversationId);
         if (!boundIds.has(persisted.conversationId)) candidates = [persisted];
       } catch {
         // A persisted operation identity without an inspectable candidate is
@@ -225,24 +246,24 @@ export class ProjectHumanThreadService {
     }
     let candidate = candidates[0];
     if (!candidate) {
-      this.#store.markReplacementCreateStarted(input.projectId, beginEventId);
+      this.#store.markReplacementCreateStarted(operation.projectId, beginEventId);
       try {
-        candidate = await this.#authority.create(input.projectRoot);
+        candidate = await this.#authority.create(operation.projectRoot);
         // A returned candidate is the durable operation identity. Persist it
         // before activation so a restart can inspect/adopt it without create.
-        this.#store.markReplacementCreated(input.projectId, beginEventId, candidate);
+        this.#store.markReplacementCreated(operation.projectId, beginEventId, candidate);
       } catch (error) {
-        if (isProjectHumanThreadCreateNoSideEffect(error)) this.#store.markReplacementCreateNoSideEffect(input.projectId, beginEventId);
-        else this.#store.markReplacementCreateReconciliationRequired(input.projectId, beginEventId);
+        if (isProjectHumanThreadCreateNoSideEffect(error)) this.#store.markReplacementCreateNoSideEffect(operation.projectId, beginEventId);
+        else this.#store.markReplacementCreateReconciliationRequired(operation.projectId, beginEventId);
         throw error;
       }
     }
     const next = createBinding(
-      input, candidate, input.expectedGeneration + 1, input.expectedGeneration,
+      operation, candidate, input.expectedGeneration + 1, input.expectedGeneration,
       candidates.length > 0 ? 'adopted' : 'created', laterTimestamp(this.#now(), pending.updatedAt),
     );
     const result = this.#store.activateReplacement(next, input.expectedGeneration, `${input.idempotencyKey}:activate`);
-    this.#store.completeReplacementIntent(input.projectId, beginEventId, result.binding.conversationId);
+    this.#store.completeReplacementIntent(operation.projectId, beginEventId, result.binding.conversationId);
     return { outcome: result.inserted ? 'replaced' : 'current', binding: result.binding };
   }
 
@@ -250,6 +271,25 @@ export class ProjectHumanThreadService {
   history(projectId: string): ProjectHumanThreadBinding[] { return this.#store.history(projectId); }
   isBoundConversation(conversationId: string): boolean { return this.#store.isBoundConversation(conversationId); }
   candidates(projectRoot: string): ProjectHumanThreadCandidate[] { return this.#authority.candidates(projectRoot); }
+
+  #prepare(input: BaseRequest): BaseRequest & { root: ProjectRootIdentity } {
+    const root = this.#rootIdentity(input.projectRoot, input.projectId);
+    const current = this.#store.currentByRoot(root);
+    return {
+      ...input,
+      projectId: current?.projectId ?? input.projectId,
+      projectRoot: root.canonicalPath,
+      root,
+    };
+  }
+
+  #rootIdentity(projectRoot: string, projectId?: string): ProjectRootIdentity {
+    const known = projectId ? this.#store.current(projectId) : undefined;
+    return this.#authority.rootIdentity?.(projectRoot)
+      ?? (known && known.root.canonicalPath === projectRoot ? known.root : undefined)
+      ?? this.#authority.candidates(projectRoot)[0]
+      ?? { canonicalPath: projectRoot, dev: '0', ino: '1' };
+  }
 }
 
 function createBinding(

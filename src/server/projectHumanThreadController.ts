@@ -6,11 +6,13 @@ import type { ProjectHumanThreadBinding } from '../shared/projectHumanThreadCont
 type OwnedProject = { projectId: string; root: string; activeRun: boolean };
 type Service = {
   current(projectId: string): ProjectHumanThreadBinding | undefined;
+  currentForRoot?: (projectRoot: string) => ProjectHumanThreadBinding | undefined;
   history(projectId: string): ProjectHumanThreadBinding[];
+  historyForRoot?: (projectRoot: string) => ProjectHumanThreadBinding[];
   candidates(projectRoot: string): unknown[];
   createMissing(input: ServiceInput): Promise<unknown>;
   adopt(input: ServiceInput & { conversationId: string }): Promise<unknown>;
-  recover(projectId: string, expectedGeneration: number, idempotencyKey: string): unknown;
+  recover(projectId: string, expectedGeneration: number, idempotencyKey: string, projectRoot?: string): unknown;
   replace(input: ServiceInput & { expectedGeneration: number; reason: string }): Promise<unknown>;
   replacementIntent(projectId: string): {
     state: 'prepared' | 'completed';
@@ -65,21 +67,21 @@ export class ProjectHumanThreadController {
     replacement?: { expectedGeneration: number; reason: string; createPhase: 'not-started' | 'creating' | 'reconcile-required' | 'created'; createdConversationId?: string };
   } {
     const project = this.#owned(user, projectId);
-    const current = this.#service.current(project.projectId);
+    const current = this.#service.currentForRoot?.(project.root) ?? this.#service.current(project.projectId);
     return {
       current,
       candidates: current?.status === 'replacement-pending'
-        ? this.#service.replacementCandidates(project.projectId, project.root)
+        ? this.#service.replacementCandidates(current.projectId, project.root)
         : current ? [] : this.#service.candidates(project.root),
       replacement: current?.status === 'replacement-pending'
-        ? redactReplacementIntent(this.#service.replacementIntent(project.projectId))
+        ? redactReplacementIntent(this.#service.replacementIntent(current.projectId))
         : undefined,
     };
   }
 
   history(user: UserProfile, projectId: string): Array<Omit<ProjectHumanThreadBinding, 'root' | 'provenanceDigest'>> {
     const project = this.#owned(user, projectId);
-    return this.#service.history(project.projectId).map(redactHistoryBinding);
+    return (this.#service.historyForRoot?.(project.root) ?? this.#service.history(project.projectId)).map(redactHistoryBinding);
   }
 
   async createMissing(user: UserProfile, projectId: string, idempotencyKey: string, payload: unknown): Promise<unknown> {
@@ -100,7 +102,7 @@ export class ProjectHumanThreadController {
   async recover(user: UserProfile, projectId: string, idempotencyKey: string, payload: unknown): Promise<unknown> {
     const body = parseBody(recover, payload);
     const project = this.#owned(user, projectId);
-    return this.#service.recover(project.projectId, body.expectedGeneration, idempotencyKey);
+    return this.#service.recover(project.projectId, body.expectedGeneration, idempotencyKey, project.root);
   }
 
   async replace(user: UserProfile, projectId: string, idempotencyKey: string, payload: unknown): Promise<unknown> {

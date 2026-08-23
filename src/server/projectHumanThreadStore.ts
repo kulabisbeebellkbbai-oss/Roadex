@@ -12,6 +12,12 @@ type EventRow = { type: EventType; payload_json: string; payload_digest: string 
 type BindingRow = { binding_json: string };
 type OutboxRow = { event_id: string; payload_json: string; payload_digest: string; state: 'pending' | 'delivered' };
 
+export type ProjectRootIdentity = {
+  canonicalPath: string;
+  dev: string;
+  ino: string;
+};
+
 export type ProjectHumanThreadOutboxRecord = {
   eventId: string;
   binding: ProjectHumanThreadBinding;
@@ -65,6 +71,9 @@ export class ProjectHumanThreadStore {
         project_id TEXT PRIMARY KEY,
         generation INTEGER NOT NULL,
         conversation_id TEXT NOT NULL UNIQUE,
+        root_canonical_path TEXT NOT NULL,
+        root_dev TEXT NOT NULL,
+        root_ino TEXT NOT NULL,
         FOREIGN KEY(project_id,generation) REFERENCES project_human_thread_bindings(project_id,generation)
       );
       CREATE TABLE IF NOT EXISTS project_human_thread_outbox (
@@ -82,7 +91,10 @@ export class ProjectHumanThreadStore {
         request_json TEXT NOT NULL,
         request_digest TEXT NOT NULL CHECK(length(request_digest)=64),
         state TEXT NOT NULL CHECK(state IN ('prepared','completed')),
-        conversation_id TEXT
+        conversation_id TEXT,
+        root_canonical_path TEXT,
+        root_dev TEXT,
+        root_ino TEXT
       );
       CREATE TABLE IF NOT EXISTS project_human_thread_replacement_intents (
         project_id TEXT PRIMARY KEY,
@@ -92,11 +104,15 @@ export class ProjectHumanThreadStore {
         state TEXT NOT NULL CHECK(state IN ('prepared','completed')),
         conversation_id TEXT,
         create_phase TEXT NOT NULL DEFAULT 'not-started' CHECK(create_phase IN ('not-started','creating','reconcile-required','created')),
-        created_candidate_json TEXT
+        created_candidate_json TEXT,
+        root_canonical_path TEXT,
+        root_dev TEXT,
+        root_ino TEXT
       );
     `);
     this.#migrateReplacementIntentColumns();
     this.#migrateRecoveredEvent();
+    this.#migrateRootIdentity();
   }
 
   createInitial(raw: ProjectHumanThreadBinding, eventId: string): BindingWriteResult {
@@ -108,6 +124,7 @@ export class ProjectHumanThreadStore {
       const replay = this.#replay(eventId, 'created', { binding });
       if (replay) return { inserted: false, replay: true, binding: replay.binding };
       if (this.current(binding.projectId)) throw new Error('Project already has a current human thread.');
+      if (this.currentByRoot(binding.root)) throw new Error('Project root already has a current human thread.');
       this.#insertEvent(eventId, 'created', binding.projectId, binding.generation, binding.createdAt, { binding });
       this.#insertBinding(binding);
       this.#setCurrent(binding);
@@ -120,6 +137,7 @@ export class ProjectHumanThreadStore {
     projectId: string,
     eventId: string,
     request: { projectRoot: string; provenanceDigest: string },
+    root?: ProjectRootIdentity,
   ): { inserted: boolean } {
     const requestJson = stableJson(request);
     return this.#transaction(() => {
@@ -132,9 +150,21 @@ export class ProjectHumanThreadStore {
         return { inserted: false };
       }
       if (this.current(projectId)) throw new Error('Project already has a current human thread.');
+      if (!root) throw new Error('Project root identity is required.');
+      if (this.currentByRoot(root)) throw new Error('Project root already has a current human thread.');
+      const rootIntent = this.#creationIntentByRoot(root);
+      if (rootIntent) {
+        if (rootIntent.event_id !== eventId || rootIntent.request_json !== requestJson
+          || rootIntent.request_digest !== sha256(requestJson)) {
+          throw new Error('Project human thread root creation intent conflict.');
+        }
+        return { inserted: false };
+      }
       this.#db.prepare(`INSERT INTO project_human_thread_creation_intents(
-        project_id,event_id,request_json,request_digest,state,conversation_id
-      ) VALUES (?,?,?,?,'prepared',NULL)`).run(projectId, eventId, requestJson, sha256(requestJson));
+        project_id,event_id,request_json,request_digest,state,conversation_id,root_canonical_path,root_dev,root_ino
+      ) VALUES (?,?,?,?,'prepared',NULL,?,?,?)`).run(
+        projectId, eventId, requestJson, sha256(requestJson), root.canonicalPath, root.dev, root.ino,
+      );
       return { inserted: true };
     });
   }
@@ -206,6 +236,7 @@ export class ProjectHumanThreadStore {
     occurredAt: string,
     eventId: string,
     intent?: Omit<ReplacementIntent, 'state' | 'eventId' | 'conversationId' | 'createPhase' | 'createdCandidate'>,
+    root?: ProjectRootIdentity,
   ): ProjectHumanThreadBinding {
     if (!reason || reason !== reason.trim() || reason.length > 1_000) throw new Error('Replacement reason is invalid.');
     return this.#transaction(() => {
@@ -217,6 +248,8 @@ export class ProjectHumanThreadStore {
       const prior = this.#requireCurrent(projectId, expectedGeneration);
       if (prior.status !== 'active' && prior.status !== 'unavailable') throw new Error('Project human thread cannot be replaced.');
       if (intent) {
+        const identity = root ?? prior.root;
+        if (stableRoot(identity) !== stableRoot(prior.root)) throw new Error('Project human thread replacement root conflict.');
         const request = {
           idempotencyKey: intent.idempotencyKey,
           expectedGeneration: intent.expectedGeneration,
@@ -228,6 +261,10 @@ export class ProjectHumanThreadStore {
         const existingIntent = this.#db.prepare(`
           SELECT event_id,request_json,state FROM project_human_thread_replacement_intents WHERE project_id=?
         `).get(projectId) as { event_id: string; request_json: string; state: 'prepared' | 'completed' } | undefined;
+        const rootIntent = this.#replacementIntentByRoot(identity);
+        if (rootIntent && rootIntent.project_id !== projectId) {
+          throw new Error('Project human thread root replacement intent conflict.');
+        }
         if (existingIntent?.state === 'prepared') {
           throw new Error('Project human thread replacement intent conflict.');
         }
@@ -238,8 +275,10 @@ export class ProjectHumanThreadStore {
           this.#db.prepare('DELETE FROM project_human_thread_replacement_intents WHERE project_id=?').run(projectId);
         }
         this.#db.prepare(`INSERT INTO project_human_thread_replacement_intents(
-          project_id,event_id,request_json,request_digest,state,conversation_id,create_phase,created_candidate_json
-        ) VALUES (?,?,?,?, 'prepared',NULL,'not-started',NULL)`).run(projectId, eventId, requestJson, sha256(requestJson));
+          project_id,event_id,request_json,request_digest,state,conversation_id,create_phase,created_candidate_json,root_canonical_path,root_dev,root_ino
+        ) VALUES (?,?,?,?, 'prepared',NULL,'not-started',NULL,?,?,?)`).run(
+          projectId, eventId, requestJson, sha256(requestJson), identity.canonicalPath, identity.dev, identity.ino,
+        );
       }
       const binding = revised(prior, { status: 'replacement-pending', updatedAt: occurredAt });
       this.#insertEvent(eventId, 'replacement-pending', projectId, expectedGeneration, occurredAt, { binding, reason });
@@ -369,6 +408,16 @@ export class ProjectHumanThreadStore {
     return row ? parseProjectHumanThreadBinding(JSON.parse(row.binding_json)) : undefined;
   }
 
+  currentByRoot(root: ProjectRootIdentity): ProjectHumanThreadBinding | undefined {
+    const row = this.#db.prepare(`
+      SELECT binding.binding_json FROM project_human_thread_current current
+      JOIN project_human_thread_bindings binding
+        ON binding.project_id=current.project_id AND binding.generation=current.generation
+      WHERE current.root_canonical_path=? AND current.root_dev=? AND current.root_ino=?
+    `).get(root.canonicalPath, root.dev, root.ino) as BindingRow | undefined;
+    return row ? parseProjectHumanThreadBinding(JSON.parse(row.binding_json)) : undefined;
+  }
+
   history(projectId: string): ProjectHumanThreadBinding[] {
     const rows = this.#db.prepare(`
       SELECT binding_json FROM project_human_thread_bindings WHERE project_id=? ORDER BY generation
@@ -476,6 +525,98 @@ export class ProjectHumanThreadStore {
     }
   }
 
+  #migrateRootIdentity(): void {
+    const addColumns = (table: string, columns: string[]): void => {
+      const existing = this.#db.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>;
+      for (const column of columns) {
+        if (!existing.some((item) => item.name === column)) {
+          this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
+        }
+      }
+    };
+    // Databases created before root identity was authoritative have a
+    // project-only current projection. Backfill it from the immutable binding
+    // record before publishing the unique root index.
+    addColumns('project_human_thread_current', ['root_canonical_path', 'root_dev', 'root_ino']);
+    addColumns('project_human_thread_creation_intents', ['root_canonical_path', 'root_dev', 'root_ino']);
+    addColumns('project_human_thread_replacement_intents', ['root_canonical_path', 'root_dev', 'root_ino']);
+    this.#transaction(() => {
+      const rows = this.#db.prepare(`
+        SELECT current.project_id,current.generation,current.root_canonical_path,current.root_dev,current.root_ino,
+               binding.binding_json
+        FROM project_human_thread_current current
+        JOIN project_human_thread_bindings binding
+          ON binding.project_id=current.project_id AND binding.generation=current.generation
+      `).all() as unknown as Array<{
+        project_id: string; generation: number; root_canonical_path: string | null; root_dev: string | null;
+        root_ino: string | null; binding_json: string;
+      }>;
+      for (const row of rows) {
+        const binding = parseProjectHumanThreadBinding(JSON.parse(row.binding_json));
+        if ((row.root_canonical_path !== null || row.root_dev !== null || row.root_ino !== null)
+          && (row.root_canonical_path !== binding.root.canonicalPath || row.root_dev !== binding.root.dev || row.root_ino !== binding.root.ino)) {
+          throw new Error('Project human thread root identity projection conflicts with its binding.');
+        }
+        this.#db.prepare(`UPDATE project_human_thread_current SET root_canonical_path=?,root_dev=?,root_ino=? WHERE project_id=?`)
+          .run(binding.root.canonicalPath, binding.root.dev, binding.root.ino, row.project_id);
+      }
+      const currentRoots = this.#db.prepare(`
+        SELECT root_dev,root_ino,COUNT(*) AS count FROM project_human_thread_current
+        WHERE root_dev IS NOT NULL AND root_ino IS NOT NULL GROUP BY root_dev,root_ino HAVING COUNT(*)>1
+      `).all() as unknown as Array<{ root_dev: string; root_ino: string; count: number }>;
+      if (currentRoots.length > 0) throw new Error('Project human thread root identity conflict detected during migration.');
+      const intents = this.#db.prepare(`
+        SELECT current.project_id,current.root_canonical_path,current.root_dev,current.root_ino
+        FROM project_human_thread_current current
+      `).all() as unknown as Array<{ project_id: string; root_canonical_path: string; root_dev: string; root_ino: string }>;
+      for (const row of intents) {
+        this.#db.prepare(`UPDATE project_human_thread_creation_intents
+          SET root_canonical_path=?,root_dev=?,root_ino=?
+          WHERE project_id=? AND (root_dev IS NULL OR root_ino IS NULL)`).run(
+          row.root_canonical_path, row.root_dev, row.root_ino, row.project_id,
+        );
+        this.#db.prepare(`UPDATE project_human_thread_replacement_intents
+          SET root_canonical_path=?,root_dev=?,root_ino=?
+          WHERE project_id=? AND (root_dev IS NULL OR root_ino IS NULL)`).run(
+          row.root_canonical_path, row.root_dev, row.root_ino, row.project_id,
+        );
+      }
+      const unresolvedIntents = this.#db.prepare(`
+        SELECT project_id FROM project_human_thread_creation_intents
+        WHERE root_canonical_path IS NULL OR root_dev IS NULL OR root_ino IS NULL
+        UNION ALL
+        SELECT project_id FROM project_human_thread_replacement_intents
+        WHERE root_canonical_path IS NULL OR root_dev IS NULL OR root_ino IS NULL
+      `).all() as unknown as Array<{ project_id: string }>;
+      if (unresolvedIntents.length > 0) {
+        throw new Error('Project human thread root identity migration is unresolved.');
+      }
+      this.#db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS project_human_thread_current_root_unique
+          ON project_human_thread_current(root_dev,root_ino)
+          WHERE root_dev IS NOT NULL AND root_ino IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS project_human_thread_creation_root_pending_unique
+          ON project_human_thread_creation_intents(root_dev,root_ino)
+          WHERE state='prepared' AND root_dev IS NOT NULL AND root_ino IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS project_human_thread_replacement_root_pending_unique
+          ON project_human_thread_replacement_intents(root_dev,root_ino)
+          WHERE state='prepared' AND root_dev IS NOT NULL AND root_ino IS NOT NULL;
+      `);
+    });
+  }
+
+  #creationIntentByRoot(root: ProjectRootIdentity): { event_id: string; request_json: string; request_digest: string } | undefined {
+    return this.#db.prepare(`SELECT event_id,request_json,request_digest
+      FROM project_human_thread_creation_intents WHERE root_canonical_path=? AND root_dev=? AND root_ino=?`)
+      .get(root.canonicalPath, root.dev, root.ino) as { event_id: string; request_json: string; request_digest: string } | undefined;
+  }
+
+  #replacementIntentByRoot(root: ProjectRootIdentity): { project_id: string } | undefined {
+    return this.#db.prepare(`SELECT project_id FROM project_human_thread_replacement_intents
+      WHERE root_canonical_path=? AND root_dev=? AND root_ino=? AND state='prepared'`)
+      .get(root.canonicalPath, root.dev, root.ino) as { project_id: string } | undefined;
+  }
+
   #requireCurrent(projectId: string, generation: number): ProjectHumanThreadBinding {
     const binding = this.current(projectId);
     if (!binding || binding.generation !== generation) throw new Error('Project human thread generation conflict.');
@@ -527,8 +668,13 @@ export class ProjectHumanThreadStore {
   }
 
   #setCurrent(binding: ProjectHumanThreadBinding): void {
-    this.#db.prepare(`INSERT INTO project_human_thread_current(project_id,generation,conversation_id) VALUES (?,?,?) ON CONFLICT(project_id) DO UPDATE SET generation=excluded.generation,conversation_id=excluded.conversation_id`)
-      .run(binding.projectId, binding.generation, binding.conversationId);
+    this.#db.prepare(`INSERT INTO project_human_thread_current(
+      project_id,generation,conversation_id,root_canonical_path,root_dev,root_ino
+    ) VALUES (?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET
+      generation=excluded.generation,conversation_id=excluded.conversation_id,
+      root_canonical_path=excluded.root_canonical_path,root_dev=excluded.root_dev,root_ino=excluded.root_ino`)
+      .run(binding.projectId, binding.generation, binding.conversationId,
+        binding.root.canonicalPath, binding.root.dev, binding.root.ino);
   }
 
   #enqueue(eventId: string, binding: ProjectHumanThreadBinding): void {
