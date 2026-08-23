@@ -16,6 +16,11 @@ import {
 } from './client/projectHumanThreadTranscriptApi';
 import type { ProjectHumanThreadBinding } from './shared/projectHumanThreadContracts';
 import type { WorkspaceRef } from './shared/sessionContracts';
+import {
+  ProjectHumanThreadRefreshFence,
+  projectHumanThreadIdempotencyScope,
+  type ProjectHumanThreadProjectIdentity,
+} from './client/projectHumanThreadRefreshFence';
 
 export type ProjectHumanThreadSnapshot = {
   current?: ProjectHumanThreadBinding;
@@ -34,6 +39,7 @@ type ProjectHumanThreadPanelViewProps = {
   project: WorkspaceRef;
   snapshot: ProjectHumanThreadSnapshot;
   loading: boolean;
+  lifecycleValidated: boolean;
   busyAction?: 'create' | 'adopt' | 'recover' | 'replace' | 'resume' | 'reconcile';
   error?: string;
   replaceOpen: boolean;
@@ -62,6 +68,7 @@ const emptySnapshot: ProjectHumanThreadSnapshot = { candidates: [], history: [] 
 export function ProjectHumanThreadPanel({ token, project, onOpenConversation }: ProjectHumanThreadPanelProps) {
   const [snapshot, setSnapshot] = useState<ProjectHumanThreadSnapshot>(emptySnapshot);
   const [loading, setLoading] = useState(false);
+  const [lifecycleValidated, setLifecycleValidated] = useState(false);
   const [busyAction, setBusyAction] = useState<ProjectHumanThreadPanelViewProps['busyAction']>();
   const [error, setError] = useState('');
   const [replaceOpen, setReplaceOpen] = useState(false);
@@ -72,42 +79,77 @@ export function ProjectHumanThreadPanel({ token, project, onOpenConversation }: 
   const [transcriptError, setTranscriptError] = useState('');
   const [responseDrafts, setResponseDrafts] = useState<Record<string, string>>({});
   const [respondingMessageId, setRespondingMessageId] = useState('');
+  const refreshFence = useRef(new ProjectHumanThreadRefreshFence());
+  const transcriptRefreshFence = useRef(new ProjectHumanThreadRefreshFence());
+  const activeProjectIdentityRef = useRef<ProjectHumanThreadProjectIdentity | undefined>(undefined);
+  const activeProjectId = project?.id;
+  const activeProjectRoot = project?.root;
+  const activeAuthEpoch = token ?? '';
+
+  useEffect(() => {
+    activeProjectIdentityRef.current = activeProjectId && activeProjectRoot
+      ? { id: activeProjectId, root: activeProjectRoot, authEpoch: activeAuthEpoch }
+      : undefined;
+    return () => {
+      activeProjectIdentityRef.current = undefined;
+    };
+  }, [activeProjectId, activeProjectRoot, activeAuthEpoch]);
 
   async function refreshTranscript(): Promise<void> {
     if (!project) return;
+    const selectedProject = { id: project.id, root: project.root, authEpoch: token ?? '' };
+    const refreshToken = transcriptRefreshFence.current.beginIfCurrent(selectedProject, activeProjectIdentityRef.current);
+    if (!refreshToken) return;
     try {
       const [pending, history] = await Promise.all([
-        getProjectHumanThreadTranscript(token, project.id, 'pending'),
-        getProjectHumanThreadTranscript(token, project.id, 'history'),
+        getProjectHumanThreadTranscript(token, selectedProject.id, 'pending'),
+        getProjectHumanThreadTranscript(token, selectedProject.id, 'history'),
       ]);
+      if (!transcriptRefreshFence.current.isCurrent(refreshToken, activeProjectIdentityRef.current)) return;
       setPendingQuestions(pending);
       setTranscriptHistory(history);
       setTranscriptError('');
     } catch (cause) {
+      if (!transcriptRefreshFence.current.isCurrent(refreshToken, activeProjectIdentityRef.current)) return;
       setTranscriptError(cause instanceof Error ? cause.message : 'Project conversation could not be loaded.');
     }
   }
 
   async function refresh(): Promise<void> {
     if (!project) return;
+    const selectedProject = { id: project.id, root: project.root, authEpoch: token ?? '' };
+    const refreshToken = refreshFence.current.beginIfCurrent(selectedProject, activeProjectIdentityRef.current);
+    if (!refreshToken) return;
     setLoading(true);
-    setError('');
+    setLifecycleValidated(false);
     try {
       const [thread, history] = await Promise.all([
-        getProjectHumanThread(token, project.id),
-        getProjectHumanThreadHistory(token, project.id),
+        getProjectHumanThread(token, selectedProject.id, selectedProject.root),
+        getProjectHumanThreadHistory(token, selectedProject.id),
       ]);
+      if (!refreshFence.current.isCurrent(refreshToken, activeProjectIdentityRef.current)) return;
       setSnapshot({ current: thread.current, candidates: thread.candidates, history, replacement: thread.replacement });
+      setLifecycleValidated(true);
+      setError('');
       await refreshTranscript();
     } catch (cause) {
+      if (!refreshFence.current.isCurrent(refreshToken, activeProjectIdentityRef.current)) return;
+      setLifecycleValidated(false);
       setError(cause instanceof Error ? cause.message : 'Project human thread status could not be loaded.');
     } finally {
-      setLoading(false);
+      if (refreshFence.current.isCurrent(refreshToken, activeProjectIdentityRef.current)) setLoading(false);
     }
   }
 
   useEffect(() => {
+    idempotencyKeys.current.clear();
+    setBusyAction(undefined);
+    setRespondingMessageId('');
+    setResponseDrafts({});
+    setError('');
+    setLoading(false);
     setSnapshot(emptySnapshot);
+    setLifecycleValidated(false);
     setReplaceOpen(false);
     setReplaceReason('');
     setPendingQuestions([]);
@@ -116,10 +158,12 @@ export function ProjectHumanThreadPanel({ token, project, onOpenConversation }: 
     void refresh();
   // refresh intentionally tracks project identity and token only.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project?.id, token]);
+  }, [project?.id, project?.root, token]);
 
   async function mutate(action: 'create' | 'adopt' | 'recover' | 'replace' | 'resume' | 'reconcile', body: Record<string, unknown>): Promise<void> {
     if (!project) return;
+    const selectedProject = { id: project.id, root: project.root, authEpoch: token ?? '' };
+    if (!sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) return;
     setBusyAction(action);
     setError('');
     try {
@@ -129,12 +173,13 @@ export function ProjectHumanThreadPanel({ token, project, onOpenConversation }: 
       } else if (action === 'reconcile') {
         result = await reconcileProjectHumanThread(token, project.id, Number(body.expectedGeneration), String(body.conversationId));
       } else {
-        const requestSignature = `${action}:${JSON.stringify(body)}`;
+        const requestSignature = projectHumanThreadIdempotencyScope(selectedProject.authEpoch, action, body);
         const idempotencyKey = idempotencyKeys.current.get(requestSignature) ?? makeIdempotencyKey(action);
         idempotencyKeys.current.set(requestSignature, idempotencyKey);
         result = await mutateProjectHumanThread(token, project.id, action, idempotencyKey, body);
         idempotencyKeys.current.delete(requestSignature);
       }
+      if (!sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) return;
       if (isReconciliationResult(result)) {
         setError('Reconciliation is required. Select one exact unbound candidate, or retry Resume after the authority becomes inspectable.');
         await refresh();
@@ -144,9 +189,10 @@ export function ProjectHumanThreadPanel({ token, project, onOpenConversation }: 
       setReplaceReason('');
       await refresh();
     } catch (cause) {
+      if (!sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) return;
       setError(cause instanceof Error ? cause.message : `Project human thread ${action} failed.`);
     } finally {
-      setBusyAction(undefined);
+      if (sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) setBusyAction(undefined);
     }
   }
 
@@ -156,6 +202,7 @@ export function ProjectHumanThreadPanel({ token, project, onOpenConversation }: 
       project={project}
       snapshot={snapshot}
       loading={loading}
+      lifecycleValidated={lifecycleValidated}
       busyAction={busyAction}
       error={error}
       replaceOpen={replaceOpen}
@@ -182,14 +229,23 @@ export function ProjectHumanThreadPanel({ token, project, onOpenConversation }: 
       onResponseDraft={(messageId, content) => setResponseDrafts((current) => ({ ...current, [messageId]: content }))}
       onRespond={(messageId, content) => {
         if (!project || !content.trim()) return;
+        const selectedProject = { id: project.id, root: project.root, authEpoch: token ?? '' };
+        if (!sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) return;
         setRespondingMessageId(messageId);
         void submitProjectHumanThreadResponse(token, project.id, messageId, content.trim(), makeIdempotencyKey('respond'))
           .then(() => {
+            if (!sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) return;
             setResponseDrafts((current) => ({ ...current, [messageId]: '' }));
             return refreshTranscript();
           })
-          .catch((cause) => setTranscriptError(cause instanceof Error ? cause.message : 'Project response could not be submitted.'))
-          .finally(() => setRespondingMessageId(''));
+          .catch((cause) => {
+            if (sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) {
+              setTranscriptError(cause instanceof Error ? cause.message : 'Project response could not be submitted.');
+            }
+          })
+          .finally(() => {
+            if (sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) setRespondingMessageId('');
+          });
       }}
       onOpenConversation={onOpenConversation}
     />
@@ -200,6 +256,7 @@ export function ProjectHumanThreadPanelView({
   project,
   snapshot,
   loading,
+  lifecycleValidated,
   busyAction,
   error,
   replaceOpen,
@@ -223,8 +280,7 @@ export function ProjectHumanThreadPanelView({
   onOpenConversation,
 }: ProjectHumanThreadPanelViewProps) {
   const current = snapshot.current;
-  const hasBinding = Boolean(current);
-  const canReplace = Boolean(current) && current?.status !== 'replacement-pending' && !busyAction;
+  const canReplace = lifecycleValidated && !loading && Boolean(current) && current?.status !== 'replacement-pending' && !busyAction;
   return (
     <section className="section-card human-thread-panel" aria-label="Project Roadex human interaction thread" data-testid="project-human-thread-panel">
       <div className="panel-heading compact human-thread-heading">
@@ -248,9 +304,27 @@ export function ProjectHumanThreadPanelView({
         <div className="human-thread-alert" role="alert"><AlertTriangle size={18} /><span>{error}</span></div>
       ) : null}
 
-      {loading && !hasBinding ? <p className="human-thread-loading" role="status">Checking the project thread binding…</p> : null}
-
-      {current ? (
+      {!lifecycleValidated ? (
+        <div className="human-thread-missing" data-testid="project-human-thread-validating">
+          <div className="human-thread-status-title">
+            <div>
+              <span className="section-label">Status unavailable</span>
+              <strong>{loading ? 'Checking the project thread binding…' : 'Thread lifecycle controls are unavailable'}</strong>
+            </div>
+          </div>
+          <p>A complete, current project-thread snapshot is required before any lifecycle action is available.</p>
+        </div>
+      ) : error ? (
+        <div className="human-thread-missing" data-testid="project-human-thread-invalid">
+          <div className="human-thread-status-title">
+            <div>
+              <span className="section-label">Status unavailable</span>
+              <strong>Thread lifecycle controls are unavailable</strong>
+            </div>
+          </div>
+          <p>Refresh the project thread status before creating, adopting, recovering, resuming, reconciling, or replacing a binding.</p>
+        </div>
+      ) : current ? (
         <div className={`human-thread-status human-thread-status-${current.status}`} data-testid="project-human-thread-current">
           <div className="human-thread-status-title">
             <div>
@@ -345,7 +419,7 @@ export function ProjectHumanThreadPanelView({
         </div>
       )}
 
-      {replaceOpen && current ? (
+      {lifecycleValidated && !error && !loading && replaceOpen && current ? (
         <form className="human-thread-replace" onSubmit={onReplace}>
           <div>
             <span className="section-label">Controlled replacement</span>
@@ -417,6 +491,16 @@ export function ProjectHumanThreadPanelView({
       <div className="human-thread-note"><ShieldCheck size={16} /><span>Only the project binding lifecycle is available here. Overseer approvals are never created or changed by this panel.</span></div>
     </section>
   );
+}
+
+function sameProjectHumanThreadIdentity(
+  left: ProjectHumanThreadProjectIdentity,
+  right?: ProjectHumanThreadProjectIdentity,
+): boolean {
+  return Boolean(right)
+    && left.id === right?.id
+    && left.root === right?.root
+    && left.authEpoch === right?.authEpoch;
 }
 
 function PendingQuestion({

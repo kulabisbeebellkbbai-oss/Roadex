@@ -485,6 +485,22 @@ a:focus-visible {
   font-weight: 800;
 }
 
+.app-error-boundary {
+  box-sizing: border-box;
+  width: min(42rem, calc(100% - 2rem));
+  margin: clamp(2rem, 12vh, 7rem) auto;
+  padding: clamp(1.25rem, 4vw, 2rem);
+  border: 1px solid rgba(248, 113, 113, 0.55);
+  border-radius: 1rem;
+  background: rgba(69, 10, 10, 0.94);
+  color: #fee2e2;
+}
+
+.app-error-boundary button {
+  min-height: 44px;
+  margin-top: 0.75rem;
+}
+
 .error-banner {
   display: flex;
   align-items: center;

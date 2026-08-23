@@ -1,4 +1,28 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { bindingDigest, type ProjectHumanThreadBinding } from '../src/shared/projectHumanThreadContracts';
+
+const projectRoot = '/srv/projects/arcade';
+
+function currentBinding(overrides: Partial<ProjectHumanThreadBinding> = {}): ProjectHumanThreadBinding {
+  const value = {
+    schemaVersion: 'roadex.project-human-thread-binding.v1' as const,
+    bindingId: 'project-human-thread:arcade:1',
+    projectId: 'arcade',
+    root: { canonicalPath: projectRoot, dev: '1', ino: '2' },
+    purpose: 'human-interaction' as const,
+    conversationId: '11111111-1111-1111-1111-111111111111',
+    generation: 1,
+    status: 'replacement-pending' as const,
+    predecessorGeneration: null,
+    creationMode: 'created' as const,
+    provenanceDigest: 'a'.repeat(64),
+    createdAt: '2026-08-22T12:00:00.000Z',
+    updatedAt: '2026-08-22T12:00:00.000Z',
+    retiredAt: null,
+    ...overrides,
+  };
+  return { ...value, recordDigest: bindingDigest(value) };
+}
 
 describe('Roadex client CSRF contract', () => {
   afterEach(() => {
@@ -9,14 +33,20 @@ describe('Roadex client CSRF contract', () => {
   it('uses only the project-scoped human thread lifecycle routes', async () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      calls.push({ path: String(input), init });
-      return new Response(JSON.stringify({ ok: true, current: undefined, candidates: [], replacement: { expectedGeneration: 1, reason: 'Resume safely', createPhase: 'reconcile-required' }, history: [], result: { outcome: 'current' } }), {
+      const path = String(input);
+      calls.push({ path, init });
+      const payload = path.endsWith('/human-thread')
+        ? { ok: true, current: currentBinding(), candidates: [], replacement: { expectedGeneration: 1, reason: 'Resume safely', createPhase: 'reconcile-required' } }
+        : path.endsWith('/history')
+          ? { ok: true, history: [] }
+          : { ok: true, result: { outcome: 'current' } };
+      return new Response(JSON.stringify(payload), {
         status: 200,
         headers: { 'content-type': 'application/json', 'x-roadex-csrf': 'private-test-value' },
       });
     }));
     const { getProjectHumanThread, getProjectHumanThreadHistory, mutateProjectHumanThread } = await import('../src/client/sessionApi');
-    const thread = await getProjectHumanThread(undefined, 'arcade');
+    const thread = await getProjectHumanThread(undefined, 'arcade', projectRoot);
     expect(thread.replacement).toEqual({ expectedGeneration: 1, reason: 'Resume safely', createPhase: 'reconcile-required' });
     await getProjectHumanThreadHistory(undefined, 'arcade');
     await mutateProjectHumanThread(undefined, 'arcade', 'recover', 'recover-key-0000001', { expectedGeneration: 1 });
@@ -29,6 +59,149 @@ describe('Roadex client CSRF contract', () => {
     expect(headers.get('idempotency-key')).toBe('recover-key-0000001');
     expect(headers.get('x-roadex-csrf')).toBe('private-test-value');
     expect(calls.some((call) => /approve|execute/.test(call.path))).toBe(false);
+  });
+
+  it('rejects a project human thread response that omits candidates', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const { getProjectHumanThread } = await import('../src/client/sessionApi');
+
+    await expect(getProjectHumanThread(undefined, 'arcade', projectRoot)).rejects.toThrow(
+      'Project human thread response is invalid.',
+    );
+  });
+
+  it('rejects malformed project human thread candidates before installing UI state', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      candidates: [{ conversationId: 'not-a-complete-candidate' }],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const { getProjectHumanThread } = await import('../src/client/sessionApi');
+
+    await expect(getProjectHumanThread(undefined, 'arcade', projectRoot)).rejects.toThrow(
+      'Project human thread response is invalid.',
+    );
+  });
+
+  it('rejects a malformed current project human thread binding', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      current: { status: 'active' },
+      candidates: [],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const { getProjectHumanThread } = await import('../src/client/sessionApi');
+
+    await expect(getProjectHumanThread(undefined, 'arcade', projectRoot)).rejects.toThrow(
+      'Project human thread response is invalid.',
+    );
+  });
+
+  it('rejects a malformed replacement intent before exposing resume controls', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      candidates: [],
+      replacement: { expectedGeneration: 1, reason: 'Resume safely', createPhase: 'unknown' },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const { getProjectHumanThread } = await import('../src/client/sessionApi');
+
+    await expect(getProjectHumanThread(undefined, 'arcade', projectRoot)).rejects.toThrow(
+      'Project human thread response is invalid.',
+    );
+  });
+
+  it('rejects a shaped binding for a different project and root', async () => {
+    const other = currentBinding({
+      bindingId: 'project-human-thread:other:1',
+      projectId: 'other',
+      root: { canonicalPath: '/srv/projects/other', dev: '1', ino: '2' },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      current: other,
+      candidates: [],
+      replacement: { expectedGeneration: 1, reason: 'Resume safely', createPhase: 'reconcile-required' },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+
+    const { getProjectHumanThread } = await import('../src/client/sessionApi');
+
+    await expect(getProjectHumanThread(undefined, 'arcade', projectRoot)).rejects.toThrow(
+      'Project human thread response is invalid.',
+    );
+  });
+
+  it('rejects a binding whose record digest does not match its contents', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      current: { ...currentBinding(), recordDigest: 'b'.repeat(64) },
+      candidates: [],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+
+    const { getProjectHumanThread } = await import('../src/client/sessionApi');
+
+    await expect(getProjectHumanThread(undefined, 'arcade', projectRoot)).rejects.toThrow(
+      'Project human thread response is invalid.',
+    );
+  });
+
+  it('rejects a retired binding presented as the current project thread', async () => {
+    const retired = currentBinding({
+      status: 'retired',
+      retiredAt: '2026-08-22T13:00:00.000Z',
+      updatedAt: '2026-08-22T13:00:00.000Z',
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      current: retired,
+      candidates: [],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+
+    const { getProjectHumanThread } = await import('../src/client/sessionApi');
+
+    await expect(getProjectHumanThread(undefined, 'arcade', projectRoot)).rejects.toThrow(
+      'Project human thread response is invalid.',
+    );
+  });
+
+  it('rejects replacement state without a matching pending binding', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      candidates: [],
+      replacement: { expectedGeneration: 1, reason: 'Resume safely', createPhase: 'reconcile-required' },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+
+    const { getProjectHumanThread } = await import('../src/client/sessionApi');
+
+    await expect(getProjectHumanThread(undefined, 'arcade', projectRoot)).rejects.toThrow(
+      'Project human thread response is invalid.',
+    );
+  });
+
+  it('rejects a project human thread history response that omits history', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const { getProjectHumanThreadHistory } = await import('../src/client/sessionApi');
+
+    await expect(getProjectHumanThreadHistory(undefined, 'arcade')).rejects.toThrow(
+      'Project human thread history response is invalid.',
+    );
   });
 
   it('creates and retrieves publication requests without exposing an activation call', async () => {

@@ -616,6 +616,7 @@ function App() {
         ) : null}
 
         <ProjectHumanThreadPanel
+          key={`${selectedProject?.id ?? 'none'}:${selectedProject?.root ?? 'none'}`}
           token={roadex.token}
           project={selectedProject}
           onOpenConversation={(conversationId) => {

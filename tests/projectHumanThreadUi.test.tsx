@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ProjectHumanThreadPanelView, type ProjectHumanThreadSnapshot } from '../src/ProjectHumanThreadPanel';
+import {
+  ProjectHumanThreadPanelView,
+  type ProjectHumanThreadSnapshot,
+} from '../src/ProjectHumanThreadPanel';
+import {
+  ProjectHumanThreadRefreshFence,
+  projectHumanThreadIdempotencyScope,
+} from '../src/client/projectHumanThreadRefreshFence';
 import type { ProjectHumanThreadPublicQuestion } from '../src/client/projectHumanThreadTranscriptApi';
 import type { ProjectHumanThreadBinding } from '../src/shared/projectHumanThreadContracts';
 
@@ -33,6 +40,7 @@ function view(overrides: Partial<Parameters<typeof ProjectHumanThreadPanelView>[
       project={project}
       snapshot={snapshot()}
       loading={false}
+      lifecycleValidated={true}
       replaceOpen={false}
       replaceReason=""
       onRefresh={vi.fn()}
@@ -50,6 +58,28 @@ function view(overrides: Partial<Parameters<typeof ProjectHumanThreadPanelView>[
 }
 
 describe('project human thread UI', () => {
+  it('rejects a late refresh token after the selected project changes', () => {
+    const fence = new ProjectHumanThreadRefreshFence();
+    const arcadeIdentity = { id: 'arcade', root: '/srv/projects/arcade', authEpoch: 'token-a' };
+    const shadowBrokerIdentity = { id: 'shadowbroker', root: '/srv/projects/shadowbroker', authEpoch: 'token-b' };
+    const arcade = fence.beginIfCurrent(arcadeIdentity, arcadeIdentity)!;
+    const shadowBroker = fence.beginIfCurrent(shadowBrokerIdentity, shadowBrokerIdentity)!;
+    const lateArcade = fence.beginIfCurrent(arcadeIdentity, shadowBrokerIdentity);
+
+    expect(fence.isCurrent(arcade, shadowBrokerIdentity)).toBe(false);
+    expect(lateArcade).toBeUndefined();
+    expect(fence.isCurrent(shadowBroker, shadowBrokerIdentity)).toBe(true);
+  });
+
+  it('keeps idempotency caches distinct across authentication epochs', () => {
+    const action = { action: 'replace', body: { expectedGeneration: 1, reason: 'Unavailable' } } as const;
+    const first = projectHumanThreadIdempotencyScope('token-a', action.action, action.body);
+    const second = projectHumanThreadIdempotencyScope('token-b', action.action, action.body);
+
+    expect(first).not.toBe(second);
+    expect(projectHumanThreadIdempotencyScope('token-a', action.action, action.body)).toBe(first);
+  });
+
   it('offers creation when a project has no current binding or candidates', () => {
     const html = view();
     expect(html).toContain('Project thread');
@@ -57,6 +87,39 @@ describe('project human thread UI', () => {
     expect(html).toContain('Create project thread');
     expect(html).toContain('Overseer approvals remain a separate authority surface.');
     expect(html).toContain('data-testid="project-human-thread-missing"');
+  });
+
+  it('fails closed without lifecycle actions when thread status is invalid', () => {
+    const html = view({ error: 'Project human thread response is invalid.' });
+
+    expect(html).toContain('Project human thread response is invalid.');
+    expect(html).toContain('Thread lifecycle controls are unavailable');
+    expect(html).not.toContain('Create project thread');
+    expect(html).not.toContain('Adopt as project thread');
+    expect(html).not.toContain('Recover thread');
+    expect(html).not.toContain('Replace binding');
+    expect(html).not.toContain('Resume replacement');
+  });
+
+  it('keeps stale lifecycle actions fenced while an invalid status refresh is pending', () => {
+    const html = view({
+      snapshot: snapshot({ current: binding }),
+      error: 'Project human thread response is invalid.',
+      loading: true,
+    });
+
+    expect(html).toContain('Thread lifecycle controls are unavailable');
+    expect(html).not.toContain('Open project conversation');
+    expect(html).not.toContain('Replace binding');
+  });
+
+  it('does not expose creation before the first lifecycle snapshot is validated', () => {
+    const html = view({ lifecycleValidated: false, loading: true });
+
+    expect(html).toContain('Checking the project thread binding');
+    expect(html).not.toContain('Create project thread');
+    expect(html).not.toContain('Adopt as project thread');
+    expect(html).not.toContain('Replace binding');
   });
 
   it('lists candidates and provides explicit adoption actions', () => {

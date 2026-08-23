@@ -190,13 +190,201 @@ export type ProjectHumanThreadReplacementPublic = {
   createdConversationId?: string;
 };
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, required: string[], optional: string[] = []): boolean {
+  const keys = Object.keys(value);
+  return required.every((key) => keys.includes(key))
+    && keys.every((key) => required.includes(key) || optional.includes(key));
+}
+
+const projectHumanThreadIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
+const projectHumanThreadUuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const projectHumanThreadDigestPattern = /^[a-f0-9]{64}$/;
+const projectHumanThreadTimestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function isProjectHumanThreadCandidate(value: unknown): value is ProjectHumanThreadCandidatePublic {
+  if (!isPlainRecord(value)) return false;
+  const candidate = value;
+  return hasExactKeys(candidate, ['canonicalPath', 'conversationId', 'createdAt', 'dev', 'ino'])
+    && typeof candidate.conversationId === 'string'
+    && projectHumanThreadUuidPattern.test(candidate.conversationId)
+    && typeof candidate.canonicalPath === 'string'
+    && candidate.canonicalPath.startsWith('/')
+    && candidate.canonicalPath === candidate.canonicalPath.trim()
+    && typeof candidate.dev === 'string'
+    && /^(?:0|[1-9][0-9]{0,19})$/.test(candidate.dev)
+    && typeof candidate.ino === 'string'
+    && /^[1-9][0-9]{0,19}$/.test(candidate.ino)
+    && typeof candidate.createdAt === 'number'
+    && Number.isFinite(candidate.createdAt)
+    && candidate.createdAt >= 0;
+}
+
+function isProjectHumanThreadRoot(value: unknown): boolean {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ['canonicalPath', 'dev', 'ino'])
+    && typeof value.canonicalPath === 'string'
+    && value.canonicalPath.startsWith('/')
+    && value.canonicalPath === value.canonicalPath.trim()
+    && typeof value.dev === 'string'
+    && /^(?:0|[1-9][0-9]{0,19})$/.test(value.dev)
+    && typeof value.ino === 'string'
+    && /^[1-9][0-9]{0,19}$/.test(value.ino);
+}
+
+function isProjectHumanThreadBinding(value: unknown): value is ProjectHumanThreadBinding {
+  if (!isPlainRecord(value) || !hasExactKeys(value, [
+    'schemaVersion', 'bindingId', 'projectId', 'root', 'purpose', 'conversationId', 'generation',
+    'status', 'predecessorGeneration', 'creationMode', 'provenanceDigest', 'createdAt', 'updatedAt',
+    'retiredAt', 'recordDigest',
+  ])) return false;
+  const status = value.status;
+  const generation = value.generation;
+  const predecessorGeneration = value.predecessorGeneration;
+  const retiredAt = value.retiredAt;
+  return value.schemaVersion === 'roadex.project-human-thread-binding.v1'
+    && typeof value.bindingId === 'string'
+    && projectHumanThreadIdPattern.test(value.bindingId)
+    && typeof value.projectId === 'string'
+    && projectHumanThreadIdPattern.test(value.projectId)
+    && value.bindingId === `project-human-thread:${value.projectId}:${generation}`
+    && isProjectHumanThreadRoot(value.root)
+    && value.purpose === 'human-interaction'
+    && typeof value.conversationId === 'string'
+    && projectHumanThreadUuidPattern.test(value.conversationId)
+    && typeof generation === 'number'
+    && Number.isInteger(generation)
+    && generation > 0
+    && ['active', 'unavailable', 'replacement-pending', 'retired'].includes(String(status))
+    && (generation === 1 ? predecessorGeneration === null : predecessorGeneration === generation - 1)
+    && ['created', 'adopted'].includes(String(value.creationMode))
+    && typeof value.provenanceDigest === 'string'
+    && projectHumanThreadDigestPattern.test(value.provenanceDigest)
+    && typeof value.recordDigest === 'string'
+    && projectHumanThreadDigestPattern.test(value.recordDigest)
+    && typeof value.createdAt === 'string'
+    && projectHumanThreadTimestampPattern.test(value.createdAt)
+    && Number.isFinite(Date.parse(value.createdAt))
+    && typeof value.updatedAt === 'string'
+    && projectHumanThreadTimestampPattern.test(value.updatedAt)
+    && Number.isFinite(Date.parse(value.updatedAt))
+    && Date.parse(value.updatedAt) >= Date.parse(value.createdAt)
+    && (retiredAt === null || (typeof retiredAt === 'string' && projectHumanThreadTimestampPattern.test(retiredAt)))
+    && (retiredAt === null || (Number.isFinite(Date.parse(retiredAt)) && Date.parse(retiredAt) >= Date.parse(value.createdAt)))
+    && (status === 'retired') === (retiredAt !== null);
+}
+
+function isProjectHumanThreadReplacement(value: unknown): value is ProjectHumanThreadReplacementPublic {
+  if (!isPlainRecord(value) || !hasExactKeys(
+    value,
+    ['expectedGeneration', 'reason', 'createPhase'],
+    ['createdConversationId'],
+  )) return false;
+  return typeof value.expectedGeneration === 'number'
+    && Number.isInteger(value.expectedGeneration)
+    && value.expectedGeneration > 0
+    && typeof value.reason === 'string'
+    && value.reason.length > 0
+    && value.reason.length <= 1_000
+    && value.reason === value.reason.trim()
+    && ['not-started', 'creating', 'reconcile-required', 'created'].includes(String(value.createPhase))
+    && (value.createdConversationId === undefined
+      || (typeof value.createdConversationId === 'string' && projectHumanThreadUuidPattern.test(value.createdConversationId)));
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (isPlainRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function sha256(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function hasValidProjectHumanThreadResponse(
+  value: unknown,
+  expectedProjectId: string,
+  expectedProjectRoot: string,
+): Promise<boolean> {
+  if (!isPlainRecord(value) || !hasExactKeys(value, ['ok', 'candidates'], ['current', 'replacement'])) return false;
+  const response = value;
+  if (response.ok !== true
+    || !Array.isArray(response.candidates)
+    || !response.candidates.every(isProjectHumanThreadCandidate)
+    || response.candidates.some((candidate) => candidate.canonicalPath !== expectedProjectRoot)
+    || (response.current !== undefined && !isProjectHumanThreadBinding(response.current))
+    || (response.replacement !== undefined && !isProjectHumanThreadReplacement(response.replacement))) return false;
+
+  const current = response.current as ProjectHumanThreadBinding | undefined;
+  const replacement = response.replacement as ProjectHumanThreadReplacementPublic | undefined;
+  if (current) {
+    if (current.status === 'retired') return false;
+    if (current.projectId !== expectedProjectId || current.root.canonicalPath !== expectedProjectRoot) return false;
+    const { recordDigest, ...bindingWithoutDigest } = current;
+    if (await sha256(canonicalJson(bindingWithoutDigest)) !== recordDigest) return false;
+    if (current.status !== 'replacement-pending' && (response.candidates.length > 0 || replacement)) return false;
+  } else if (replacement) {
+    return false;
+  }
+  if (replacement && replacement.expectedGeneration !== current?.generation) return false;
+  if (replacement?.createPhase === 'created' && !replacement.createdConversationId) return false;
+  if (replacement?.createPhase !== 'created' && replacement?.createdConversationId) return false;
+  return true;
+}
+
+function isProjectHumanThreadHistoryBinding(value: unknown, expectedProjectId: string): boolean {
+  if (!isPlainRecord(value) || !hasExactKeys(value, [
+    'schemaVersion', 'bindingId', 'projectId', 'purpose', 'conversationId', 'generation', 'status',
+    'predecessorGeneration', 'creationMode', 'createdAt', 'updatedAt', 'retiredAt', 'recordDigest',
+  ])) return false;
+  const generation = value.generation;
+  const retiredAt = value.retiredAt;
+  return value.schemaVersion === 'roadex.project-human-thread-binding.v1'
+    && value.projectId === expectedProjectId
+    && typeof generation === 'number'
+    && Number.isInteger(generation)
+    && generation > 0
+    && value.bindingId === `project-human-thread:${expectedProjectId}:${generation}`
+    && value.purpose === 'human-interaction'
+    && typeof value.conversationId === 'string'
+    && projectHumanThreadUuidPattern.test(value.conversationId)
+    && ['active', 'unavailable', 'replacement-pending', 'retired'].includes(String(value.status))
+    && (generation === 1 ? value.predecessorGeneration === null : value.predecessorGeneration === generation - 1)
+    && ['created', 'adopted'].includes(String(value.creationMode))
+    && typeof value.createdAt === 'string'
+    && projectHumanThreadTimestampPattern.test(value.createdAt)
+    && Number.isFinite(Date.parse(value.createdAt))
+    && typeof value.updatedAt === 'string'
+    && projectHumanThreadTimestampPattern.test(value.updatedAt)
+    && Number.isFinite(Date.parse(value.updatedAt))
+    && Date.parse(value.updatedAt) >= Date.parse(value.createdAt)
+    && (retiredAt === null || (typeof retiredAt === 'string'
+      && projectHumanThreadTimestampPattern.test(retiredAt)
+      && Number.isFinite(Date.parse(retiredAt))
+      && Date.parse(retiredAt) >= Date.parse(value.createdAt)))
+    && (value.status === 'retired') === (retiredAt !== null)
+    && typeof value.recordDigest === 'string'
+    && projectHumanThreadDigestPattern.test(value.recordDigest);
+}
+
 export async function getProjectHumanThread(
   token: string | undefined,
   projectId: string,
+  projectRoot: string,
 ): Promise<{ current?: ProjectHumanThreadBinding; candidates: ProjectHumanThreadCandidatePublic[]; replacement?: ProjectHumanThreadReplacementPublic }> {
   const response = await request<{ ok: true; current?: ProjectHumanThreadBinding; candidates: ProjectHumanThreadCandidatePublic[]; replacement?: ProjectHumanThreadReplacementPublic }>(
     `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread`, { token },
   );
+  if (!await hasValidProjectHumanThreadResponse(response, projectId, projectRoot)) {
+    throw new Error('Project human thread response is invalid.');
+  }
   return { current: response.current, candidates: response.candidates, replacement: response.replacement };
 }
 
@@ -207,6 +395,14 @@ export async function getProjectHumanThreadHistory(
   const response = await request<{ ok: true; history: Array<Omit<ProjectHumanThreadBinding, 'root' | 'provenanceDigest'>> }>(
     `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread/history`, { token },
   );
+  if (!isPlainRecord(response)
+    || !hasExactKeys(response, ['ok', 'history'])
+    || response.ok !== true
+    || !Array.isArray(response.history)
+    || !response.history.every((binding) => isProjectHumanThreadHistoryBinding(binding, projectId))
+    || response.history.some((binding, index) => index > 0 && binding.generation <= response.history[index - 1]!.generation)) {
+    throw new Error('Project human thread history response is invalid.');
+  }
   return response.history;
 }
 
