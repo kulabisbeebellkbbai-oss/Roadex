@@ -118,6 +118,20 @@ const BOOTSTRAP_PROMPT = [
   'Do not replace or expand those approved documents and do not perform repository or remote operations.',
   'Confirm readiness for the next assigned implementation step.',
 ].join(' ');
+const ROOT_LOCKED_BOOTSTRAP = `import fcntl, os, sys
+root, expected_dev, expected_ino, executable, *args = sys.argv[1:]
+fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+st = os.fstat(fd)
+if str(st.st_dev) != expected_dev or str(st.st_ino) != expected_ino:
+    raise SystemExit("project root identity changed")
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit("project root already has a writer")
+os.set_inheritable(fd, True)
+os.chdir(root)
+os.execve(executable, [executable, *args], os.environ)
+`;
 
 type RegistrationDto = {
   registered: true;
@@ -157,21 +171,9 @@ export function createProjectThreadFinalizer(
       const projectRoot = path.join(lease.spec.workspaceRoot, lease.spec.projectName);
       const threadId = await bootstrapControlledThread(projectRoot, env);
       const projectIdentityDigest = projectIdentity(lease);
-      const bootstrapBinding = createBootstrapBinding(
-        lease.operationId,
-        projectRoot,
-        threadId,
-        projectIdentityDigest,
-        env.ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY!,
+      await registerControlledHumanThread(
+        projectRoot, threadId, env, lease.operationId, projectIdentityDigest,
       );
-      const result = await invokeRegistrar({
-        operation_id: lease.operationId,
-        project_root: projectRoot,
-        thread_id: threadId,
-        project_identity_digest: projectIdentityDigest,
-        bootstrap_binding: bootstrapBinding,
-      }, env);
-      verifyRegistration(result, lease.operationId, lease.spec.projectName, threadId);
       const registered = loadManagedCodexThreads().find(
         (candidate) => candidate.id === threadId && candidate.project.root === projectRoot,
       );
@@ -202,11 +204,16 @@ export function controlledBootstrapEnvironment(env: NodeJS.ProcessEnv): NodeJS.P
 }
 
 export async function bootstrapControlledThread(projectRoot: string, env: NodeJS.ProcessEnv): Promise<string> {
-  const child = spawn(CODEX_BIN, controlledBootstrapArgs(projectRoot), {
+  const rootStat = await import('node:fs').then(({ statSync }) => statSync(projectRoot));
+  const child = spawn(PYTHON_BIN, [
+    '-I', '-S', '-c', ROOT_LOCKED_BOOTSTRAP,
+    projectRoot, String(rootStat.dev), String(rootStat.ino), CODEX_BIN,
+    ...controlledBootstrapArgs(projectRoot),
+  ], {
     cwd: projectRoot,
     env: controlledBootstrapEnvironment(env),
     shell: false,
-    stdio: ['ignore', 'pipe', 'ignore'],
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
   const completion = new Promise<number | null>((resolve, reject) => {
     child.once('error', reject);
@@ -216,6 +223,10 @@ export async function bootstrapControlledThread(projectRoot: string, env: NodeJS
   let bytes = 0;
   let threadId: string | undefined;
   let exitCode: number | null = null;
+  let stderr = '';
+  child.stderr.on('data', (chunk: Buffer) => {
+    if (Buffer.byteLength(stderr) < 4_096) stderr += String(chunk).slice(0, 4_096 - Buffer.byteLength(stderr));
+  });
   const timer = setTimeout(() => child.kill('SIGKILL'), 120_000);
   try {
     for await (const chunk of child.stdout) {
@@ -237,9 +248,38 @@ export async function bootstrapControlledThread(projectRoot: string, env: NodeJS
     clearTimeout(timer);
   }
   if (exitCode !== 0 || !threadId || !/^[A-Za-z0-9_-]{8,128}$/.test(threadId)) {
-    throw new Error('controlled_bootstrap_failed');
+    const error = new Error('controlled_bootstrap_failed') as Error & { createEffect?: 'none' };
+    if (stderr.includes('project root already has a writer')) error.createEffect = 'none';
+    throw error;
   }
   return threadId;
+}
+
+export async function registerControlledHumanThread(
+  projectRoot: string,
+  threadId: string,
+  env: NodeJS.ProcessEnv,
+  operationId = `human-thread-operation-${threadId}`,
+  identityDigest = createHash('sha256').update(JSON.stringify({
+    projectRoot,
+    purpose: 'human-interaction',
+  }, ['projectRoot', 'purpose'])).digest('hex'),
+): Promise<void> {
+  const bootstrapBinding = createBootstrapBinding(
+    operationId,
+    projectRoot,
+    threadId,
+    identityDigest,
+    env.ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY ?? '',
+  );
+  const result = await invokeRegistrar({
+    operation_id: operationId,
+    project_root: projectRoot,
+    thread_id: threadId,
+    project_identity_digest: identityDigest,
+    bootstrap_binding: bootstrapBinding,
+  }, env);
+  verifyRegistration(result, operationId, path.basename(projectRoot), threadId);
 }
 
 async function invokeRegistrar(
@@ -350,5 +390,5 @@ function slugify(value: string): string {
 
 function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
-  return `'${value.replace(/'/g, `\'"'"'`)}'`;
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }

@@ -19,6 +19,7 @@ class FakeAuthority {
   available: ProjectHumanThreadCandidate[] = [];
   proven: ProjectHumanThreadCandidate[] = [];
   created: ProjectHumanThreadCandidate[] = [];
+  preparedReplacements: string[] = [];
   candidates(projectRoot: string) { return projectRoot === root ? [...this.available] : []; }
   adoptableCandidates(projectRoot: string) { return projectRoot === root ? [...this.proven] : []; }
   inspect(projectRoot: string, conversationId: string) {
@@ -40,6 +41,9 @@ class FakeAuthority {
   }
   repair(binding: { conversationId: string }) {
     return this.inspect(root, binding.conversationId);
+  }
+  prepareReplacement(binding: { conversationId: string }) {
+    this.preparedReplacements.push(binding.conversationId);
   }
 }
 
@@ -110,11 +114,28 @@ describe('ProjectHumanThreadService', () => {
       idempotencyKey: 'human-thread:arcade:replace-1',
     });
     expect(replacement).toMatchObject({ outcome: 'replaced', binding: { generation: 2, conversationId: second.conversationId } });
+    expect(authority.preparedReplacements).toEqual([first.conversationId]);
     await expect(service.replace({
       ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered',
       idempotencyKey: 'human-thread:arcade:replace-1',
     })).resolves.toEqual({ outcome: 'current', binding: replacement.binding });
     expect(service.history('arcade')).toMatchObject([{ generation: 1, status: 'retired' }, { generation: 2, status: 'active' }]);
+  });
+
+  it('never bootstraps a successor until the durable predecessor handoff succeeds', async () => {
+    const { authority, service, store } = setup();
+    authority.created.push(first, second);
+    await service.createMissing(request);
+    const create = vi.spyOn(authority, 'create');
+    vi.spyOn(authority, 'prepareReplacement').mockImplementationOnce(() => {
+      throw new Error('predecessor writer is still active');
+    });
+    await expect(service.replace({
+      ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered',
+      idempotencyKey: 'human-thread:arcade:replace-handoff',
+    })).rejects.toThrow(/still active/);
+    expect(create).not.toHaveBeenCalled();
+    expect(store.current('arcade')).toMatchObject({ generation: 1, status: 'replacement-pending' });
   });
 
   it('persists create intent and never spawns a second conversation after an ambiguous failure', async () => {

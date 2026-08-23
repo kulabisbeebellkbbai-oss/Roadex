@@ -130,6 +130,16 @@ class ControlledThreadRegistrarTests(unittest.TestCase):
         launcher = Path(rows[0]["launcher"])
         self.assertTrue(launcher.is_file())
         self.assertEqual(launcher.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(rows[0]["source"], "registry+codex-state")
+        self.assertEqual(
+            rows[0]["label"],
+            "This is the dedicated Roadex human interaction thread for the "
+            "Project Alpha project. Do not use another thread for human interaction.",
+        )
+        launcher_content = launcher.read_text(encoding="utf-8")
+        self.assertTrue(launcher_content.startswith("#!/usr/bin/python3\n"))
+        self.assertIn("fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)", launcher_content)
+        self.assertIn(f'CONVERSATION = "{self.thread_id}"', launcher_content)
         audit = self.paths.audit_log.read_text(encoding="utf-8")
         self.assertIn('"outcome":"allowed"', audit)
         self.assertNotIn(str(self.project), audit)

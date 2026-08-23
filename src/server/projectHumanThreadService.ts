@@ -2,7 +2,7 @@ import { bindingDigest, type ProjectHumanThreadBinding } from '../shared/project
 import { isProjectHumanThreadCreateNoSideEffect, type ProjectHumanThreadAuthority, type ProjectHumanThreadCandidate } from './projectHumanThreadAuthority.js';
 import type { ProjectHumanThreadStore, ProjectRootIdentity } from './projectHumanThreadStore.js';
 
-type Authority = Pick<ProjectHumanThreadAuthority, 'candidates' | 'adoptableCandidates' | 'inspect' | 'inspectAdoptable' | 'create' | 'repair'> & {
+type Authority = Pick<ProjectHumanThreadAuthority, 'candidates' | 'adoptableCandidates' | 'inspect' | 'inspectAdoptable' | 'create' | 'repair' | 'prepareReplacement'> & {
   rootIdentity?: (projectRoot: string) => ProjectRootIdentity;
 };
 type ServiceOptions = { now?: () => string };
@@ -227,6 +227,10 @@ export class ProjectHumanThreadService {
       );
     }
     requireRoot(pending, operation.projectRoot);
+    // The pending intent is durable before the predecessor handoff. The
+    // authority must make the old locator inert and prove its writer absent
+    // before any successor bootstrap can begin. Replays are idempotent.
+    this.#authority.prepareReplacement(pending);
     const boundIds = new Set(this.#store.history(operation.projectId).map((item) => item.conversationId));
     let candidates = this.#authority.adoptableCandidates(operation.projectRoot).filter((item) => !boundIds.has(item.conversationId));
     const activeIntent = this.#store.replacementIntent(operation.projectId);
