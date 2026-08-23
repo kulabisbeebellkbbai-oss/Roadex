@@ -8,6 +8,7 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  realpathSync,
 } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { extname, isAbsolute, join, normalize } from 'node:path';
@@ -763,6 +764,9 @@ function getProjectHumanThreadController(): ProjectHumanThreadController {
   if (projectHumanThreadController) return projectHumanThreadController;
   projectHumanThreadStore = new ProjectHumanThreadStore();
   projectHumanThreadService = new ProjectHumanThreadService(projectHumanThreadStore, new ProjectHumanThreadAuthority());
+  state.isProjectHumanThreadConversation = (conversationId) => (
+    projectHumanThreadService?.isBoundConversation(conversationId) ?? false
+  );
   projectHumanThreadTranscriptStore = new ProjectHumanThreadTranscriptStore(
     (projectId) => projectHumanThreadService?.current(projectId),
   );
@@ -770,15 +774,23 @@ function getProjectHumanThreadController(): ProjectHumanThreadController {
     resolveOwnedProject(user, projectId) {
       const decision = resolveWorkspaceForUser(user, projectId);
       if (!decision.ok) return undefined;
+      const canonicalRoot = realpathSync(decision.workspace.root);
       return {
         projectId: decision.workspace.id,
         root: decision.workspace.root,
         activeRun: state.sessions.sessions.some((session) => (
-          session.userId === user.id
-          && session.workspace.id === projectId
-          && state.activeRuns.has(session.id)
+          state.activeRuns.has(session.id) && (() => {
+            try { return realpathSync(session.workspace.root) === canonicalRoot; }
+            catch { return session.workspace.id === projectId; }
+          })()
         )),
       };
+    },
+    hasActiveConversation(conversationId) {
+      return state.sessions.sessions.some((session) => (
+        state.activeRuns.has(session.id)
+        && (session.codexThreadId === conversationId || session.managedThreadId === conversationId)
+      ));
     },
     hasPendingInteraction(projectId) {
       return Boolean(projectHumanThreadTranscriptStore?.pending(projectId).length)
@@ -958,8 +970,12 @@ async function startRoadexApi(): Promise<void> {
   });
   await once(workflowHost, 'listening');
   await coordinator.recover();
+  // Binding reservations are a safety boundary, not a feature surface. Load
+  // their durable authority even when lifecycle routes/relay are disabled so
+  // a configuration rollback cannot expose reserved conversations as
+  // ordinary managed sessions.
+  getProjectHumanThreadController();
   if (process.env.ROADEX_PROJECT_HUMAN_THREAD_ENABLED === 'true') {
-    getProjectHumanThreadController();
     scheduleProjectHumanThreadRelay();
   }
 

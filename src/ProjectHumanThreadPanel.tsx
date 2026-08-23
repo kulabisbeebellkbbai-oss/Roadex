@@ -32,7 +32,6 @@ export type ProjectHumanThreadSnapshot = {
 type ProjectHumanThreadPanelProps = {
   token?: string;
   project?: WorkspaceRef;
-  onOpenConversation?: (conversationId: string) => void;
 };
 
 type ProjectHumanThreadPanelViewProps = {
@@ -60,12 +59,11 @@ type ProjectHumanThreadPanelViewProps = {
   transcriptError?: string;
   onResponseDraft?: (messageId: string, content: string) => void;
   onRespond?: (messageId: string, content: string) => void;
-  onOpenConversation?: (conversationId: string) => void;
 };
 
 const emptySnapshot: ProjectHumanThreadSnapshot = { candidates: [], history: [] };
 
-export function ProjectHumanThreadPanel({ token, project, onOpenConversation }: ProjectHumanThreadPanelProps) {
+export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPanelProps) {
   const [snapshot, setSnapshot] = useState<ProjectHumanThreadSnapshot>(emptySnapshot);
   const [loading, setLoading] = useState(false);
   const [lifecycleValidated, setLifecycleValidated] = useState(false);
@@ -247,7 +245,6 @@ export function ProjectHumanThreadPanel({ token, project, onOpenConversation }: 
             if (sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) setRespondingMessageId('');
           });
       }}
-      onOpenConversation={onOpenConversation}
     />
   );
 }
@@ -277,7 +274,6 @@ export function ProjectHumanThreadPanelView({
   transcriptError,
   onResponseDraft,
   onRespond,
-  onOpenConversation,
 }: ProjectHumanThreadPanelViewProps) {
   const current = snapshot.current;
   const canReplace = lifecycleValidated && !loading && Boolean(current) && current?.status !== 'replacement-pending' && !busyAction;
@@ -340,11 +336,6 @@ export function ProjectHumanThreadPanelView({
             <div><dt>Binding mode</dt><dd>{current.creationMode}</dd></div>
           </dl>
           <div className="human-thread-actions">
-            {onOpenConversation ? (
-              <button className="secondary-action" disabled={current.status !== 'active'} onClick={() => onOpenConversation(current.conversationId)} type="button">
-                <Link2 size={16} /> Open project conversation
-              </button>
-            ) : null}
             {current.status === 'unavailable' ? (
               <button className="secondary-action" disabled={Boolean(busyAction)} onClick={onRecover} type="button">
                 <RotateCcw size={16} /> {busyAction === 'recover' ? 'Recovering…' : 'Recover thread'}
@@ -454,7 +445,7 @@ export function ProjectHumanThreadPanelView({
             onDraft={onResponseDraft}
             onRespond={onRespond}
           />
-        )) : <p>No new project questions are waiting for your response.</p>}
+        )) : <p>Questions from the project and your responses stay in this panel. No new project questions are waiting for your response.</p>}
         {transcriptHistory.some((question) => question.state === 'answered') ? (
           <details className="human-thread-conversation-history">
             <summary>Answered conversation history ({transcriptHistory.filter((question) => question.state === 'answered').length})</summary>

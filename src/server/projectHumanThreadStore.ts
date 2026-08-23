@@ -376,6 +376,15 @@ export class ProjectHumanThreadStore {
     return rows.map((row) => parseProjectHumanThreadBinding(JSON.parse(row.binding_json)));
   }
 
+  isBoundConversation(conversationId: string): boolean {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(conversationId)) return false;
+    const row = this.#db.prepare(`
+      SELECT 1 AS present FROM project_human_thread_bindings
+      WHERE conversation_id=? LIMIT 1
+    `).get(conversationId) as { present: number } | undefined;
+    return row?.present === 1;
+  }
+
   pendingOutbox(): ProjectHumanThreadOutboxRecord[] {
     const rows = this.#db.prepare(`
       SELECT event_id,payload_json,payload_digest,state FROM project_human_thread_outbox

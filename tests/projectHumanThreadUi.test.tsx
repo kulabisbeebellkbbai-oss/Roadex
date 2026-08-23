@@ -89,6 +89,13 @@ describe('project human thread UI', () => {
     expect(html).toContain('data-testid="project-human-thread-missing"');
   });
 
+  it('keeps the dedicated thread on the project transcript surface instead of ordinary session attach', () => {
+    const html = view({ snapshot: snapshot({ current: binding }) });
+
+    expect(html).not.toContain('Open project conversation');
+    expect(html).toContain('Questions from the project and your responses stay in this panel');
+  });
+
   it('fails closed without lifecycle actions when thread status is invalid', () => {
     const html = view({ error: 'Project human thread response is invalid.' });
 

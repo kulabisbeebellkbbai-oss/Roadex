@@ -37,6 +37,7 @@ type ServiceInput = {
 type Dependencies = {
   resolveOwnedProject(user: UserProfile, projectId: string): OwnedProject | undefined;
   hasPendingInteraction?: (projectId: string) => boolean;
+  hasActiveConversation?: (conversationId: string) => boolean;
 };
 
 const empty = z.object({}).strict();
@@ -90,6 +91,9 @@ export class ProjectHumanThreadController {
   async adopt(user: UserProfile, projectId: string, idempotencyKey: string, payload: unknown): Promise<unknown> {
     const body = parseBody(adopt, payload);
     const project = this.#owned(user, projectId);
+    if (project.activeRun || this.#deps.hasActiveConversation?.(body.conversationId)) {
+      throw new Error('Project human thread cannot be adopted during an active run.');
+    }
     return await this.#service.adopt({ ...this.#input(user, project, idempotencyKey, 'adopt'), ...body });
   }
 

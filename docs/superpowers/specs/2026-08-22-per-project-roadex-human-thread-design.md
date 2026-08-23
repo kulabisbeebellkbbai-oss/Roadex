@@ -42,6 +42,9 @@ authority, deploy services, or migrate live project threads by itself.
    candidate by timestamp or path proximity.
 7. Project conversation text cannot create, approve, reject, cancel, or execute
    an Overseer plan.
+8. Current and predecessor project human-thread conversations are permanently
+   reserved from the ordinary Roadex session list, attach API, reuse fallback,
+   and session quota. Roadex never starts a second Codex writer for them.
 
 ## Authoritative model
 
@@ -175,6 +178,11 @@ Each project view exposes its current human thread and a history of retired
 predecessors. Retired threads have an explicit read-only label and a link to
 their successor. The project view exposes recover and replace actions only when
 the caller owns the project and the lifecycle permits them.
+
+Questions from the project and the user's responses remain in the dedicated
+project-conversation panel. The panel does not expose the reserved conversation
+through the generic managed-session launcher: that launcher uses a separate
+Codex writer and is not a valid transport for a live dedicated thread.
 
 Imported or repaired projects with no active binding show a bounded
 `Create project conversation` action. Ambiguous adoption candidates are shown

@@ -152,6 +152,7 @@ export type RoadexState = {
   approvalWaits: ApprovalWaitRecord[];
   approvalWorkflowRuntime?: ApprovalWorkflowRunRuntime;
   approvalLifecycleRuntime?: ApprovalLifecycleRuntime;
+  isProjectHumanThreadConversation?: (conversationId: string) => boolean;
 };
 
 type StreamSubscriber = {
@@ -578,7 +579,7 @@ export async function bootstrap(state: RoadexState, user: UserProfile): Promise<
     sessions: userSessions,
     auditEvents: visibleAuditEvents(state.audit, user).slice(-8).reverse(),
     streamPreview: state.sessions.streamEvents.filter((event) => visibleSessionIds.has(event.sessionId)).slice(-8),
-    managedThreads: canAccessManagedCodexProjects(user) ? safeManagedThreads(user) : [],
+    managedThreads: canAccessManagedCodexProjects(user) ? safeManagedThreads(state, user) : [],
     deviceBridgePolicy: getDeviceBridgePolicy(),
     deviceInventoryBindingRefs: user.authMode === 'protected-gateway' && canAuthorizeInventoryBinding(user)
       ? [...state.deviceInventoryBindings.values()]
@@ -620,7 +621,15 @@ export function createSessionFromApi(
     return Promise.resolve(deny(denied.gate, denied.reason));
   }
 
-  const managedThread = request.managedThreadId ? findManagedThreadForUser(user, request.managedThreadId) : undefined;
+  const humanThreadReservation = request.managedThreadId
+    ? projectHumanThreadReservation(state, request.managedThreadId)
+    : 'ordinary';
+  if (humanThreadReservation !== 'ordinary') {
+    appendAudit(state.audit, user, 'security.denied', 'project-human-thread', 'denied', 'Dedicated project human thread ordinary attach denied.');
+    saveState(state);
+    return Promise.resolve(deny('project-human-thread', 'Use the project conversation panel for this dedicated human-interaction thread.'));
+  }
+  const managedThread = request.managedThreadId ? findManagedThreadForUser(state, user, request.managedThreadId) : undefined;
   if (request.managedThreadId && !managedThread) {
     appendAudit(state.audit, user, 'security.denied', 'managed-thread', 'denied', 'Managed thread attach denied.');
     saveState(state);
@@ -651,6 +660,7 @@ export function createSessionFromApi(
       session.userId === user.id &&
       session.workspace.id === workspaceDecision.workspace.id &&
       isVisibleSession(session) &&
+      projectHumanThreadSessionReservation(state, session) === 'ordinary' &&
       (!managedThread || session.managedThreadId === managedThread.id),
   );
   if (existing) {
@@ -3122,17 +3132,22 @@ function cancelAttemptKey(user: UserProfile, sessionId: string): string {
 }
 
 function isVisibleSessionForUser(state: RoadexState, session: RoadexSession, user: UserProfile): boolean {
-  return session.userId === user.id && isVisibleSession(session) && isManagedSessionAuthorized(state, user, session);
+  return session.userId === user.id
+    && isVisibleSession(session)
+    && isManagedSessionAuthorized(state, user, session);
 }
 
 function isManagedSessionAuthorized(state: RoadexState, user: UserProfile, session: RoadexSession): boolean {
+  if (projectHumanThreadSessionReservation(state, session) !== 'ordinary') {
+    revokeManagedSessionAccess(state, session);
+    return false;
+  }
   if (!session.managedThreadId) return true;
   const claim = state.managedThreadClaims.get(session.managedThreadId);
-  return claim?.userId === user.id && Boolean(findManagedThreadForUser(user, session.managedThreadId));
+  return claim?.userId === user.id && Boolean(findManagedThreadForUser(state, user, session.managedThreadId));
 }
 
 function revokeManagedSessionAccess(state: RoadexState, session: RoadexSession): void {
-  if (!session.managedThreadId) return;
   state.activeRuns.get(session.id)?.abort();
   state.streamSubscribers.delete(session.id);
   saveState(state);
@@ -3144,25 +3159,57 @@ function isVisibleSession(session: RoadexSession): boolean {
 
 function activeSessionCountForUser(state: RoadexState, userId: string): number {
   return state.sessions.sessions.filter(
-    (session) => session.userId === userId && isVisibleSession(session),
+    (session) => session.userId === userId
+      && isVisibleSession(session)
+      && projectHumanThreadSessionReservation(state, session) !== 'reserved',
   ).length;
 }
 
-function safeManagedThreads(user: UserProfile) {
+function safeManagedThreads(state: RoadexState, user: UserProfile) {
   try {
     const workspaces = getApprovedWorkspaces(user);
     return loadManagedCodexThreads().flatMap((thread) => {
       const workspace = workspaces.find((candidate) => candidate.root === thread.project.root);
-      return workspace ? [{ ...thread, project: workspace }] : [];
+      return workspace && projectHumanThreadReservation(state, thread.id) === 'ordinary'
+        ? [{ ...thread, project: workspace }]
+        : [];
     });
   } catch {
     return [];
   }
 }
 
-function findManagedThreadForUser(user: UserProfile, threadId: string) {
+function findManagedThreadForUser(state: RoadexState, user: UserProfile, threadId: string) {
   if (!canAccessManagedCodexProjects(user)) return undefined;
-  return safeManagedThreads(user).find((thread) => thread.id === threadId);
+  return safeManagedThreads(state, user).find((thread) => thread.id === threadId);
+}
+
+function projectHumanThreadReservation(
+  state: RoadexState,
+  conversationId: string,
+): 'reserved' | 'ordinary' | 'unavailable' {
+  if (!state.isProjectHumanThreadConversation) return 'ordinary';
+  try {
+    return state.isProjectHumanThreadConversation(conversationId) ? 'reserved' : 'ordinary';
+  } catch {
+    return 'unavailable';
+  }
+}
+
+function projectHumanThreadSessionReservation(
+  state: RoadexState,
+  session: RoadexSession,
+): 'reserved' | 'ordinary' | 'unavailable' {
+  const conversationIds = [...new Set([session.managedThreadId, session.codexThreadId].filter(
+    (value): value is string => Boolean(value),
+  ))];
+  let unavailable = false;
+  for (const conversationId of conversationIds) {
+    const status = projectHumanThreadReservation(state, conversationId);
+    if (status === 'reserved') return 'reserved';
+    if (status === 'unavailable') unavailable = true;
+  }
+  return unavailable ? 'unavailable' : 'ordinary';
 }
 
 function settleUserRunLifecycle(

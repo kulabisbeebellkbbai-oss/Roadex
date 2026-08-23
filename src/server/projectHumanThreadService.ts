@@ -248,6 +248,7 @@ export class ProjectHumanThreadService {
 
   current(projectId: string): ProjectHumanThreadBinding | undefined { return this.#store.current(projectId); }
   history(projectId: string): ProjectHumanThreadBinding[] { return this.#store.history(projectId); }
+  isBoundConversation(conversationId: string): boolean { return this.#store.isBoundConversation(conversationId); }
   candidates(projectRoot: string): ProjectHumanThreadCandidate[] { return this.#authority.candidates(projectRoot); }
 }
 

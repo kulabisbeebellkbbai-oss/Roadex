@@ -2359,6 +2359,75 @@ describe('Roadex session service', () => {
     }
   });
 
+  it('reserves the authoritative project human thread from ordinary Roadex sessions', async () => {
+    const originalRegistry = process.env.ROADEX_CODEX_PROJECTS_REGISTRY;
+    const originalAuthorizedUsers = process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS;
+    const registry = join(mkdtempSync(join(tmpdir(), 'roadex-human-thread-reserved-')), 'codex-projects.csv');
+    const reservedId = '019f7337-df2e-75c1-b245-5e3588a6c5aa';
+    const ordinaryId = '019f7337-df2e-75c1-b245-5e3588a6c5ab';
+    writeFileSync(
+      registry,
+      [
+        'conversation_id,label,project,created_at,updated_at',
+        `${reservedId},Project human thread,"${process.cwd()}",2026-07-17T00:00:00Z,2026-07-18T00:00:00Z`,
+        `${ordinaryId},Ordinary thread,"${process.cwd()}",2026-07-17T00:00:00Z,2026-07-18T00:00:00Z`,
+      ].join('\n'),
+    );
+    process.env.ROADEX_CODEX_PROJECTS_REGISTRY = registry;
+    process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS = mockUser.id;
+    try {
+      const state = createInitialState(controllableRunner(), createMemoryPersistence());
+      state.isProjectHumanThreadConversation = (conversationId) => conversationId === reservedId;
+
+      const initial = await bootstrap(state, mockUser);
+      expect(initial.managedThreads.map((thread) => thread.id)).toEqual([ordinaryId]);
+      expect(await createSessionFromApi(state, mockUser, {
+        workspaceId: 'roadex', managedThreadId: reservedId,
+      })).toMatchObject({ ok: false, gate: 'project-human-thread' });
+      expect(await createSessionFromApi(state, mockUser, {
+        workspaceId: 'roadex', managedThreadId: ordinaryId,
+      })).toMatchObject({ ok: true, session: { managedThreadId: ordinaryId } });
+
+      const legacyReserved = state.runner.createSession({ userId: mockUser.id, workspace });
+      legacyReserved.codexThreadId = reservedId;
+      state.sessions.sessions.unshift(legacyReserved);
+      const staleRun = new AbortController();
+      state.activeRuns.set(legacyReserved.id, staleRun);
+      state.streamSubscribers.set(legacyReserved.id, new Set());
+      expect(submitPrompt(state, mockUser, legacyReserved.id, 'must not start a second writer')).toBeUndefined();
+      expect(staleRun.signal.aborted).toBe(true);
+      expect(state.streamSubscribers.has(legacyReserved.id)).toBe(false);
+      const ordinary = await createSessionFromApi(state, mockUser, { workspaceId: 'roadex' });
+      expect(ordinary).toMatchObject({ ok: true });
+      expect(ordinary.ok && ordinary.session.id).not.toBe(legacyReserved.id);
+      expect((await bootstrap(state, mockUser)).sessions.map((session) => session.id)).not.toContain(legacyReserved.id);
+      legacyReserved.lifecycle = 'closed';
+      expect(listArchivedSessions(state, mockUser).map((session) => session.id)).not.toContain(legacyReserved.id);
+      expect(await reopenSession(state, mockUser, legacyReserved.id)).toBeUndefined();
+
+      const renamedReserved = state.runner.createSession({
+        userId: mockUser.id,
+        workspace: { ...workspace, id: 'renamed-roadex' },
+      });
+      renamedReserved.codexThreadId = reservedId;
+      state.sessions.sessions.push(renamedReserved);
+      expect(submitPrompt(state, mockUser, renamedReserved.id, 'project alias must not bypass reservation')).toBeUndefined();
+
+      state.isProjectHumanThreadConversation = () => { throw new Error('binding store unavailable'); };
+      expect((await bootstrap(state, mockUser)).managedThreads).toEqual([]);
+      legacyReserved.lifecycle = 'ready';
+      expect(submitPrompt(state, mockUser, legacyReserved.id, 'authority failure must fail closed')).toBeUndefined();
+      expect(await createSessionFromApi(state, mockUser, {
+        workspaceId: 'roadex', managedThreadId: ordinaryId,
+      })).toMatchObject({ ok: false, gate: 'project-human-thread' });
+    } finally {
+      if (originalRegistry === undefined) delete process.env.ROADEX_CODEX_PROJECTS_REGISTRY;
+      else process.env.ROADEX_CODEX_PROJECTS_REGISTRY = originalRegistry;
+      if (originalAuthorizedUsers === undefined) delete process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS;
+      else process.env.ROADEX_CODEX_PROJECTS_AUTHORIZED_USERS = originalAuthorizedUsers;
+    }
+  });
+
   it('supports multiple server-approved workspaces by id only', async () => {
     const original = process.env.ROADEX_WORKSPACES_JSON;
     const originalRegistry = process.env.ROADEX_CODEX_PROJECTS_REGISTRY;

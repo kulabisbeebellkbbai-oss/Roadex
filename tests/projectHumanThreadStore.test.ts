@@ -52,6 +52,8 @@ describe('ProjectHumanThreadStore', () => {
   it('enforces project and conversation uniqueness under independent requests', () => {
     const store = new ProjectHumanThreadStore(':memory:');
     store.createInitial(binding(), 'create:arcade:1');
+    expect(store.isBoundConversation(binding().conversationId)).toBe(true);
+    expect(store.isBoundConversation('01a01569-7874-7f72-bca9-9c91bb869849')).toBe(false);
     expect(() => store.createInitial(binding({ conversationId: '01a01569-7874-7f72-bca9-9c91bb869847' }), 'create:arcade:2')).toThrow();
     expect(() => store.createInitial(binding({ bindingId: 'project-human-thread:other:1', projectId: 'other' }), 'create:other:1')).toThrow();
   });
@@ -69,6 +71,8 @@ describe('ProjectHumanThreadStore', () => {
       predecessorGeneration: 1, createdAt: '2026-08-22T12:12:00.000Z', updatedAt: '2026-08-22T12:12:00.000Z',
     });
     store.activateReplacement(next, 1, 'activate:arcade:2');
+    expect(store.isBoundConversation(binding().conversationId)).toBe(true);
+    expect(store.isBoundConversation(next.conversationId)).toBe(true);
     expect(store.current('arcade')).toEqual(next);
     expect(store.history('arcade')).toMatchObject([
       { generation: 1, status: 'retired', retiredAt: '2026-08-22T12:12:00.000Z' },

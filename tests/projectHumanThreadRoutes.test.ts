@@ -24,7 +24,7 @@ const binding = {
   recordDigest: 'b'.repeat(64),
 };
 
-function fixture(activeRun = false, pendingInteraction = false) {
+function fixture(activeRun = false, pendingInteraction = false, activeConversation = false) {
   const service = {
     current: vi.fn(() => binding),
     history: vi.fn(() => [binding]),
@@ -43,6 +43,7 @@ function fixture(activeRun = false, pendingInteraction = false) {
       ? { projectId, root: '/srv/arcade', activeRun }
       : undefined,
     hasPendingInteraction: () => pendingInteraction,
+    hasActiveConversation: () => activeConversation,
   });
   return { controller, service };
 }
@@ -92,7 +93,16 @@ describe('ProjectHumanThreadController', () => {
   });
 
   it('requires exact generation and bounded reason and blocks replacement during an active run', async () => {
-    const { controller } = fixture(true);
+    const { controller, service } = fixture(true);
+    await expect(controller.adopt(owner, 'arcade', 'adopt-key-active-001', {
+      conversationId: binding.conversationId,
+    })).rejects.toThrow(/active run/i);
+    expect(service.adopt).not.toHaveBeenCalled();
+    const activeCandidate = fixture(false, false, true);
+    await expect(activeCandidate.controller.adopt(owner, 'arcade', 'adopt-key-active-002', {
+      conversationId: binding.conversationId,
+    })).rejects.toThrow(/active run/i);
+    expect(activeCandidate.service.adopt).not.toHaveBeenCalled();
     await expect(controller.replace(owner, 'arcade', 'replace-key-0000001', {
       expectedGeneration: 1, reason: 'Replace unavailable thread',
     })).rejects.toThrow(/active run/i);
