@@ -6,6 +6,109 @@ import { CONTROLLED_RUNNER_PROFILE } from './runnerCapabilityProfile.js';
 import { loadManagedCodexThreads } from './codexProjectsRegistry.js';
 import type { ProjectCreationExecutionLease } from './projectCreationBroker.js';
 
+/**
+ * The registry and launcher are derived locators, but the project-human
+ * thread adapter must derive them from one immutable contract.  Keeping these
+ * values here (rather than duplicating them in the authority) prevents a
+ * newly-created thread from being unadoptable immediately after bootstrap.
+ */
+export const PROJECT_HUMAN_THREAD_SOURCE = 'registry+codex-state' as const;
+
+export type ProjectHumanThreadLocatorInput = {
+  projectName: string;
+  projectRoot: string;
+  conversationId: string;
+  dev: string;
+  ino: string;
+  launcherDirectory?: string;
+  tmuxExecutable?: string;
+  sessionExecutable?: string;
+};
+
+export type ProjectHumanThreadLocator = {
+  label: string;
+  source: typeof PROJECT_HUMAN_THREAD_SOURCE;
+  command: string;
+  launcher: string;
+  content: string;
+};
+
+export function projectHumanThreadLabel(projectName: string): string {
+  if (!/^[^\r\n\t]{1,120}$/.test(projectName) || projectName.trim() !== projectName) {
+    throw new Error('project_human_thread_project_name_invalid');
+  }
+  return `This is the dedicated Roadex human interaction thread for the ${projectName} project. Do not use another thread for human interaction.`;
+}
+
+export function projectHumanThreadLocator(input: ProjectHumanThreadLocatorInput): ProjectHumanThreadLocator {
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(input.conversationId)) {
+    throw new Error('project_human_thread_conversation_identity_invalid');
+  }
+  if (!/^\d+$/.test(input.dev) || !/^\d+$/.test(input.ino)) {
+    throw new Error('project_human_thread_root_identity_invalid');
+  }
+  const command = `codex-${slugify(input.projectName)}-${input.conversationId.slice(0, 8)}`;
+  const launcherDirectory = input.launcherDirectory ?? '/home/god/.local/bin';
+  const launcher = `${launcherDirectory}/${command}`;
+  return {
+    label: projectHumanThreadLabel(input.projectName),
+    source: PROJECT_HUMAN_THREAD_SOURCE,
+    command,
+    launcher,
+    content: projectHumanThreadLauncherContent({
+      ...input,
+      command,
+      launcher,
+      tmuxExecutable: input.tmuxExecutable ?? '/usr/bin/tmux',
+      sessionExecutable: input.sessionExecutable ?? '/home/god/.local/bin/codex-memory-session',
+    }),
+  };
+}
+
+export function projectHumanThreadLauncherContent(input: {
+  command: string;
+  launcher: string;
+  projectRoot: string;
+  dev: string;
+  ino: string;
+  conversationId: string;
+  tmuxExecutable: string;
+  sessionExecutable: string;
+}): string {
+  const worker = [input.launcher, '--worker'].map(shellQuote).join(' ');
+  return `#!/usr/bin/python3
+import fcntl
+import os
+import sys
+
+ROOT = ${JSON.stringify(input.projectRoot)}
+EXPECTED_DEV = ${JSON.stringify(input.dev)}
+EXPECTED_INO = ${JSON.stringify(input.ino)}
+TMUX = ${JSON.stringify(input.tmuxExecutable)}
+SESSION = ${JSON.stringify(input.sessionExecutable)}
+COMMAND = ${JSON.stringify(input.command)}
+CONVERSATION = ${JSON.stringify(input.conversationId)}
+WORKER = ${JSON.stringify(worker)}
+
+if sys.argv[1:] == ["--worker"]:
+    fd = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    stat = os.fstat(fd)
+    if str(stat.st_dev) != EXPECTED_DEV or str(stat.st_ino) != EXPECTED_INO:
+        raise SystemExit("project human thread root identity changed")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit("project human thread already has a writer")
+    os.set_inheritable(fd, True)
+    os.chdir(ROOT)
+    os.execv(SESSION, [SESSION, "resume", CONVERSATION, "--cd", ROOT])
+
+if sys.argv[1:]:
+    raise SystemExit("invalid project human thread launcher arguments")
+os.execv(TMUX, [TMUX, "new-session", "-A", "-s", COMMAND, "-c", ROOT, WORKER])
+`;
+}
+
 const CODEX_BIN = '/home/god/.local/bin/codex';
 const PYTHON_BIN = '/usr/bin/python3';
 const REGISTRAR = '/home/god/codex_project_manager.py';
@@ -239,4 +342,13 @@ function verifyRegistration(
     || record.projectName !== projectName
     || record.threadId !== threadId
   ) throw new Error('registrar_response_invalid');
+}
+
+function slugify(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'codex';
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, `\'"'"'`)}'`;
 }
