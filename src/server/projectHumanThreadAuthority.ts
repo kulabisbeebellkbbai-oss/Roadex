@@ -10,6 +10,7 @@ import {
   bootstrapControlledThread,
   projectHumanThreadLocator,
   PROJECT_HUMAN_THREAD_SOURCE,
+  readBootstrapReceipt,
   registerControlledHumanThread,
   retireControlledHumanThread,
 } from './projectThreadRegistrar.js';
@@ -38,7 +39,7 @@ export function isProjectHumanThreadCreateNoSideEffect(error: unknown): error is
 type AuthorityOptions = {
   stateDatabasePath?: string;
   env?: NodeJS.ProcessEnv;
-  createControlledThread?: (projectRoot: string) => Promise<string>;
+  createControlledThread?: (projectRoot: string, operationId?: string) => Promise<string>;
   registryPath?: string;
   launcherDirectory?: string;
   sessionExecutable?: string;
@@ -51,7 +52,8 @@ type ThreadRow = { id: string; cwd: string; archived: number; created_at: number
 
 export class ProjectHumanThreadAuthority {
   readonly #stateDatabasePath: string;
-  readonly #createControlledThread: (projectRoot: string) => Promise<string>;
+  readonly #createControlledThread: (projectRoot: string, operationId?: string) => Promise<string>;
+  readonly #env: NodeJS.ProcessEnv;
   readonly #registerControlledThread: (candidate: ProjectHumanThreadCandidate) => Promise<void>;
   readonly #registryPath: string;
   readonly #launcherDirectory: string;
@@ -63,9 +65,10 @@ export class ProjectHumanThreadAuthority {
 
   constructor(options: AuthorityOptions = {}) {
     const env = options.env ?? process.env;
+    this.#env = env;
     this.#stateDatabasePath = options.stateDatabasePath ?? env.CODEX_STATE_DATABASE ?? '/home/god/.codex/state_5.sqlite';
     this.#createControlledThread = options.createControlledThread
-      ?? ((projectRoot) => bootstrapControlledThread(projectRoot, env));
+      ?? ((projectRoot, operationId) => bootstrapControlledThread(projectRoot, env, operationId));
     this.#registerControlledThread = options.createControlledThread
       ? async () => undefined
       : async (candidate) => registerControlledHumanThread(
@@ -141,10 +144,16 @@ export class ProjectHumanThreadAuthority {
     return await this.registerCreated(candidate);
   }
 
-  async bootstrap(projectRoot: string): Promise<ProjectHumanThreadCandidate> {
+  async bootstrap(projectRoot: string, operationId?: string): Promise<ProjectHumanThreadCandidate> {
     const canonicalPath = this.#withRoot(projectRoot, (root) => root.canonicalPath);
-    const conversationId = await this.#createControlledThread(canonicalPath);
+    const conversationId = await this.#createControlledThread(canonicalPath, operationId);
     return this.inspect(canonicalPath, conversationId);
+  }
+
+  recoverBootstrap(projectRoot: string, operationId: string): ProjectHumanThreadCandidate | undefined {
+    const canonicalPath = this.#withRoot(projectRoot, (root) => root.canonicalPath);
+    const conversationId = readBootstrapReceipt(operationId, canonicalPath, this.#env);
+    return conversationId ? this.inspect(canonicalPath, conversationId) : undefined;
   }
 
   async registerCreated(candidate: ProjectHumanThreadCandidate): Promise<ProjectHumanThreadCandidate> {

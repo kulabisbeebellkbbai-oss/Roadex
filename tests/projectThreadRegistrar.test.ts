@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
+import { chmodSync, mkdtempSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   controlledBootstrapArgs,
   controlledBootstrapEnvironment,
   createProjectThreadFinalizer,
   projectHumanThreadLocator,
+  persistBootstrapReceipt,
   PROJECT_HUMAN_THREAD_SOURCE,
+  readBootstrapReceipt,
 } from '../src/server/projectThreadRegistrar';
 
 describe('controlled project thread finalizer', () => {
@@ -79,5 +85,22 @@ describe('controlled project thread finalizer', () => {
       LEASE_TOKEN: 'secret',
     });
     expect(environment).toEqual({ HOME: '/tmp/home', PATH: '/bin' });
+  });
+
+  it('persists one exact operation-bound bootstrap receipt for restart recovery', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'roadex-bootstrap-receipts-'));
+    const env = { ROADEX_PROJECT_HUMAN_THREAD_BOOTSTRAP_RECEIPT_DIR: directory };
+    const operationId = 'human-thread:arcade:create-1';
+    const projectRoot = '/workspace/Arcade';
+    const threadId = '01a01569-7874-7f72-bca9-9c91bb869846';
+    persistBootstrapReceipt(operationId, projectRoot, threadId, env);
+    persistBootstrapReceipt(operationId, projectRoot, threadId, env);
+    expect(readBootstrapReceipt(operationId, projectRoot, env)).toBe(threadId);
+    expect(() => persistBootstrapReceipt(
+      operationId, projectRoot, '01a01569-7874-7f72-bca9-9c91bb869847', env,
+    )).toThrow();
+    const receipt = join(directory, `${createHash('sha256').update(operationId).digest('hex')}.json`);
+    chmodSync(receipt, 0o644);
+    expect(() => readBootstrapReceipt(operationId, projectRoot, env)).toThrow(/receipt_invalid/);
   });
 });

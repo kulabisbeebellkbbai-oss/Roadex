@@ -1,5 +1,9 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
+import {
+  closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
+  openSync, readFileSync, realpathSync, writeSync,
+} from 'node:fs';
 import path from 'node:path';
 import { buildCodexExecArgs, parseCodexJsonlStream } from './codexRunner.js';
 import { CONTROLLED_RUNNER_PROFILE } from './runnerCapabilityProfile.js';
@@ -205,7 +209,11 @@ export function controlledBootstrapEnvironment(env: NodeJS.ProcessEnv): NodeJS.P
   );
 }
 
-export async function bootstrapControlledThread(projectRoot: string, env: NodeJS.ProcessEnv): Promise<string> {
+export async function bootstrapControlledThread(
+  projectRoot: string,
+  env: NodeJS.ProcessEnv,
+  operationId?: string,
+): Promise<string> {
   const rootStat = await import('node:fs').then(({ statSync }) => statSync(projectRoot));
   const child = spawn(PYTHON_BIN, [
     '-I', '-S', '-c', ROOT_LOCKED_BOOTSTRAP,
@@ -236,10 +244,17 @@ export async function bootstrapControlledThread(projectRoot: string, env: NodeJS
       if (bytes > 64_000) throw new Error('bootstrap_output_too_large');
       const parsed = parseCodexJsonlStream(buffer + String(chunk));
       buffer = parsed.remainder;
-      threadId = parsed.codexThreadId ?? threadId;
+      if (parsed.codexThreadId && parsed.codexThreadId !== threadId) {
+        threadId = parsed.codexThreadId;
+        if (operationId) persistBootstrapReceipt(operationId, projectRoot, threadId, env);
+      }
     }
     if (buffer.trim()) {
-      threadId = parseCodexJsonlStream(`${buffer}\n`).codexThreadId ?? threadId;
+      const parsedThreadId = parseCodexJsonlStream(`${buffer}\n`).codexThreadId;
+      if (parsedThreadId && parsedThreadId !== threadId) {
+        threadId = parsedThreadId;
+        if (operationId) persistBootstrapReceipt(operationId, projectRoot, threadId, env);
+      }
     }
     exitCode = await completion;
   } catch (error) {
@@ -255,6 +270,80 @@ export async function bootstrapControlledThread(projectRoot: string, env: NodeJS
     throw error;
   }
   return threadId;
+}
+
+export function readBootstrapReceipt(
+  operationId: string,
+  projectRoot: string,
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  const receiptPath = bootstrapReceiptPath(operationId, env);
+  let lexical;
+  try { lexical = lstatSync(receiptPath); } catch { return undefined; }
+  if (!lexical.isFile() || lexical.isSymbolicLink() || lexical.nlink !== 1
+    || lexical.uid !== process.getuid?.() || (lexical.mode & 0o777) !== 0o600 || lexical.size > 8_192) {
+    throw new Error('project_human_thread_bootstrap_receipt_invalid');
+  }
+  const fd = openSync(receiptPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(fd);
+    if (opened.dev !== lexical.dev || opened.ino !== lexical.ino) throw new Error('project_human_thread_bootstrap_receipt_changed');
+    const value = JSON.parse(readFileSync(fd, 'utf8')) as unknown;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('project_human_thread_bootstrap_receipt_invalid');
+    const record = value as Record<string, unknown>;
+    if (Object.keys(record).sort().join(',') !== 'operationId,projectRoot,schemaVersion,threadId'
+      || record.schemaVersion !== 'roadex.project-human-thread-bootstrap-receipt.v1'
+      || record.operationId !== operationId || record.projectRoot !== projectRoot
+      || typeof record.threadId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(record.threadId)) {
+      throw new Error('project_human_thread_bootstrap_receipt_invalid');
+    }
+    return record.threadId;
+  } finally { closeSync(fd); }
+}
+
+export function persistBootstrapReceipt(
+  operationId: string,
+  projectRoot: string,
+  threadId: string,
+  env: NodeJS.ProcessEnv,
+): void {
+  const receiptPath = bootstrapReceiptPath(operationId, env);
+  const content = JSON.stringify({
+    schemaVersion: 'roadex.project-human-thread-bootstrap-receipt.v1',
+    operationId,
+    projectRoot,
+    threadId,
+  });
+  try {
+    const fd = openSync(receiptPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    try {
+      const bytes = Buffer.from(content);
+      let offset = 0;
+      while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset);
+      fsyncSync(fd);
+      fchmodSync(fd, 0o600);
+    } finally { closeSync(fd); }
+    const parentFd = openSync(path.dirname(receiptPath), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try { fsyncSync(parentFd); } finally { closeSync(parentFd); }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST'
+      || readBootstrapReceipt(operationId, projectRoot, env) !== threadId) throw error;
+  }
+}
+
+function bootstrapReceiptPath(operationId: string, env: NodeJS.ProcessEnv): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(operationId)) {
+    throw new Error('project_human_thread_bootstrap_operation_invalid');
+  }
+  const directory = env.ROADEX_PROJECT_HUMAN_THREAD_BOOTSTRAP_RECEIPT_DIR
+    ?? '/home/god/.local/share/roadex/project-human-thread/bootstrap-receipts';
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const lexical = lstatSync(directory);
+  if (!lexical.isDirectory() || lexical.isSymbolicLink() || lexical.uid !== process.getuid?.()
+    || (lexical.mode & 0o077) !== 0 || realpathSync(directory) !== directory) {
+    throw new Error('project_human_thread_bootstrap_receipt_directory_invalid');
+  }
+  return path.join(directory, `${createHash('sha256').update(operationId).digest('hex')}.json`);
 }
 
 export async function registerControlledHumanThread(

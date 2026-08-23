@@ -19,6 +19,7 @@ class FakeAuthority {
   available: ProjectHumanThreadCandidate[] = [];
   proven: ProjectHumanThreadCandidate[] = [];
   created: ProjectHumanThreadCandidate[] = [];
+  receipts = new Map<string, ProjectHumanThreadCandidate>();
   preparedReplacements: string[] = [];
   candidates(projectRoot: string) { return projectRoot === root ? [...this.available] : []; }
   adoptableCandidates(projectRoot: string) { return projectRoot === root ? [...this.proven] : []; }
@@ -39,7 +40,15 @@ class FakeAuthority {
     this.available.push(value);
     return value;
   }
-  async bootstrap(projectRoot: string) { return await this.create(projectRoot); }
+  async bootstrap(projectRoot: string, operationId?: string) {
+    const candidate = await this.create(projectRoot);
+    if (operationId) this.receipts.set(operationId, candidate);
+    return candidate;
+  }
+  recoverBootstrap(projectRoot: string, operationId: string) {
+    const candidate = this.receipts.get(operationId);
+    return candidate?.canonicalPath === projectRoot ? candidate : undefined;
+  }
   async registerCreated(candidate: ProjectHumanThreadCandidate) {
     if (!this.proven.some((item) => item.conversationId === candidate.conversationId)) this.proven.push(candidate);
     return candidate;
@@ -166,6 +175,21 @@ describe('ProjectHumanThreadService', () => {
     expect(bootstrap).toHaveBeenCalledTimes(2);
   });
 
+  it('recovers an exact bootstrap receipt after a crash before the creation candidate write', async () => {
+    const { authority, service, store } = setup();
+    store.beginCreationIntent('arcade', request.idempotencyKey, {
+      projectRoot: root, provenanceDigest: request.provenanceDigest,
+    }, { canonicalPath: root, dev: first.dev, ino: first.ino });
+    store.markCreationStarted('arcade', request.idempotencyKey);
+    authority.available.push(first);
+    authority.receipts.set(request.idempotencyKey, first);
+    const bootstrap = vi.spyOn(authority, 'bootstrap');
+    await expect(service.createMissing(request)).resolves.toMatchObject({
+      outcome: 'created', binding: { conversationId: first.conversationId },
+    });
+    expect(bootstrap).not.toHaveBeenCalled();
+  });
+
   it('persists the exact bootstrapped identity before registration and resumes that registration', async () => {
     const { authority, service, store } = setup();
     authority.created.push(first);
@@ -200,6 +224,36 @@ describe('ProjectHumanThreadService', () => {
       outcome: 'replaced', binding: { conversationId: second.conversationId, creationMode: 'created' },
     });
     expect(bootstrap).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers an exact replacement bootstrap receipt after a crash before candidate persistence', async () => {
+    const { authority, service, store } = setup();
+    authority.created.push(first);
+    await service.createMissing(request);
+    const replacement = {
+      ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered',
+      idempotencyKey: 'replace:arcade:bootstrap-receipt',
+    };
+    const beginEventId = `${replacement.idempotencyKey}:begin`;
+    store.beginReplacement(
+      'arcade', 1, replacement.reason, '2026-08-22T12:00:01.000Z', beginEventId,
+      {
+        idempotencyKey: replacement.idempotencyKey,
+        expectedGeneration: 1,
+        projectRoot: root,
+        provenanceDigest: replacement.provenanceDigest,
+        reason: replacement.reason,
+      },
+      { canonicalPath: root, dev: second.dev, ino: second.ino },
+    );
+    store.markReplacementCreateStarted('arcade', beginEventId);
+    authority.available.push(second);
+    authority.receipts.set(beginEventId, second);
+    const bootstrap = vi.spyOn(authority, 'bootstrap');
+    await expect(service.replace(replacement)).resolves.toMatchObject({
+      outcome: 'replaced', binding: { conversationId: second.conversationId, creationMode: 'created' },
+    });
+    expect(bootstrap).not.toHaveBeenCalled();
   });
 
   it('offers explicit adoption when an ambiguous create left one verifiable candidate', async () => {

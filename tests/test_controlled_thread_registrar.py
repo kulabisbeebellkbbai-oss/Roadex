@@ -188,6 +188,7 @@ class ControlledThreadRegistrarTests(unittest.TestCase):
         self.assertTrue(second["alreadyRetired"])
         with self.paths.registry.open(encoding="utf-8") as handle:
             row = next(csv.DictReader(handle))
+        self.assertIn("roadex-retired-generation=1", row["notes"])
         launcher = Path(row["launcher"])
         tombstone = f"# retired Roadex human interaction thread {self.thread_id}\n"
         self.assertEqual(launcher.read_text(encoding="utf-8"), tombstone)
@@ -204,6 +205,74 @@ class ControlledThreadRegistrarTests(unittest.TestCase):
         self.assertEqual(launcher.read_text(encoding="utf-8"), tombstone)
         with self.assertRaisesRegex(RuntimeError, "retired"):
             manager.start_resume_tmux(rows[self.thread_id], attach=False)
+
+    def test_sync_never_reactivates_a_retired_row_after_tombstone_loss(self):
+        self.register()
+        manager.retire_controlled_thread(
+            self.retirement_request(), paths=self.paths, enabled=True,
+            hmac_key=self.key, audit_hmac_key=self.audit_key,
+        )
+        rows = manager._read_registry_from(self.paths.registry, self.paths.link_dir)
+        item = rows[self.thread_id]
+        item.launcher.unlink()
+        with mock.patch.multiple(
+            manager,
+            REGISTRY=self.paths.registry,
+            LINK_DIR=self.paths.link_dir,
+            merge_conversations=mock.Mock(return_value=rows),
+        ):
+            synced = manager.sync_registry_and_launchers()
+        self.assertFalse(item.launcher.exists())
+        with self.assertRaisesRegex(RuntimeError, "retired"):
+            manager.start_resume_tmux(synced[self.thread_id], attach=False)
+
+    def test_sync_does_not_claim_a_state_only_thread_before_registrar(self):
+        command = manager.command_for(self.project, self.thread_id)
+        launcher = self.paths.link_dir / command
+        discovered = manager.Conversation(
+            conversation_id=self.thread_id,
+            label=self.thread_id,
+            project=self.project,
+            command=command,
+            launcher=launcher,
+            created_at="",
+            updated_at="",
+            source="codex-state",
+            notes="",
+        )
+        self.paths.registry.parent.mkdir(parents=True)
+        self.paths.link_dir.mkdir(parents=True)
+        with mock.patch.multiple(
+            manager,
+            REGISTRY=self.paths.registry,
+            LINK_DIR=self.paths.link_dir,
+            merge_conversations=mock.Mock(return_value={self.thread_id: discovered}),
+        ):
+            self.assertEqual(manager.sync_registry_and_launchers(), {})
+        self.assertFalse(launcher.exists())
+        with self.paths.registry.open(encoding="utf-8") as handle:
+            self.assertEqual(list(csv.DictReader(handle)), [])
+
+    def test_ordinary_registration_cannot_overwrite_a_controlled_row(self):
+        self.register()
+        rows = manager._read_registry_from(self.paths.registry, self.paths.link_dir)
+        controlled = rows[self.thread_id]
+        ordinary = manager.Conversation(
+            conversation_id=controlled.conversation_id,
+            label=controlled.conversation_id,
+            project=controlled.project,
+            command=controlled.command,
+            launcher=controlled.launcher,
+            created_at=controlled.created_at,
+            updated_at=controlled.updated_at,
+            source="codex-state",
+            notes="",
+        )
+        before = self.paths.registry.read_bytes()
+        with mock.patch.multiple(manager, REGISTRY=self.paths.registry, LINK_DIR=self.paths.link_dir):
+            with self.assertRaisesRegex(RuntimeError, "reserved"):
+                manager.register_conversation(ordinary)
+        self.assertEqual(self.paths.registry.read_bytes(), before)
 
     def test_concurrent_duplicate_creates_one_row(self):
         results = []
