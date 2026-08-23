@@ -25,7 +25,7 @@ export async function getProjectHumanThreadConversation(token: string | undefine
   const payload = await requestRoadex<{ ok: true } & ProjectHumanThreadConversationPublic>(
     `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread/conversation`, { token },
   );
-  if (!payload.ok || !isConversation(payload, projectId)) throw new Error('Project human thread conversation response is invalid.');
+  if (!isConversation(payload, projectId)) throw new Error('Project human thread conversation response is invalid.');
   return payload;
 }
 
@@ -40,21 +40,52 @@ export async function submitProjectHumanThreadTurn(
     `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread/conversation/messages`,
     { method: 'POST', token, body: { content, correlationId }, headers: { 'idempotency-key': idempotencyKey } },
   );
-  if (!payload.ok || !isTurn(payload.turn, projectId)) throw new Error('Project human thread turn response is invalid.');
+  if (!isExactRecord(payload, ['ok', 'turn']) || payload.ok !== true
+    || !isTurn(payload.turn, projectId)
+    || payload.turn.content !== content
+    || payload.turn.correlationId !== correlationId
+    || payload.turn.idempotencyKey !== idempotencyKey) {
+    throw new Error('Project human thread turn response is invalid.');
+  }
   return payload.turn;
 }
 
 function isConversation(value: unknown, projectId: string): value is ProjectHumanThreadConversationPublic & { ok: true } {
-  if (!value || typeof value !== 'object') return false;
+  if (!isExactRecord(value, ['ok', 'conversationId', 'generation', 'turns']) || value.ok !== true) return false;
   const record = value as Record<string, unknown>;
-  return typeof record.conversationId === 'string' && typeof record.generation === 'number'
-    && Array.isArray(record.turns) && record.turns.every((turn) => isTurn(turn, projectId));
+  return isUuid(record.conversationId) && isPositiveInteger(record.generation)
+    && Array.isArray(record.turns) && record.turns.length <= 1_000
+    && record.turns.every((turn) => isTurn(turn, projectId, record.conversationId, record.generation));
 }
-function isTurn(value: unknown, projectId: string): value is ProjectHumanThreadTurnPublic {
-  if (!value || typeof value !== 'object') return false;
+function isTurn(value: unknown, projectId: string, conversationId?: unknown, generation?: unknown): value is ProjectHumanThreadTurnPublic {
+  if (!isExactRecord(value, [
+    'turnId', 'projectId', 'conversationId', 'generation', 'content', 'correlationId',
+    'idempotencyKey', 'state', 'assistantOutput?', 'error?', 'createdAt', 'updatedAt',
+  ])) return false;
   const turn = value as Record<string, unknown>;
-  return turn.projectId === projectId && typeof turn.turnId === 'string' && typeof turn.conversationId === 'string'
-    && typeof turn.generation === 'number' && typeof turn.content === 'string' && typeof turn.correlationId === 'string'
-    && typeof turn.idempotencyKey === 'string' && ['queued', 'running', 'completed', 'failed', 'reconciliation-required'].includes(String(turn.state))
-    && typeof turn.createdAt === 'string' && typeof turn.updatedAt === 'string';
+  const state = String(turn.state);
+  const hasOutput = Object.prototype.hasOwnProperty.call(turn, 'assistantOutput');
+  const hasError = Object.prototype.hasOwnProperty.call(turn, 'error');
+  return turn.projectId === projectId && (conversationId === undefined || turn.conversationId === conversationId)
+    && (generation === undefined || turn.generation === generation)
+    && isId(turn.turnId) && isUuid(turn.conversationId) && isPositiveInteger(turn.generation)
+    && typeof turn.content === 'string' && turn.content === turn.content.trim() && turn.content.length >= 1 && turn.content.length <= 6_000
+    && isId(turn.correlationId) && isId(turn.idempotencyKey)
+    && ['queued', 'running', 'completed', 'failed', 'reconciliation-required'].includes(state)
+    && isTimestamp(turn.createdAt) && isTimestamp(turn.updatedAt)
+    && (!hasOutput || typeof turn.assistantOutput === 'string' && turn.assistantOutput.length <= 32_768)
+    && (!hasError || typeof turn.error === 'string' && turn.error.length >= 1 && turn.error.length <= 1_000)
+    && (state === 'completed' ? hasOutput && !hasError : state === 'failed' || state === 'reconciliation-required' ? hasError && !hasOutput : !hasOutput && !hasError);
 }
+
+function isExactRecord(value: unknown, allowed: string[]): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const required = new Set(allowed.filter((key) => !key.endsWith('?')));
+  const permitted = new Set(allowed.map((key) => key.replace(/\?$/, '')));
+  const keys = Object.keys(value);
+  return keys.every((key) => permitted.has(key)) && [...required].every((key) => keys.includes(key));
+}
+function isId(value: unknown): value is string { return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(value); }
+function isUuid(value: unknown): value is string { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value); }
+function isPositiveInteger(value: unknown): value is number { return typeof value === 'number' && Number.isInteger(value) && value > 0; }
+function isTimestamp(value: unknown): value is string { return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value)); }

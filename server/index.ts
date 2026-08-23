@@ -803,6 +803,11 @@ function getProjectHumanThreadController(): ProjectHumanThreadController {
   projectHumanThreadStore = new ProjectHumanThreadStore();
   projectHumanThreadAuthority = new ProjectHumanThreadAuthority();
   projectHumanThreadService = new ProjectHumanThreadService(projectHumanThreadStore, projectHumanThreadAuthority);
+  // Every workspace accepted by Roadex is governed by exactly one project
+  // human-interaction thread. Session APIs call this only after resolving a
+  // server-approved workspace, so keeping the root-level authority always on
+  // also fences imported or repaired projects before their binding exists.
+  state.isProjectHumanThreadProject = () => true;
   state.isProjectHumanThreadConversation = (conversationId) => (
     projectHumanThreadService?.isBoundConversation(conversationId) ?? false
   );
