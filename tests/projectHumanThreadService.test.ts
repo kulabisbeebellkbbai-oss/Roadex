@@ -152,6 +152,20 @@ describe('ProjectHumanThreadService', () => {
     expect(store.creationIntent('arcade')).toMatchObject({ state: 'prepared', eventId: request.idempotencyKey });
   });
 
+  it('retries initial creation only after an exact typed no-side-effect result', async () => {
+    const { authority, service } = setup();
+    authority.created.push(first);
+    const noEffect = Object.assign(new Error('bootstrap rejected before create'), { createEffect: 'none' as const });
+    const bootstrap = vi.spyOn(authority, 'bootstrap')
+      .mockRejectedValueOnce(noEffect)
+      .mockImplementation(async (projectRoot) => authority.create(projectRoot));
+    await expect(service.createMissing(request)).rejects.toThrow(/before create/);
+    await expect(service.createMissing(request)).resolves.toMatchObject({
+      outcome: 'created', binding: { conversationId: first.conversationId },
+    });
+    expect(bootstrap).toHaveBeenCalledTimes(2);
+  });
+
   it('persists the exact bootstrapped identity before registration and resumes that registration', async () => {
     const { authority, service, store } = setup();
     authority.created.push(first);

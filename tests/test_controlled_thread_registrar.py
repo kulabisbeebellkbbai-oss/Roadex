@@ -288,6 +288,76 @@ class ControlledThreadRegistrarTests(unittest.TestCase):
         with self.paths.registry.open(encoding="utf-8") as handle:
             self.assertEqual(len(list(csv.DictReader(handle))), 1)
 
+    def test_sync_adopts_an_exact_orphan_launcher_without_downgrading_it(self):
+        original_replace = manager.os.replace
+        calls = 0
+
+        def crash_second(source, target):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise KeyboardInterrupt("injected crash")
+            return original_replace(source, target)
+
+        with mock.patch.object(manager.os, "replace", side_effect=crash_second):
+            with self.assertRaises(KeyboardInterrupt):
+                self.register()
+        launcher = next(self.paths.link_dir.glob("codex-*"))
+        locked = launcher.read_text(encoding="utf-8")
+        command = launcher.name
+        discovered = manager.Conversation(
+            conversation_id=self.thread_id,
+            label=self.thread_id,
+            project=self.project,
+            command=command,
+            launcher=launcher,
+            created_at="",
+            updated_at="",
+            source="codex-state",
+            notes="",
+        )
+        with mock.patch.multiple(
+            manager,
+            REGISTRY=self.paths.registry,
+            LINK_DIR=self.paths.link_dir,
+            merge_conversations=mock.Mock(return_value={self.thread_id: discovered}),
+        ):
+            manager.sync_registry_and_launchers()
+        self.assertEqual(launcher.read_text(encoding="utf-8"), locked)
+        with self.paths.registry.open(encoding="utf-8") as handle:
+            self.assertEqual(list(csv.DictReader(handle)), [])
+        self.assertFalse(self.register()["alreadyRegistered"])
+        with self.paths.registry.open(encoding="utf-8") as handle:
+            row = next(csv.DictReader(handle))
+        self.assertEqual(row["source"], "registry+codex-state")
+        self.assertEqual(row["label"], manager._project_human_thread_label(self.project.name))
+
+    def test_human_purpose_resume_rejects_missing_or_mismatched_launcher(self):
+        self.register()
+        rows = manager._read_registry_from(self.paths.registry, self.paths.link_dir)
+        item = rows[self.thread_id]
+        item.launcher.unlink()
+        with self.assertRaisesRegex(RuntimeError, "launcher is unavailable"):
+            manager.start_resume_tmux(item, attach=False)
+        item.launcher.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        item.launcher.chmod(0o755)
+        with self.assertRaisesRegex(RuntimeError, "launcher is unavailable"):
+            manager.start_resume_tmux(item, attach=False)
+
+    def test_atomic_sync_failure_preserves_existing_registry_bytes(self):
+        self.register()
+        before = self.paths.registry.read_bytes()
+        rows = manager._read_registry_from(self.paths.registry, self.paths.link_dir)
+        with mock.patch.multiple(
+            manager,
+            REGISTRY=self.paths.registry,
+            LINK_DIR=self.paths.link_dir,
+            merge_conversations=mock.Mock(return_value=rows),
+        ), mock.patch.object(manager.os, "replace", side_effect=OSError("injected")):
+            with self.assertRaises(OSError):
+                manager.sync_registry_and_launchers()
+        self.assertEqual(self.paths.registry.read_bytes(), before)
+
     def test_post_registry_fsync_failure_preserves_reconcilable_pair(self):
         original_fsync = manager._fsync_directory
         calls = 0

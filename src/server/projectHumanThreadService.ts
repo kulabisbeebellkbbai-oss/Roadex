@@ -72,8 +72,12 @@ export class ProjectHumanThreadService {
     const intent = this.#store.beginCreationIntent(prepared.projectId, input.idempotencyKey, {
       projectRoot: prepared.projectRoot, provenanceDigest: input.provenanceDigest,
     }, prepared.root);
-    if (!intent.inserted) return { outcome: 'reconciliation-required', candidates: [] };
-    this.#store.markCreationStarted(prepared.projectId, input.idempotencyKey);
+    if (!intent.inserted && priorIntent?.createPhase !== 'not-started') {
+      return { outcome: 'reconciliation-required', candidates: [] };
+    }
+    if (!this.#store.markCreationStarted(prepared.projectId, input.idempotencyKey)) {
+      return { outcome: 'reconciliation-required', candidates: [] };
+    }
     let candidate: ProjectHumanThreadCandidate;
     try {
       candidate = await this.#authority.bootstrap(prepared.projectRoot);
@@ -282,7 +286,9 @@ export class ProjectHumanThreadService {
     } else if (replacementPhase !== 'not-started') {
       return { outcome: 'reconciliation-required', candidates: [] };
     } else {
-      this.#store.markReplacementCreateStarted(operation.projectId, beginEventId);
+      if (!this.#store.markReplacementCreateStarted(operation.projectId, beginEventId)) {
+        return { outcome: 'reconciliation-required', candidates: [] };
+      }
       try {
         candidate = await this.#authority.bootstrap(operation.projectRoot);
         // A returned candidate is the durable operation identity. Persist it

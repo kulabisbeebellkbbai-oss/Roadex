@@ -203,10 +203,11 @@ export class ProjectHumanThreadStore {
     } : undefined;
   }
 
-  markCreationStarted(projectId: string, eventId: string): void {
+  markCreationStarted(projectId: string, eventId: string): boolean {
     const result = this.#db.prepare(`UPDATE project_human_thread_creation_intents SET create_phase='creating'
       WHERE project_id=? AND event_id=? AND state='prepared' AND create_phase='not-started'`).run(projectId, eventId);
-    if (Number(result.changes) === 1 || this.creationIntent(projectId)?.createPhase === 'creating') return;
+    if (Number(result.changes) === 1) return true;
+    if (this.creationIntent(projectId)?.createPhase === 'creating') return false;
     throw new Error('Project human thread creation phase conflict.');
   }
 
@@ -360,15 +361,15 @@ export class ProjectHumanThreadStore {
     };
   }
 
-  markReplacementCreateStarted(projectId: string, eventId: string): void {
+  markReplacementCreateStarted(projectId: string, eventId: string): boolean {
     const result = this.#db.prepare(`
       UPDATE project_human_thread_replacement_intents SET create_phase='creating'
       WHERE project_id=? AND event_id=? AND state='prepared' AND create_phase='not-started'
     `).run(projectId, eventId);
-    if (Number(result.changes) === 1) return;
+    if (Number(result.changes) === 1) return true;
     const existing = this.replacementIntent(projectId);
     if (existing?.eventId !== eventId || existing.state !== 'prepared') throw new Error('Project human thread replacement intent is missing.');
-    if (existing.createPhase === 'creating') return;
+    if (existing.createPhase === 'creating') return false;
     throw new Error('Project human thread replacement create phase conflict.');
   }
 
