@@ -144,6 +144,8 @@ describe('ProjectHumanThreadAuthority', () => {
     writeFileSync(launcher, `#!/usr/bin/env bash\nset -euo pipefail\n\nexec /usr/bin/tmux new-session -A -s ${command} -c ${fixture.project} '/safe/codex-memory-session resume ${threadId} --cd ${fixture.project}'\n`);
     chmodSync(launcher, 0o755);
     let live = true;
+    let retiredMarker = '';
+    let processName = 'codex';
     const calls: string[][] = [];
     const authority = new ProjectHumanThreadAuthority({
       stateDatabasePath: fixture.state, registryPath: registry, launcherDirectory: launchers,
@@ -151,9 +153,21 @@ describe('ProjectHumanThreadAuthority', () => {
       runTmux: ((_file: string, args: string[]) => {
         calls.push(args);
         if (args[0] === 'kill-session') { live = false; return Buffer.from(''); }
+        if (args[0] === 'new-session') { live = true; processName = 'sleep'; return Buffer.from(''); }
+        if (args[0] === 'set-option') { retiredMarker = args.at(-1) ?? ''; return Buffer.from(''); }
+        if (args[0] === 'show-options') {
+          if (live && retiredMarker) return Buffer.from(`${retiredMarker}\n`);
+          throw Object.assign(new Error('missing option'), { status: 1, stderr: Buffer.from('unknown option\n') });
+        }
+        if (args[0] === 'list-panes') return Buffer.from(`${processName}\n`);
         if (args[0] === 'has-session' && live) return Buffer.from('');
         throw Object.assign(new Error('absent'), { status: 1, stderr: Buffer.from(`can't find session: ${command}\n`) });
       }) as typeof import('node:child_process').execFileSync,
+      retireControlledThread: () => {
+        if (readFileSync(launcher, 'utf8') === `# retired Roadex human interaction thread ${threadId}\n`) return;
+        writeFileSync(launcher, `# retired Roadex human interaction thread ${threadId}\n`);
+        chmodSync(launcher, 0o444);
+      },
     });
     const candidate = authority.inspect(fixture.project, threadId);
     const value = {

@@ -1,10 +1,9 @@
 import {
   closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, openSync,
-  readFileSync, realpathSync, renameSync, unlinkSync, writeSync,
+  readFileSync, realpathSync, unlinkSync, writeSync,
 } from 'node:fs';
 import { basename, isAbsolute, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { parse } from 'csv-parse/sync';
 import {
@@ -12,6 +11,7 @@ import {
   projectHumanThreadLocator,
   PROJECT_HUMAN_THREAD_SOURCE,
   registerControlledHumanThread,
+  retireControlledHumanThread,
 } from './projectThreadRegistrar.js';
 import type { ProjectHumanThreadBinding } from '../shared/projectHumanThreadContracts.js';
 
@@ -44,6 +44,7 @@ type AuthorityOptions = {
   sessionExecutable?: string;
   tmuxExecutable?: string;
   runTmux?: typeof execFileSync;
+  retireControlledThread?: (binding: ProjectHumanThreadBinding) => void;
 };
 
 type ThreadRow = { id: string; cwd: string; archived: number; created_at: number };
@@ -51,26 +52,38 @@ type ThreadRow = { id: string; cwd: string; archived: number; created_at: number
 export class ProjectHumanThreadAuthority {
   readonly #stateDatabasePath: string;
   readonly #createControlledThread: (projectRoot: string) => Promise<string>;
+  readonly #registerControlledThread: (candidate: ProjectHumanThreadCandidate) => Promise<void>;
   readonly #registryPath: string;
   readonly #launcherDirectory: string;
   readonly #sessionExecutable: string;
   readonly #tmuxExecutable: string;
   readonly #runTmux: typeof execFileSync;
+  readonly #retireControlledThread: (binding: ProjectHumanThreadBinding) => void;
+  readonly #requiresRegistrarProof: boolean;
 
   constructor(options: AuthorityOptions = {}) {
     const env = options.env ?? process.env;
     this.#stateDatabasePath = options.stateDatabasePath ?? env.CODEX_STATE_DATABASE ?? '/home/god/.codex/state_5.sqlite';
     this.#createControlledThread = options.createControlledThread
-      ?? (async (projectRoot) => {
-        const conversationId = await bootstrapControlledThread(projectRoot, env);
-        await registerControlledHumanThread(projectRoot, conversationId, env);
-        return conversationId;
-      });
+      ?? ((projectRoot) => bootstrapControlledThread(projectRoot, env));
+    this.#registerControlledThread = options.createControlledThread
+      ? async () => undefined
+      : async (candidate) => registerControlledHumanThread(
+        candidate.canonicalPath, candidate.conversationId, env,
+      );
+    this.#requiresRegistrarProof = !options.createControlledThread;
     this.#registryPath = options.registryPath ?? env.ROADEX_CODEX_PROJECTS_REGISTRY ?? '/home/god/.codex/codex-projects.csv';
     this.#launcherDirectory = options.launcherDirectory ?? '/home/god/.local/bin';
     this.#sessionExecutable = options.sessionExecutable ?? '/home/god/.local/bin/codex-memory-session';
     this.#tmuxExecutable = options.tmuxExecutable ?? '/usr/bin/tmux';
     this.#runTmux = options.runTmux ?? execFileSync;
+    this.#retireControlledThread = options.retireControlledThread
+      ?? ((binding) => retireControlledHumanThread({
+        projectId: binding.projectId,
+        projectRoot: binding.root.canonicalPath,
+        conversationId: binding.conversationId,
+        generation: binding.generation,
+      }, env));
   }
 
   rootIdentity(projectRoot: string): { canonicalPath: string; dev: string; ino: string } {
@@ -124,9 +137,25 @@ export class ProjectHumanThreadAuthority {
   }
 
   async create(projectRoot: string): Promise<ProjectHumanThreadCandidate> {
+    const candidate = await this.bootstrap(projectRoot);
+    return await this.registerCreated(candidate);
+  }
+
+  async bootstrap(projectRoot: string): Promise<ProjectHumanThreadCandidate> {
     const canonicalPath = this.#withRoot(projectRoot, (root) => root.canonicalPath);
     const conversationId = await this.#createControlledThread(canonicalPath);
     return this.inspect(canonicalPath, conversationId);
+  }
+
+  async registerCreated(candidate: ProjectHumanThreadCandidate): Promise<ProjectHumanThreadCandidate> {
+    const inspected = this.inspect(candidate.canonicalPath, candidate.conversationId);
+    if (inspected.dev !== candidate.dev || inspected.ino !== candidate.ino) {
+      throw new Error('Project human thread created identity changed.');
+    }
+    await this.#registerControlledThread(inspected);
+    return this.#requiresRegistrarProof
+      ? this.inspectAdoptable(inspected.canonicalPath, inspected.conversationId)
+      : this.inspect(inspected.canonicalPath, inspected.conversationId);
   }
 
   repair(binding: ProjectHumanThreadBinding): ProjectHumanThreadCandidate {
@@ -167,29 +196,12 @@ export class ProjectHumanThreadAuthority {
       || exact[0].command !== command || exact[0].launcher !== launcher) {
       throw new Error('Project human thread predecessor locator authority is unavailable.');
     }
-    const locked = this.#locator(candidate).content;
-    const legacy = legacyLauncherContent(
-      this.#tmuxExecutable, this.#sessionExecutable, command,
-      candidate.canonicalPath, candidate.conversationId,
-    );
     const retired = retiredLauncherContent(candidate.conversationId);
-    const current = this.#secureLauncherContent(launcher);
-    if (current !== retired) {
-      if (current !== locked && current !== legacy) {
-        throw new Error('Project human thread predecessor launcher conflicts with immutable identity.');
-      }
-      this.#replaceLauncherWithInert(launcher, retired);
+    this.#retireControlledThread(binding);
+    if (this.#secureLauncherContent(launcher) !== retired) {
+      throw new Error('Project human thread predecessor launcher retirement is unavailable.');
     }
-    if (this.#locatorIsLive(command)) {
-      try {
-        this.#runTmux(this.#tmuxExecutable, ['kill-session', '-t', `=${command}`], {
-          stdio: ['ignore', 'ignore', 'pipe'], timeout: 2_000,
-        });
-      } catch {
-        throw new Error('Project human thread predecessor writer could not be stopped.');
-      }
-    }
-    if (this.#locatorIsLive(command)) throw new Error('Project human thread predecessor writer is still active.');
+    this.#ensureRetiredTombstone(command, `${candidate.conversationId}:${binding.generation}`);
   }
 
   /**
@@ -336,30 +348,50 @@ export class ProjectHumanThreadAuthority {
     } finally { closeSync(fd); }
   }
 
-  #replaceLauncherWithInert(path: string, content: string): void {
-    const directory = lstatSync(this.#launcherDirectory);
-    if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== process.getuid?.()
-      || (directory.mode & 0o022) !== 0 || realpathSync(this.#launcherDirectory) !== this.#launcherDirectory) {
-      throw new Error('Project human thread launcher directory is unsafe.');
-    }
-    const temporary = join(this.#launcherDirectory, `.${basename(path)}.${randomUUID()}.retiring`);
-    const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o400);
-    try {
-      writeSync(fd, content);
-      fsyncSync(fd);
-      fchmodSync(fd, 0o444);
-      // The exact predecessor was validated immediately before publication.
-      this.#secureLauncherContent(path);
-      renameSync(temporary, path);
-      const directoryFd = openSync(this.#launcherDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-      try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
-      if (this.#secureLauncherContent(path) !== content) {
-        throw new Error('Project human thread predecessor launcher retirement was not durable.');
+  #ensureRetiredTombstone(command: string, marker: string): void {
+    if (this.#retiredTombstoneMatches(command, marker)) return;
+    if (this.#locatorIsLive(command)) this.#killLocator(command);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        this.#runTmux(this.#tmuxExecutable, [
+          'new-session', '-d', '-s', command, '/usr/bin/sleep', '2147483647',
+        ], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 2_000 });
+      } catch {
+        if (attempt === 1 || !this.#locatorIsLive(command)) {
+          throw new Error('Project human thread predecessor tombstone could not be created.');
+        }
+        this.#killLocator(command);
+        continue;
       }
-    } catch (error) {
-      try { unlinkSync(temporary); } catch { /* best effort */ }
-      throw error;
-    } finally { closeSync(fd); }
+      this.#runTmux(this.#tmuxExecutable, [
+        'set-option', '-t', `=${command}`, '@roadex-human-thread-retired', marker,
+      ], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 2_000 });
+      if (this.#retiredTombstoneMatches(command, marker)) return;
+      this.#killLocator(command);
+    }
+    throw new Error('Project human thread predecessor tombstone is unavailable.');
+  }
+
+  #retiredTombstoneMatches(command: string, marker: string): boolean {
+    try {
+      const value = String(this.#runTmux(this.#tmuxExecutable, [
+        'show-options', '-v', '-t', `=${command}`, '@roadex-human-thread-retired',
+      ], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 2_000 })).trim();
+      const processName = String(this.#runTmux(this.#tmuxExecutable, [
+        'list-panes', '-t', `=${command}`, '-F', '#{pane_current_command}',
+      ], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 2_000 })).trim();
+      return value === marker && processName === 'sleep';
+    } catch { return false; }
+  }
+
+  #killLocator(command: string): void {
+    try {
+      this.#runTmux(this.#tmuxExecutable, ['kill-session', '-t', `=${command}`], {
+        stdio: ['ignore', 'ignore', 'pipe'], timeout: 2_000,
+      });
+    } catch {
+      throw new Error('Project human thread predecessor writer could not be stopped.');
+    }
   }
 
   #withRoot<T>(projectRoot: string, action: (root: Omit<ProjectHumanThreadCandidate, 'conversationId' | 'createdAt'>) => T): T {
@@ -396,25 +428,6 @@ function slugify(value: string): string {
 function locatorCommand(projectRoot: string, conversationId: string): string {
   return `codex-${slugify(basename(projectRoot))}-${conversationId.slice(0, 8)}`;
 }
-function shellQuote(value: string): string {
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-function legacyLauncherContent(
-  tmux: string,
-  sessionExecutable: string,
-  command: string,
-  projectRoot: string,
-  conversationId: string,
-): string {
-  const resume = [sessionExecutable, 'resume', conversationId, '--cd', projectRoot].map(shellQuote).join(' ');
-  return `#!/usr/bin/env bash
-set -euo pipefail
-
-exec ${shellQuote(tmux)} new-session -A -s ${shellQuote(command)} -c ${shellQuote(projectRoot)} ${shellQuote(resume)}
-`;
-}
-
 function retiredLauncherContent(conversationId: string): string {
   return `# retired Roadex human interaction thread ${conversationId}\n`;
 }

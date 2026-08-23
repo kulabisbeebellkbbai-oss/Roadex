@@ -88,6 +88,26 @@ class ControlledThreadRegistrarTests(unittest.TestCase):
             audit_hmac_key=self.audit_key,
         )
 
+    def retirement_request(self, generation="1"):
+        operation_id = f"human-thread-retirement-{self.thread_id}:1"
+        payload = json.dumps(
+            {
+                "generation": generation,
+                "operationId": operation_id,
+                "projectRoot": str(self.project),
+                "threadId": self.thread_id,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        return {
+            "operation_id": operation_id,
+            "project_root": str(self.project),
+            "thread_id": self.thread_id,
+            "generation": generation,
+            "retirement_binding": hmac.new(self.key, payload, hashlib.sha256).hexdigest(),
+        }
+
     def test_is_default_off_and_rejects_malformed_flags(self):
         for enabled in (False, None, "TRUE", "1"):
             with self.subTest(enabled=enabled), self.assertRaisesRegex(
@@ -153,6 +173,38 @@ class ControlledThreadRegistrarTests(unittest.TestCase):
         self.assertTrue(second["alreadyRegistered"])
         self.assertEqual(self.paths.registry.read_bytes(), registry_before)
 
+    def test_retirement_is_locked_idempotent_and_sync_preserves_tombstone(self):
+        self.register()
+        request = self.retirement_request()
+        first = manager.retire_controlled_thread(
+            request, paths=self.paths, enabled=True,
+            hmac_key=self.key, audit_hmac_key=self.audit_key,
+        )
+        second = manager.retire_controlled_thread(
+            request, paths=self.paths, enabled=True,
+            hmac_key=self.key, audit_hmac_key=self.audit_key,
+        )
+        self.assertFalse(first["alreadyRetired"])
+        self.assertTrue(second["alreadyRetired"])
+        with self.paths.registry.open(encoding="utf-8") as handle:
+            row = next(csv.DictReader(handle))
+        launcher = Path(row["launcher"])
+        tombstone = f"# retired Roadex human interaction thread {self.thread_id}\n"
+        self.assertEqual(launcher.read_text(encoding="utf-8"), tombstone)
+        self.assertEqual(launcher.stat().st_mode & 0o777, 0o444)
+        rows = manager._read_registry_from(self.paths.registry, self.paths.link_dir)
+        with mock.patch.multiple(
+            manager,
+            REGISTRY=self.paths.registry,
+            LINK_DIR=self.paths.link_dir,
+            merge_conversations=mock.Mock(return_value=rows),
+            write_registry=mock.Mock(),
+        ):
+            manager.sync_registry_and_launchers()
+        self.assertEqual(launcher.read_text(encoding="utf-8"), tombstone)
+        with self.assertRaisesRegex(RuntimeError, "retired"):
+            manager.start_resume_tmux(rows[self.thread_id], attach=False)
+
     def test_concurrent_duplicate_creates_one_row(self):
         results = []
         failures = []
@@ -214,6 +266,27 @@ class ControlledThreadRegistrarTests(unittest.TestCase):
                 self.register()
         self.assertFalse(self.paths.registry.exists())
         self.assertEqual(list(self.paths.link_dir.iterdir()), [])
+
+    def test_crash_after_exact_launcher_publication_repairs_same_pair_on_retry(self):
+        original_replace = manager.os.replace
+        calls = 0
+
+        def crash_second(source, target):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise KeyboardInterrupt("injected crash")
+            return original_replace(source, target)
+
+        with mock.patch.object(manager.os, "replace", side_effect=crash_second):
+            with self.assertRaises(KeyboardInterrupt):
+                self.register()
+        self.assertFalse(self.paths.registry.exists())
+        self.assertEqual(len(list(self.paths.link_dir.glob("codex-*"))), 1)
+        repaired = self.register()
+        self.assertFalse(repaired["alreadyRegistered"])
+        with self.paths.registry.open(encoding="utf-8") as handle:
+            self.assertEqual(len(list(csv.DictReader(handle))), 1)
 
     def test_post_registry_fsync_failure_preserves_reconcilable_pair(self):
         original_fsync = manager._fsync_directory

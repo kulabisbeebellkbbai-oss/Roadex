@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
@@ -38,6 +38,27 @@ describe('ProjectHumanThreadStore', () => {
     const sql = (schema.prepare("SELECT sql FROM sqlite_master WHERE name='project_human_thread_events'").get() as { sql: string }).sql;
     expect(sql).toContain("'recovered'");
     schema.close();
+    store.close();
+  });
+  it('migrates legacy creation intents without authorizing an ambiguous retry', () => {
+    const path = join(tmpdir(), `roadex-human-thread-creation-v1-${randomUUID()}.sqlite`);
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`CREATE TABLE project_human_thread_creation_intents (
+      project_id TEXT PRIMARY KEY,event_id TEXT NOT NULL UNIQUE,request_json TEXT NOT NULL,
+      request_digest TEXT NOT NULL,state TEXT NOT NULL,conversation_id TEXT,
+      root_canonical_path TEXT,root_dev TEXT,root_ino TEXT
+    );`);
+    const requestJson = JSON.stringify({ projectRoot: '/workspace/Arcade', provenanceDigest: '1'.repeat(64) });
+    legacy.prepare('INSERT INTO project_human_thread_creation_intents VALUES (?,?,?,?,?,?,?,?,?)').run(
+      'arcade', 'create:arcade:legacy', requestJson,
+      createHash('sha256').update(requestJson).digest('hex'),
+      'prepared', null, '/workspace/Arcade', '254', '12345',
+    );
+    legacy.close();
+    const store = new ProjectHumanThreadStore(path);
+    expect(store.creationIntent('arcade')).toMatchObject({
+      state: 'prepared', createPhase: 'reconcile-required',
+    });
     store.close();
   });
   it('creates one active binding and replays only the exact idempotent request', () => {

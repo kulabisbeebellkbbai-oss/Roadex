@@ -92,6 +92,8 @@ export class ProjectHumanThreadStore {
         request_digest TEXT NOT NULL CHECK(length(request_digest)=64),
         state TEXT NOT NULL CHECK(state IN ('prepared','completed')),
         conversation_id TEXT,
+        create_phase TEXT NOT NULL DEFAULT 'not-started' CHECK(create_phase IN ('not-started','creating','reconcile-required','created')),
+        created_candidate_json TEXT,
         root_canonical_path TEXT,
         root_dev TEXT,
         root_ino TEXT
@@ -110,7 +112,7 @@ export class ProjectHumanThreadStore {
         root_ino TEXT
       );
     `);
-    this.#migrateReplacementIntentColumns();
+    this.#migrateCreateIntentColumns();
     this.#migrateRecoveredEvent();
     this.#migrateRootIdentity();
   }
@@ -182,11 +184,57 @@ export class ProjectHumanThreadStore {
     throw new Error('Project human thread creation intent is missing.');
   }
 
-  creationIntent(projectId: string): { state: 'prepared' | 'completed'; eventId: string; conversationId: string | null } | undefined {
+  creationIntent(projectId: string): {
+    state: 'prepared' | 'completed'; eventId: string; conversationId: string | null;
+    createPhase: 'not-started' | 'creating' | 'reconcile-required' | 'created';
+    createdCandidate?: ProjectHumanThreadCandidate;
+  } | undefined {
     const row = this.#db.prepare(`
-      SELECT state,event_id,conversation_id FROM project_human_thread_creation_intents WHERE project_id=?
-    `).get(projectId) as { state: 'prepared' | 'completed'; event_id: string; conversation_id: string | null } | undefined;
-    return row ? { state: row.state, eventId: row.event_id, conversationId: row.conversation_id } : undefined;
+      SELECT state,event_id,conversation_id,create_phase,created_candidate_json
+      FROM project_human_thread_creation_intents WHERE project_id=?
+    `).get(projectId) as {
+      state: 'prepared' | 'completed'; event_id: string; conversation_id: string | null;
+      create_phase: 'not-started' | 'creating' | 'reconcile-required' | 'created'; created_candidate_json: string | null;
+    } | undefined;
+    return row ? {
+      state: row.state, eventId: row.event_id, conversationId: row.conversation_id,
+      createPhase: row.create_phase,
+      ...(row.created_candidate_json ? { createdCandidate: JSON.parse(row.created_candidate_json) as ProjectHumanThreadCandidate } : {}),
+    } : undefined;
+  }
+
+  markCreationStarted(projectId: string, eventId: string): void {
+    const result = this.#db.prepare(`UPDATE project_human_thread_creation_intents SET create_phase='creating'
+      WHERE project_id=? AND event_id=? AND state='prepared' AND create_phase='not-started'`).run(projectId, eventId);
+    if (Number(result.changes) === 1 || this.creationIntent(projectId)?.createPhase === 'creating') return;
+    throw new Error('Project human thread creation phase conflict.');
+  }
+
+  markCreationNoSideEffect(projectId: string, eventId: string): void {
+    const result = this.#db.prepare(`UPDATE project_human_thread_creation_intents
+      SET create_phase='not-started',created_candidate_json=NULL
+      WHERE project_id=? AND event_id=? AND state='prepared' AND create_phase='creating'`).run(projectId, eventId);
+    if (Number(result.changes) === 1 || this.creationIntent(projectId)?.createPhase === 'not-started') return;
+    throw new Error('Project human thread creation phase conflict.');
+  }
+
+  markCreationReconciliationRequired(projectId: string, eventId: string): void {
+    const result = this.#db.prepare(`UPDATE project_human_thread_creation_intents SET create_phase='reconcile-required'
+      WHERE project_id=? AND event_id=? AND state='prepared' AND create_phase IN ('creating','reconcile-required')`).run(projectId, eventId);
+    if (Number(result.changes) === 1 || this.creationIntent(projectId)?.createPhase === 'reconcile-required') return;
+    throw new Error('Project human thread creation phase conflict.');
+  }
+
+  markCreationCreated(projectId: string, eventId: string, candidate: ProjectHumanThreadCandidate): void {
+    const candidateJson = stableJson(candidate);
+    const result = this.#db.prepare(`UPDATE project_human_thread_creation_intents
+      SET create_phase='created',created_candidate_json=?
+      WHERE project_id=? AND event_id=? AND state='prepared' AND create_phase IN ('creating','created')`).run(candidateJson, projectId, eventId);
+    if (Number(result.changes) === 1) return;
+    const existing = this.creationIntent(projectId);
+    if (existing?.eventId === eventId && existing.createPhase === 'created'
+      && existing.createdCandidate && stableJson(existing.createdCandidate) === candidateJson) return;
+    throw new Error('Project human thread creation phase conflict.');
   }
 
   markUnavailable(
@@ -502,10 +550,34 @@ export class ProjectHumanThreadStore {
     });
   }
 
-  #migrateReplacementIntentColumns(): void {
-    const columns = this.#db.prepare('PRAGMA table_info(project_human_thread_replacement_intents)').all() as unknown as Array<{ name: string }>;
-    if (!columns.some((column) => column.name === 'create_phase')) {
-      this.#db.exec("ALTER TABLE project_human_thread_replacement_intents ADD COLUMN create_phase TEXT NOT NULL DEFAULT 'not-started'");
+  #migrateCreateIntentColumns(): void {
+    const migrate = (table: 'project_human_thread_creation_intents' | 'project_human_thread_replacement_intents'): void => {
+      const columns = this.#db.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'create_phase')) {
+        this.#db.exec(`ALTER TABLE ${table} ADD COLUMN create_phase TEXT NOT NULL DEFAULT 'not-started'`);
+      }
+      if (!columns.some((column) => column.name === 'created_candidate_json')) {
+        this.#db.exec(`ALTER TABLE ${table} ADD COLUMN created_candidate_json TEXT`);
+      }
+    };
+    const creationColumns = this.#db.prepare('PRAGMA table_info(project_human_thread_creation_intents)')
+      .all() as unknown as Array<{ name: string }>;
+    const creationHadCreatePhase = creationColumns.some((column) => column.name === 'create_phase');
+    migrate('project_human_thread_creation_intents');
+    if (!creationHadCreatePhase) {
+      // A prepared legacy intent may already have crossed the external create
+      // boundary. Never reinterpret its new default as permission to create.
+      this.#db.exec(`
+        UPDATE project_human_thread_creation_intents SET create_phase='reconcile-required'
+        WHERE state='prepared'
+      `);
+    }
+
+    const replacementColumns = this.#db.prepare('PRAGMA table_info(project_human_thread_replacement_intents)')
+      .all() as unknown as Array<{ name: string }>;
+    const replacementHadCreatePhase = replacementColumns.some((column) => column.name === 'create_phase');
+    migrate('project_human_thread_replacement_intents');
+    if (!replacementHadCreatePhase) {
       // Older replacement intents had no durable create phase. If their
       // binding is still pending, the external create effect is unknowable;
       // classify it as reconciliation-required rather than allowing a blind
@@ -519,9 +591,6 @@ export class ProjectHumanThreadStore {
           WHERE binding.status='replacement-pending'
         )
       `);
-    }
-    if (!columns.some((column) => column.name === 'created_candidate_json')) {
-      this.#db.exec('ALTER TABLE project_human_thread_replacement_intents ADD COLUMN created_candidate_json TEXT');
     }
   }
 

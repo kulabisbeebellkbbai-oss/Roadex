@@ -2,7 +2,7 @@ import { bindingDigest, type ProjectHumanThreadBinding } from '../shared/project
 import { isProjectHumanThreadCreateNoSideEffect, type ProjectHumanThreadAuthority, type ProjectHumanThreadCandidate } from './projectHumanThreadAuthority.js';
 import type { ProjectHumanThreadStore, ProjectRootIdentity } from './projectHumanThreadStore.js';
 
-type Authority = Pick<ProjectHumanThreadAuthority, 'candidates' | 'adoptableCandidates' | 'inspect' | 'inspectAdoptable' | 'create' | 'repair' | 'prepareReplacement'> & {
+type Authority = Pick<ProjectHumanThreadAuthority, 'candidates' | 'adoptableCandidates' | 'inspect' | 'inspectAdoptable' | 'create' | 'bootstrap' | 'registerCreated' | 'repair' | 'prepareReplacement'> & {
   rootIdentity?: (projectRoot: string) => ProjectRootIdentity;
 };
 type ServiceOptions = { now?: () => string };
@@ -56,13 +56,37 @@ export class ProjectHumanThreadService {
       }
       return { outcome: 'current', binding: current };
     }
+    const priorIntent = this.#store.creationIntent(prepared.projectId);
+    if (priorIntent?.state === 'prepared' && priorIntent.createPhase === 'created' && priorIntent.createdCandidate) {
+      const candidate = await this.#authority.registerCreated(priorIntent.createdCandidate);
+      const binding = createBinding(prepared, candidate, 1, null, 'created', this.#now());
+      const result = this.#store.createInitial(binding, input.idempotencyKey);
+      this.#store.completeCreationIntent(prepared.projectId, input.idempotencyKey, binding.conversationId);
+      return { outcome: result.inserted ? 'created' : 'current', binding: result.binding };
+    }
+    if (priorIntent?.state === 'prepared' && priorIntent.createPhase !== 'not-started') {
+      return { outcome: 'reconciliation-required', candidates: [] };
+    }
     const candidates = this.#authority.adoptableCandidates(prepared.projectRoot);
     if (candidates.length > 0) return { outcome: 'adoption-required', candidates };
     const intent = this.#store.beginCreationIntent(prepared.projectId, input.idempotencyKey, {
       projectRoot: prepared.projectRoot, provenanceDigest: input.provenanceDigest,
     }, prepared.root);
     if (!intent.inserted) return { outcome: 'reconciliation-required', candidates: [] };
-    const candidate = await this.#authority.create(prepared.projectRoot);
+    this.#store.markCreationStarted(prepared.projectId, input.idempotencyKey);
+    let candidate: ProjectHumanThreadCandidate;
+    try {
+      candidate = await this.#authority.bootstrap(prepared.projectRoot);
+      this.#store.markCreationCreated(prepared.projectId, input.idempotencyKey, candidate);
+      candidate = await this.#authority.registerCreated(candidate);
+    } catch (error) {
+      const phase = this.#store.creationIntent(prepared.projectId)?.createPhase;
+      if (phase !== 'created') {
+        if (isProjectHumanThreadCreateNoSideEffect(error)) this.#store.markCreationNoSideEffect(prepared.projectId, input.idempotencyKey);
+        else this.#store.markCreationReconciliationRequired(prepared.projectId, input.idempotencyKey);
+      }
+      throw error;
+    }
     const binding = createBinding(prepared, candidate, 1, null, 'created', this.#now());
     const result = this.#store.createInitial(binding, input.idempotencyKey);
     this.#store.completeCreationIntent(prepared.projectId, input.idempotencyKey, binding.conversationId);
@@ -232,7 +256,7 @@ export class ProjectHumanThreadService {
     // before any successor bootstrap can begin. Replays are idempotent.
     this.#authority.prepareReplacement(pending);
     const boundIds = new Set(this.#store.history(operation.projectId).map((item) => item.conversationId));
-    let candidates = this.#authority.adoptableCandidates(operation.projectRoot).filter((item) => !boundIds.has(item.conversationId));
+    const candidates = this.#authority.adoptableCandidates(operation.projectRoot).filter((item) => !boundIds.has(item.conversationId));
     const activeIntent = this.#store.replacementIntent(operation.projectId);
     const replacementPhase = activeIntent?.createPhase ?? 'not-started';
     // Candidates discovered before this exact operation durably recorded a
@@ -242,35 +266,42 @@ export class ProjectHumanThreadService {
     if (candidates.length > 0 && replacementPhase !== 'created') {
       return { outcome: 'reconciliation-required', candidates };
     }
-    if (candidates.length === 0 && replacementPhase === 'created' && activeIntent?.createdCandidate) {
+    let candidate: ProjectHumanThreadCandidate;
+    let creationMode: ProjectHumanThreadBinding['creationMode'];
+    if (replacementPhase === 'created' && activeIntent?.createdCandidate) {
       try {
         const persisted = this.#authority.inspect(operation.projectRoot, activeIntent.createdCandidate.conversationId);
-        if (!boundIds.has(persisted.conversationId)) candidates = [persisted];
+        if (boundIds.has(persisted.conversationId)) throw new Error('candidate is already bound');
+        candidate = await this.#authority.registerCreated(persisted);
+        creationMode = 'created';
       } catch {
         // A persisted operation identity without an inspectable candidate is
         // reconciled explicitly; it is never converted into another create.
+        return { outcome: 'reconciliation-required', candidates: [] };
       }
-    }
-    if (candidates.length === 0 && replacementPhase !== 'not-started') {
+    } else if (replacementPhase !== 'not-started') {
       return { outcome: 'reconciliation-required', candidates: [] };
-    }
-    let candidate = candidates[0];
-    if (!candidate) {
+    } else {
       this.#store.markReplacementCreateStarted(operation.projectId, beginEventId);
       try {
-        candidate = await this.#authority.create(operation.projectRoot);
+        candidate = await this.#authority.bootstrap(operation.projectRoot);
         // A returned candidate is the durable operation identity. Persist it
         // before activation so a restart can inspect/adopt it without create.
         this.#store.markReplacementCreated(operation.projectId, beginEventId, candidate);
+        candidate = await this.#authority.registerCreated(candidate);
       } catch (error) {
-        if (isProjectHumanThreadCreateNoSideEffect(error)) this.#store.markReplacementCreateNoSideEffect(operation.projectId, beginEventId);
-        else this.#store.markReplacementCreateReconciliationRequired(operation.projectId, beginEventId);
+        const phase = this.#store.replacementIntent(operation.projectId)?.createPhase;
+        if (phase !== 'created') {
+          if (isProjectHumanThreadCreateNoSideEffect(error)) this.#store.markReplacementCreateNoSideEffect(operation.projectId, beginEventId);
+          else this.#store.markReplacementCreateReconciliationRequired(operation.projectId, beginEventId);
+        }
         throw error;
       }
+      creationMode = 'created';
     }
     const next = createBinding(
       operation, candidate, input.expectedGeneration + 1, input.expectedGeneration,
-      candidates.length > 0 ? 'adopted' : 'created', laterTimestamp(this.#now(), pending.updatedAt),
+      creationMode, laterTimestamp(this.#now(), pending.updatedAt),
     );
     const result = this.#store.activateReplacement(next, input.expectedGeneration, `${input.idempotencyKey}:activate`);
     this.#store.completeReplacementIntent(operation.projectId, beginEventId, result.binding.conversationId);

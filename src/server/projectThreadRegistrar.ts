@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
 import path from 'node:path';
 import { buildCodexExecArgs, parseCodexJsonlStream } from './codexRunner.js';
@@ -103,6 +103,8 @@ if sys.argv[1:] == ["--worker"]:
     os.chdir(ROOT)
     os.execv(SESSION, [SESSION, "resume", CONVERSATION, "--cd", ROOT])
 
+if sys.argv[1:] == ["--detach"]:
+    os.execv(TMUX, [TMUX, "new-session", "-d", "-s", COMMAND, "-c", ROOT, WORKER])
 if sys.argv[1:]:
     raise SystemExit("invalid project human thread launcher arguments")
 os.execv(TMUX, [TMUX, "new-session", "-A", "-s", COMMAND, "-c", ROOT, WORKER])
@@ -280,6 +282,51 @@ export async function registerControlledHumanThread(
     bootstrap_binding: bootstrapBinding,
   }, env);
   verifyRegistration(result, operationId, path.basename(projectRoot), threadId);
+}
+
+export function retireControlledHumanThread(
+  input: { projectId: string; projectRoot: string; conversationId: string; generation: number },
+  env: NodeJS.ProcessEnv,
+): void {
+  const operationId = `human-thread-retirement-${input.projectId}:${input.generation}`;
+  const generation = String(input.generation);
+  const retirementBinding = createHmac(
+    'sha256', env.ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY ?? '',
+  ).update(JSON.stringify({
+    generation,
+    operationId,
+    projectRoot: input.projectRoot,
+    threadId: input.conversationId,
+  })).digest('hex');
+  const request = {
+    operation_id: operationId,
+    project_root: input.projectRoot,
+    thread_id: input.conversationId,
+    generation,
+    retirement_binding: retirementBinding,
+  };
+  let value: unknown;
+  try {
+    value = JSON.parse(execFileSync(PYTHON_BIN, [REGISTRAR, '--retire-controlled-thread'], {
+      input: JSON.stringify(request), encoding: 'utf8', timeout: 30_000,
+      env: {
+        ...controlledBootstrapEnvironment(env),
+        ROADEX_CODEX_THREAD_REGISTRAR_ENABLED: 'true',
+        ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY: env.ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY,
+        ROADEX_CODEX_THREAD_REGISTRAR_AUDIT_HMAC_KEY: env.ROADEX_CODEX_THREAD_REGISTRAR_AUDIT_HMAC_KEY,
+      },
+    }));
+  } catch {
+    throw new Error('project_human_thread_retirement_failed');
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('project_human_thread_retirement_failed');
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).sort().join(',') !== 'alreadyRetired,generation,operationId,retired,threadId'
+    || record.retired !== true || typeof record.alreadyRetired !== 'boolean'
+    || record.operationId !== operationId || record.threadId !== input.conversationId
+    || record.generation !== input.generation) {
+    throw new Error('project_human_thread_retirement_failed');
+  }
 }
 
 async function invokeRegistrar(

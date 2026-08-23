@@ -39,6 +39,11 @@ class FakeAuthority {
     this.available.push(value);
     return value;
   }
+  async bootstrap(projectRoot: string) { return await this.create(projectRoot); }
+  async registerCreated(candidate: ProjectHumanThreadCandidate) {
+    if (!this.proven.some((item) => item.conversationId === candidate.conversationId)) this.proven.push(candidate);
+    return candidate;
+  }
   repair(binding: { conversationId: string }) {
     return this.inspect(root, binding.conversationId);
   }
@@ -147,6 +152,42 @@ describe('ProjectHumanThreadService', () => {
     expect(store.creationIntent('arcade')).toMatchObject({ state: 'prepared', eventId: request.idempotencyKey });
   });
 
+  it('persists the exact bootstrapped identity before registration and resumes that registration', async () => {
+    const { authority, service, store } = setup();
+    authority.created.push(first);
+    const bootstrap = vi.spyOn(authority, 'bootstrap');
+    vi.spyOn(authority, 'registerCreated').mockRejectedValueOnce(new Error('registrar interrupted'));
+    await expect(service.createMissing(request)).rejects.toThrow(/registrar interrupted/);
+    expect(store.creationIntent('arcade')).toMatchObject({
+      state: 'prepared', createPhase: 'created', createdCandidate: { conversationId: first.conversationId },
+    });
+    await expect(service.createMissing(request)).resolves.toMatchObject({
+      outcome: 'created', binding: { conversationId: first.conversationId },
+    });
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists the exact replacement identity before registration and never bootstraps it twice', async () => {
+    const { authority, service, store } = setup();
+    authority.created.push(first);
+    await service.createMissing(request);
+    authority.created.push(second);
+    const bootstrap = vi.spyOn(authority, 'bootstrap');
+    vi.spyOn(authority, 'registerCreated').mockRejectedValueOnce(new Error('replacement registrar interrupted'));
+    const replacement = {
+      ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered',
+      idempotencyKey: 'replace:arcade:registrar-resume',
+    };
+    await expect(service.replace(replacement)).rejects.toThrow(/registrar interrupted/);
+    expect(store.replacementIntent('arcade')).toMatchObject({
+      state: 'prepared', createPhase: 'created', createdCandidate: { conversationId: second.conversationId },
+    });
+    await expect(service.replace(replacement)).resolves.toMatchObject({
+      outcome: 'replaced', binding: { conversationId: second.conversationId, creationMode: 'created' },
+    });
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+  });
+
   it('offers explicit adoption when an ambiguous create left one verifiable candidate', async () => {
     const { authority, service } = setup();
     vi.spyOn(authority, 'create').mockImplementation(async () => {
@@ -220,7 +261,7 @@ describe('ProjectHumanThreadService', () => {
     await expect(service.replace({ ...replacement, idempotencyKey: 'replace:arcade:other' })).rejects.toThrow(/intent conflict/);
   });
 
-  it('adopts a candidate left behind when activation crashes and never creates a duplicate', async () => {
+  it('resumes the exact created candidate when activation crashes and never creates a duplicate', async () => {
     const { authority, service, store } = setup();
     authority.created.push(first);
     await service.createMissing(request);
@@ -230,7 +271,7 @@ describe('ProjectHumanThreadService', () => {
     });
     const replacement = { ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered', idempotencyKey: 'replace:arcade:3' };
     await expect(service.replace(replacement)).rejects.toThrow(/activation interrupted/);
-    await expect(service.replace(replacement)).resolves.toMatchObject({ outcome: 'replaced', binding: { conversationId: second.conversationId, creationMode: 'adopted' } });
+    await expect(service.replace(replacement)).resolves.toMatchObject({ outcome: 'replaced', binding: { conversationId: second.conversationId, creationMode: 'created' } });
     expect(activate).toHaveBeenCalledTimes(2);
   });
 
