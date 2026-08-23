@@ -37,6 +37,7 @@ type AuthorityOptions = {
   launcherDirectory?: string;
   sessionExecutable?: string;
   tmuxExecutable?: string;
+  runTmux?: typeof execFileSync;
 };
 
 type ThreadRow = { id: string; cwd: string; archived: number; created_at: number };
@@ -48,6 +49,7 @@ export class ProjectHumanThreadAuthority {
   readonly #launcherDirectory: string;
   readonly #sessionExecutable: string;
   readonly #tmuxExecutable: string;
+  readonly #runTmux: typeof execFileSync;
 
   constructor(options: AuthorityOptions = {}) {
     const env = options.env ?? process.env;
@@ -58,6 +60,7 @@ export class ProjectHumanThreadAuthority {
     this.#launcherDirectory = options.launcherDirectory ?? '/home/god/.local/bin';
     this.#sessionExecutable = options.sessionExecutable ?? '/home/god/.local/bin/codex-memory-session';
     this.#tmuxExecutable = options.tmuxExecutable ?? '/usr/bin/tmux';
+    this.#runTmux = options.runTmux ?? execFileSync;
   }
 
   rootIdentity(projectRoot: string): { canonicalPath: string; dev: string; ino: string } {
@@ -92,6 +95,24 @@ export class ProjectHumanThreadAuthority {
     });
   }
 
+  adoptableCandidates(projectRoot: string): ProjectHumanThreadCandidate[] {
+    const canonicalPath = this.#withRoot(projectRoot, (root) => root.canonicalPath);
+    let rows: Array<Record<string, string>>;
+    try { rows = this.#readRegistry(); } catch { return []; }
+    return this.candidates(canonicalPath).filter((candidate) => (
+      this.#hasHumanInteractionProvenance(rows, candidate)
+      && !this.#locatorIsLive(locatorCommand(candidate.canonicalPath, candidate.conversationId))
+    ));
+  }
+
+  inspectAdoptable(projectRoot: string, conversationId: string): ProjectHumanThreadCandidate {
+    const candidate = this.inspect(projectRoot, conversationId);
+    const exact = this.adoptableCandidates(candidate.canonicalPath)
+      .find((item) => item.conversationId === conversationId);
+    if (!exact) throw new Error('Project human thread candidate lacks durable human-interaction provenance or is not quiescent.');
+    return exact;
+  }
+
   async create(projectRoot: string): Promise<ProjectHumanThreadCandidate> {
     const canonicalPath = this.#withRoot(projectRoot, (root) => root.canonicalPath);
     const conversationId = await this.#createControlledThread(canonicalPath);
@@ -113,7 +134,8 @@ export class ProjectHumanThreadAuthority {
       throw new Error('Project human thread locator authority is unavailable.');
     }
     const content = launcherContent(
-      this.#tmuxExecutable, this.#sessionExecutable, command, candidate.canonicalPath, candidate.conversationId,
+      this.#tmuxExecutable, this.#sessionExecutable, command, launcher,
+      candidate.canonicalPath, candidate.dev, candidate.ino, candidate.conversationId,
     );
     this.#ensureLauncher(launcher, content);
     return candidate;
@@ -126,24 +148,55 @@ export class ProjectHumanThreadAuthority {
    */
   hasLiveLocator(binding: ProjectHumanThreadBinding): boolean {
     if (binding.status !== 'active') return true;
-    const command = `codex-${slugify(basename(binding.root.canonicalPath))}-${binding.conversationId.slice(0, 8)}`;
+    const command = locatorCommand(binding.root.canonicalPath, binding.conversationId);
+    return this.#locatorIsLive(command);
+  }
+
+  #locatorIsLive(command: string): boolean {
     try {
-      execFileSync(this.#tmuxExecutable, ['has-session', '-t', `=${command}`], {
-        stdio: 'ignore', timeout: 2_000,
+      this.#runTmux(this.#tmuxExecutable, ['has-session', '-t', `=${command}`], {
+        stdio: ['ignore', 'ignore', 'pipe'], timeout: 2_000,
       });
       return true;
-    } catch {
-      // tmux exits non-zero when the exact session is absent. Distinguish a
-      // missing session from an unavailable tmux proof; in the latter case,
-      // fail closed by reporting a live writer.
-      try {
-        execFileSync(this.#tmuxExecutable, ['list-sessions', '-F', '#{session_name}'], {
-          stdio: ['ignore', 'pipe', 'ignore'], timeout: 2_000,
-        });
+    } catch (error) {
+      const failure = error as NodeJS.ErrnoException & { status?: number | null; stderr?: Buffer | string };
+      const stderr = String(failure.stderr ?? '').trim();
+      if (failure.status === 1 && (
+        /^can't find session: [A-Za-z0-9._:-]+$/.test(stderr)
+        || /^no server running on \/[^\n]+$/.test(stderr)
+      )) {
         return false;
-      } catch {
-        return true;
       }
+      return true;
+    }
+  }
+
+  #hasHumanInteractionProvenance(rows: Array<Record<string, string>>, candidate: ProjectHumanThreadCandidate): boolean {
+    const command = locatorCommand(candidate.canonicalPath, candidate.conversationId);
+    const launcher = join(this.#launcherDirectory, command);
+    const exact = rows.filter((row) => row.conversation_id === candidate.conversationId);
+    const proven = exact.length === 1
+      && exact[0].project === candidate.canonicalPath
+      && exact[0].command === command
+      && exact[0].launcher === launcher
+      && exact[0].source === 'registry+codex-state'
+      && /^This is the dedicated Roadex human interaction thread for the .+ project\./.test(exact[0].label ?? '');
+    if (!proven) return false;
+    const expected = launcherContent(
+      this.#tmuxExecutable, this.#sessionExecutable, command, launcher,
+      candidate.canonicalPath, candidate.dev, candidate.ino, candidate.conversationId,
+    );
+    try {
+      const lexical = lstatSync(launcher);
+      if (!lexical.isFile() || lexical.isSymbolicLink() || lexical.nlink !== 1
+        || lexical.uid !== process.getuid?.() || (lexical.mode & 0o777) !== 0o755) return false;
+      const fd = openSync(launcher, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const opened = fstatSync(fd);
+        return opened.dev === lexical.dev && opened.ino === lexical.ino && readFileSync(fd, 'utf8') === expected;
+      } finally { closeSync(fd); }
+    } catch {
+      return false;
     }
   }
 
@@ -239,11 +292,53 @@ export class ProjectHumanThreadAuthority {
 function slugify(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'codex';
 }
+function locatorCommand(projectRoot: string, conversationId: string): string {
+  return `codex-${slugify(basename(projectRoot))}-${conversationId.slice(0, 8)}`;
+}
 function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
-function launcherContent(tmux: string, sessionExecutable: string, command: string, projectRoot: string, conversationId: string): string {
-  const resume = [sessionExecutable, 'resume', conversationId, '--cd', projectRoot].map(shellQuote).join(' ');
-  return `#!/usr/bin/env bash\nset -euo pipefail\n\nexec ${shellQuote(tmux)} new-session -A -s ${shellQuote(command)} -c ${shellQuote(projectRoot)} ${shellQuote(resume)}\n`;
+function launcherContent(
+  tmux: string,
+  sessionExecutable: string,
+  command: string,
+  launcher: string,
+  projectRoot: string,
+  dev: string,
+  ino: string,
+  conversationId: string,
+): string {
+  const worker = [launcher, '--worker'].map(shellQuote).join(' ');
+  return `#!/usr/bin/python3
+import fcntl
+import os
+import sys
+
+ROOT = ${JSON.stringify(projectRoot)}
+EXPECTED_DEV = ${JSON.stringify(dev)}
+EXPECTED_INO = ${JSON.stringify(ino)}
+TMUX = ${JSON.stringify(tmux)}
+SESSION = ${JSON.stringify(sessionExecutable)}
+COMMAND = ${JSON.stringify(command)}
+CONVERSATION = ${JSON.stringify(conversationId)}
+WORKER = ${JSON.stringify(worker)}
+
+if sys.argv[1:] == ["--worker"]:
+    fd = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    stat = os.fstat(fd)
+    if str(stat.st_dev) != EXPECTED_DEV or str(stat.st_ino) != EXPECTED_INO:
+        raise SystemExit("project human thread root identity changed")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit("project human thread already has a writer")
+    os.set_inheritable(fd, True)
+    os.chdir(ROOT)
+    os.execv(SESSION, [SESSION, "resume", CONVERSATION, "--cd", ROOT])
+
+if sys.argv[1:]:
+    raise SystemExit("invalid project human thread launcher arguments")
+os.execv(TMUX, [TMUX, "new-session", "-A", "-s", COMMAND, "-c", ROOT, WORKER])
+`;
 }

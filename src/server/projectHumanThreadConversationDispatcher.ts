@@ -1,41 +1,58 @@
 import { spawn } from 'node:child_process';
-import { closeSync, constants, mkdirSync, openSync, unlinkSync, writeSync } from 'node:fs';
-import { join } from 'node:path';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs';
 import { buildCodexExecArgs, parseCodexJsonlEvents, parseCodexJsonlStream } from './codexRunner.js';
 import type { ProjectHumanThreadBinding } from '../shared/projectHumanThreadContracts.js';
 import type { ProjectHumanThreadTurn } from '../shared/projectHumanThreadConversationContracts.js';
 import type { ProjectHumanThreadConversationStore } from './projectHumanThreadConversationStore.js';
 
 type Authority = { current(projectId: string): ProjectHumanThreadBinding | undefined; hasLiveLocator(binding: ProjectHumanThreadBinding): boolean };
-type Options = { executable?: string; spawnProcess?: typeof spawn; leaseDirectory?: string; timeoutMs?: number };
+type Options = { executable?: string; pythonExecutable?: string; spawnProcess?: typeof spawn; timeoutMs?: number };
+
+const WRITER_HELPER = `import fcntl,os,sys
+if os.read(0,1) != b"1": raise SystemExit(70)
+try: fcntl.flock(3, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError: raise SystemExit(73)
+os.set_inheritable(3, True)
+os.execv(sys.argv[1], sys.argv[1:])`;
 
 export class ProjectHumanThreadConversationDispatcher {
   readonly #store: ProjectHumanThreadConversationStore;
   readonly #authority: Authority;
   readonly #executable: string;
   readonly #spawn: typeof spawn;
-  readonly #leaseDirectory: string;
+  readonly #pythonExecutable: string;
   readonly #timeoutMs: number;
+  readonly #children = new Map<string, { child: ReturnType<typeof spawn>; closed: Promise<void> }>();
+  readonly #dispatches = new Set<Promise<void>>();
+  #shuttingDown = false;
 
   constructor(store: ProjectHumanThreadConversationStore, authority: Authority, options: Options = {}) {
     this.#store = store; this.#authority = authority;
     this.#executable = options.executable ?? process.env.ROADEX_CODEX_BIN ?? 'codex';
     this.#spawn = options.spawnProcess ?? spawn;
-    this.#leaseDirectory = options.leaseDirectory ?? process.env.ROADEX_PROJECT_HUMAN_THREAD_LEASE_DIRECTORY ?? 'data/project-human-thread-leases';
+    this.#pythonExecutable = options.pythonExecutable ?? '/usr/bin/python3';
     this.#timeoutMs = options.timeoutMs ?? 120_000;
   }
 
   async dispatch(turnId: string): Promise<ProjectHumanThreadTurn> {
+    if (this.#shuttingDown) throw new Error('Project human thread dispatcher is shutting down.');
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => { settle = resolve; });
+    this.#dispatches.add(settled);
+    try {
+      return await this.#dispatchOne(turnId);
+    } finally {
+      settle();
+      this.#dispatches.delete(settled);
+    }
+  }
+
+  async #dispatchOne(turnId: string): Promise<ProjectHumanThreadTurn> {
     const queued = this.#store.get(turnId);
     if (!queued) throw new Error('Project human thread turn is missing.');
     const binding = this.#authority.current(queued.projectId);
     if (!binding || binding.status !== 'active' || binding.generation !== queued.generation || binding.conversationId !== queued.conversationId) {
       const failed = this.#store.fail(turnId, 'The project human-thread binding changed before dispatch.', true);
-      throw new Error(`Project human thread turn is reconciliation-required: ${failed.error}`);
-    }
-    const lease = acquireLease(this.#leaseDirectory, binding, turnId);
-    if (!lease) {
-      const failed = this.#store.fail(turnId, 'Another Roadex writer lease owns this project binding. Use controlled handoff or Replace binding; Roadex will not terminate it or create a second writer.', true);
       throw new Error(`Project human thread turn is reconciliation-required: ${failed.error}`);
     }
     try {
@@ -56,21 +73,65 @@ export class ProjectHumanThreadConversationDispatcher {
         const failed = this.#store.fail(turnId, persistedFailure(error), true);
         throw new Error(`Project human thread turn is reconciliation-required: ${failed.error}`);
       }
-    } finally { lease.release(); }
+    } finally { /* the child-held project-root flock is released only on child exit */ }
   }
 
   async dispatchPending(): Promise<{ completed: number; failed: number }> {
     let completed = 0; let failed = 0;
+    if (this.#shuttingDown) return { completed, failed };
     for (const turn of this.#store.pendingOutbox()) {
       try { await this.dispatch(turn.turnId); completed += 1; } catch { failed += 1; }
     }
     return { completed, failed };
   }
 
+  async shutdown(): Promise<void> {
+    this.#shuttingDown = true;
+    const owned = [...this.#children.values()];
+    for (const { child } of owned) {
+      try { child.kill('SIGTERM'); } catch { /* process may already be gone */ }
+    }
+    const force = setTimeout(() => {
+      for (const { child } of this.#children.values()) {
+        try { child.kill('SIGKILL'); } catch { /* process may already be gone */ }
+      }
+    }, 2_000);
+    force.unref();
+    await Promise.all(owned.map(({ closed }) => closed));
+    await Promise.all([...this.#dispatches]);
+    clearTimeout(force);
+  }
+
   async #run(turn: ProjectHumanThreadTurn, binding: ProjectHumanThreadBinding): Promise<{ returnedConversationId: string; assistantOutput: string }> {
     const projectRoot = binding.root.canonicalPath;
     const args = buildCodexExecArgs(projectRoot, turn.content, turn.conversationId);
-    const child = this.#spawn(this.#executable, args, { cwd: projectRoot, env: safeCodexEnvironment(), stdio: ['ignore', 'pipe', 'pipe'] });
+    const rootFd = openBoundProjectRoot(binding);
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = this.#spawn(this.#pythonExecutable, ['-I', '-S', '-c', WRITER_HELPER, this.#executable, ...args], {
+        cwd: projectRoot,
+        env: safeCodexEnvironment(),
+        stdio: ['pipe', 'pipe', 'pipe', rootFd],
+      });
+    } finally {
+      closeSync(rootFd);
+    }
+    if (!child.pid) {
+      try { child.kill('SIGKILL'); } catch { /* best effort */ }
+      throw new Error('Codex conversation worker identity is unavailable.');
+    }
+    const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
+    this.#children.set(turn.turnId, { child, closed });
+    child.once('close', () => { this.#children.delete(turn.turnId); });
+    try {
+      this.#store.bindWorker(turn.turnId, child.pid, readProcessStartTicks(child.pid));
+      child.stdin?.write('1');
+      child.stdin?.end();
+    } catch (error) {
+      try { child.kill('SIGKILL'); } catch { /* best effort */ }
+      await closed;
+      throw error;
+    }
     return new Promise((resolve, reject) => {
       let buffer = ''; let stderr = ''; let bytes = 0; let returned: string | undefined; let terminal = ''; let finished = false; let terminalError: Error | undefined;
       const finishReject = (error: Error): void => { if (finished) return; finished = true; reject(error); };
@@ -115,14 +176,29 @@ export class ProjectHumanThreadConversationDispatcher {
   }
 }
 
-function acquireLease(directory: string, binding: ProjectHumanThreadBinding, turnId: string): { release: () => void } | undefined {
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const path = join(directory, `${binding.bindingId.replace(/[^A-Za-z0-9._:-]/g, '_')}.lock`);
-  let fd: number;
-  try { fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') return undefined; throw error; }
-  writeSync(fd, `${process.pid}:${turnId}\n`); closeSync(fd);
-  return { release: () => { try { unlinkSync(path); } catch { /* preserve an ambiguous lease on failure */ } } };
+function openBoundProjectRoot(binding: ProjectHumanThreadBinding): number {
+  const lexical = lstatSync(binding.root.canonicalPath);
+  if (!lexical.isDirectory() || lexical.isSymbolicLink()
+    || String(lexical.dev) !== binding.root.dev || String(lexical.ino) !== binding.root.ino) {
+    throw new Error('Project human thread root identity changed before writer lock.');
+  }
+  const fd = openSync(binding.root.canonicalPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  const opened = fstatSync(fd);
+  const final = lstatSync(binding.root.canonicalPath);
+  if (!opened.isDirectory() || String(opened.dev) !== binding.root.dev || String(opened.ino) !== binding.root.ino
+    || opened.dev !== final.dev || opened.ino !== final.ino || opened.mode !== final.mode) {
+    closeSync(fd);
+    throw new Error('Project human thread root identity changed before writer lock.');
+  }
+  return fd;
+}
+function readProcessStartTicks(pid: number): string {
+  const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+  const end = stat.lastIndexOf(') ');
+  if (end < 0) throw new Error('Project human thread worker identity is unavailable.');
+  const startTicks = stat.slice(end + 2).trim().split(/\s+/)[19];
+  if (!startTicks || !/^[1-9][0-9]*$/.test(startTicks)) throw new Error('Project human thread worker identity is unavailable.');
+  return startTicks;
 }
 function safeCodexEnvironment(): NodeJS.ProcessEnv {
   const names = ['CODEX_HOME', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'SHELL', 'TERM', 'USER'];

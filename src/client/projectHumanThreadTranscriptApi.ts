@@ -31,10 +31,13 @@ export async function getProjectHumanThreadTranscript(
   view: 'pending' | 'history' = 'pending',
 ): Promise<ProjectHumanThreadPublicQuestion[]> {
   const suffix = view === 'history' ? '/history' : '';
-  const payload = await requestRoadex<{ ok: true; questions: ProjectHumanThreadPublicQuestion[] }>(
+  const payload = await requestRoadex<{ ok: true; requestedProjectId: string; canonicalProjectId: string; questions: ProjectHumanThreadPublicQuestion[] }>(
     `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread/messages${suffix}`,
     { token },
   );
+  if (payload.requestedProjectId !== projectId || !payload.questions.every((question) => question.projectId === payload.canonicalProjectId)) {
+    throw new Error('Project human thread transcript response is invalid.');
+  }
   return payload.questions;
 }
 
@@ -45,11 +48,14 @@ export async function submitProjectHumanThreadResponse(
   content: string,
   idempotencyKey: string,
 ): Promise<ProjectHumanThreadPublicResponse> {
-  const payload = await requestRoadex<{ ok: true; response: ProjectHumanThreadPublicResponse }>(
+  const payload = await requestRoadex<{ ok: true; requestedProjectId: string; canonicalProjectId: string; response: ProjectHumanThreadPublicResponse }>(
     `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread/messages/${encodeURIComponent(messageId)}/respond`,
     {
       method: 'POST', token, body: { content }, headers: { 'idempotency-key': idempotencyKey },
     },
   );
+  if (payload.requestedProjectId !== projectId || payload.response.projectId !== payload.canonicalProjectId) {
+    throw new Error('Project human thread response is invalid.');
+  }
   return payload.response;
 }

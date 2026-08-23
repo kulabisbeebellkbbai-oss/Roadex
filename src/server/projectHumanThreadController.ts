@@ -84,6 +84,10 @@ export class ProjectHumanThreadController {
     return (this.#service.historyForRoot?.(project.root) ?? this.#service.history(project.projectId)).map(redactHistoryBinding);
   }
 
+  canonicalProjectId(user: UserProfile, projectId: string): string {
+    return this.#threadProjectId(this.#owned(user, projectId));
+  }
+
   async createMissing(user: UserProfile, projectId: string, idempotencyKey: string, payload: unknown): Promise<unknown> {
     parseBody(empty, payload);
     const project = this.#owned(user, projectId);
@@ -102,14 +106,14 @@ export class ProjectHumanThreadController {
   async recover(user: UserProfile, projectId: string, idempotencyKey: string, payload: unknown): Promise<unknown> {
     const body = parseBody(recover, payload);
     const project = this.#owned(user, projectId);
-    return this.#service.recover(project.projectId, body.expectedGeneration, idempotencyKey, project.root);
+    return this.#service.recover(this.#threadProjectId(project), body.expectedGeneration, idempotencyKey, project.root);
   }
 
   async replace(user: UserProfile, projectId: string, idempotencyKey: string, payload: unknown): Promise<unknown> {
     const body = parseBody(replace, payload);
     const project = this.#owned(user, projectId);
     if (project.activeRun) throw new Error('Project human thread cannot be replaced during an active run.');
-    if (this.#deps.hasPendingInteraction?.(project.projectId)) {
+    if (this.#deps.hasPendingInteraction?.(this.#threadProjectId(project))) {
       throw new Error('Project human thread cannot be replaced while human interaction is pending.');
     }
     return await this.#service.replace({ ...this.#input(user, project, idempotencyKey, 'replace'), ...body });
@@ -119,20 +123,20 @@ export class ProjectHumanThreadController {
     const body = parseBody(resume, payload);
     const project = this.#owned(user, projectId);
     if (project.activeRun) throw new Error('Project human thread cannot be replaced during an active run.');
-    if (this.#deps.hasPendingInteraction?.(project.projectId)) {
+    if (this.#deps.hasPendingInteraction?.(this.#threadProjectId(project))) {
       throw new Error('Project human thread cannot be replaced while human interaction is pending.');
     }
-    return await this.#service.resume({ projectId: project.projectId, projectRoot: project.root, ...body });
+    return await this.#service.resume({ projectId: this.#threadProjectId(project), projectRoot: project.root, ...body });
   }
 
   async reconcile(user: UserProfile, projectId: string, payload: unknown): Promise<unknown> {
     const body = parseBody(reconcile, payload);
     const project = this.#owned(user, projectId);
     if (project.activeRun) throw new Error('Project human thread cannot be replaced during an active run.');
-    if (this.#deps.hasPendingInteraction?.(project.projectId)) {
+    if (this.#deps.hasPendingInteraction?.(this.#threadProjectId(project))) {
       throw new Error('Project human thread cannot be replaced while human interaction is pending.');
     }
-    return await this.#service.reconcile({ projectId: project.projectId, projectRoot: project.root, ...body });
+    return await this.#service.reconcile({ projectId: this.#threadProjectId(project), projectRoot: project.root, ...body });
   }
 
   #owned(user: UserProfile, projectId: string): OwnedProject {
@@ -143,14 +147,19 @@ export class ProjectHumanThreadController {
   }
 
   #input(user: UserProfile, project: OwnedProject, idempotencyKey: string, action: string): ServiceInput {
+    const projectId = this.#threadProjectId(project);
     return {
-      projectId: project.projectId,
+      projectId,
       projectRoot: project.root,
       idempotencyKey,
       provenanceDigest: createHash('sha256')
-        .update(JSON.stringify({ action, actor: user.id, idempotencyKey, projectId: project.projectId, root: project.root }))
+        .update(JSON.stringify({ action, actor: user.id, idempotencyKey, projectId, root: project.root }))
         .digest('hex'),
     };
+  }
+
+  #threadProjectId(project: OwnedProject): string {
+    return this.#service.currentForRoot?.(project.root)?.projectId ?? project.projectId;
   }
 }
 

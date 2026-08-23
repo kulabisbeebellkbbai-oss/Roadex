@@ -2,7 +2,7 @@ import { bindingDigest, type ProjectHumanThreadBinding } from '../shared/project
 import { isProjectHumanThreadCreateNoSideEffect, type ProjectHumanThreadAuthority, type ProjectHumanThreadCandidate } from './projectHumanThreadAuthority.js';
 import type { ProjectHumanThreadStore, ProjectRootIdentity } from './projectHumanThreadStore.js';
 
-type Authority = Pick<ProjectHumanThreadAuthority, 'candidates' | 'inspect' | 'create' | 'repair'> & {
+type Authority = Pick<ProjectHumanThreadAuthority, 'candidates' | 'adoptableCandidates' | 'inspect' | 'inspectAdoptable' | 'create' | 'repair'> & {
   rootIdentity?: (projectRoot: string) => ProjectRootIdentity;
 };
 type ServiceOptions = { now?: () => string };
@@ -56,7 +56,7 @@ export class ProjectHumanThreadService {
       }
       return { outcome: 'current', binding: current };
     }
-    const candidates = this.#authority.candidates(prepared.projectRoot);
+    const candidates = this.#authority.adoptableCandidates(prepared.projectRoot);
     if (candidates.length > 0) return { outcome: 'adoption-required', candidates };
     const intent = this.#store.beginCreationIntent(prepared.projectId, input.idempotencyKey, {
       projectRoot: prepared.projectRoot, provenanceDigest: input.provenanceDigest,
@@ -78,7 +78,7 @@ export class ProjectHumanThreadService {
       if (current.conversationId !== input.conversationId) throw new Error('Project already has a different human thread.');
       return { outcome: 'current', binding: current };
     }
-    const candidate = this.#authority.inspect(prepared.projectRoot, input.conversationId);
+    const candidate = this.#authority.inspectAdoptable(prepared.projectRoot, input.conversationId);
     const binding = createBinding(prepared, candidate, 1, null, 'adopted', this.#now());
     const result = this.#store.createInitial(binding, input.idempotencyKey);
     const intent = this.#store.creationIntent(input.projectId);
@@ -123,7 +123,7 @@ export class ProjectHumanThreadService {
     const current = this.#store.current(projectId);
     if (!current || current.status !== 'replacement-pending') return [];
     const boundIds = new Set(this.#store.history(projectId).map((item) => item.conversationId));
-    return this.#authority.candidates(projectRoot).filter((item) => !boundIds.has(item.conversationId));
+    return this.#authority.adoptableCandidates(projectRoot).filter((item) => !boundIds.has(item.conversationId));
   }
 
   async resume(input: { projectId: string; projectRoot: string; expectedGeneration: number }): Promise<ReplacementResult> {
@@ -164,7 +164,7 @@ export class ProjectHumanThreadService {
     }
     const boundIds = new Set(this.#store.history(projectId).map((item) => item.conversationId));
     if (boundIds.has(input.conversationId)) throw new Error('Project human thread replacement candidate is already bound.');
-    const candidate = this.#authority.inspect(root.canonicalPath, input.conversationId);
+    const candidate = this.#authority.inspectAdoptable(root.canonicalPath, input.conversationId);
     const reconciliationKey = intent?.idempotencyKey ?? `legacy-reconcile:${projectId}:${input.expectedGeneration}`;
     const next = createBinding(
       {
@@ -228,10 +228,16 @@ export class ProjectHumanThreadService {
     }
     requireRoot(pending, operation.projectRoot);
     const boundIds = new Set(this.#store.history(operation.projectId).map((item) => item.conversationId));
-    let candidates = this.#authority.candidates(operation.projectRoot).filter((item) => !boundIds.has(item.conversationId));
-    if (candidates.length > 1) return { outcome: 'reconciliation-required', candidates };
+    let candidates = this.#authority.adoptableCandidates(operation.projectRoot).filter((item) => !boundIds.has(item.conversationId));
     const activeIntent = this.#store.replacementIntent(operation.projectId);
     const replacementPhase = activeIntent?.createPhase ?? 'not-started';
+    // Candidates discovered before this exact operation durably recorded a
+    // returned identity are never auto-adopted. Same-directory Codex threads
+    // include internal development workers and require explicit provenance
+    // and quiescence reconciliation.
+    if (candidates.length > 0 && replacementPhase !== 'created') {
+      return { outcome: 'reconciliation-required', candidates };
+    }
     if (candidates.length === 0 && replacementPhase === 'created' && activeIntent?.createdCandidate) {
       try {
         const persisted = this.#authority.inspect(operation.projectRoot, activeIntent.createdCandidate.conversationId);
@@ -270,7 +276,7 @@ export class ProjectHumanThreadService {
   current(projectId: string): ProjectHumanThreadBinding | undefined { return this.#store.current(projectId); }
   history(projectId: string): ProjectHumanThreadBinding[] { return this.#store.history(projectId); }
   isBoundConversation(conversationId: string): boolean { return this.#store.isBoundConversation(conversationId); }
-  candidates(projectRoot: string): ProjectHumanThreadCandidate[] { return this.#authority.candidates(projectRoot); }
+  candidates(projectRoot: string): ProjectHumanThreadCandidate[] { return this.#authority.adoptableCandidates(projectRoot); }
 
   #prepare(input: BaseRequest): BaseRequest & { root: ProjectRootIdentity } {
     const root = this.#rootIdentity(input.projectRoot, input.projectId);

@@ -28,6 +28,10 @@ export class ProjectHumanThreadTranscriptController {
     return this.#store.history(this.#threadProjectId(project)).map(publicQuestion);
   }
 
+  canonicalProjectId(user: UserProfile, projectId: string): string {
+    return this.#threadProjectId(this.#owned(user, projectId));
+  }
+
   submit(user: UserProfile, projectId: string, messageId: string, idempotencyKey: string, payload: unknown): ReturnType<typeof publicResponse> {
     const project = this.#owned(user, projectId);
     const body = responseBody.parse(payload);

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import type { ProjectHumanThreadBinding } from '../shared/projectHumanThreadContracts.js';
 import {
@@ -52,9 +53,12 @@ export class ProjectHumanThreadConversationStore {
         turn_digest TEXT NOT NULL CHECK(length(turn_digest)=64),
         state TEXT NOT NULL CHECK(state IN ('pending','sending','delivered','failed','reconciliation-required')),
         attempts INTEGER NOT NULL DEFAULT 0,
-        claimed_at TEXT
+        claimed_at TEXT,
+        worker_pid INTEGER,
+        worker_start_ticks TEXT
       );
     `);
+    this.#migrateWorkerColumns();
     this.#reconcileRunning();
   }
 
@@ -109,7 +113,7 @@ export class ProjectHumanThreadConversationStore {
       const next = revise(turn, { state: 'completed', assistantOutput, updatedAt: this.#now() });
       this.#insertEvent(`turn:${turn.turnId}:completed`, 'completed', { turn: next }, next.updatedAt);
       this.#update(next);
-      this.#db.prepare("UPDATE project_human_thread_turn_outbox SET state='delivered',claimed_at=NULL,turn_json=?,turn_digest=? WHERE turn_id=?").run(stableJson(next), next.turnDigest, turnId);
+      this.#db.prepare("UPDATE project_human_thread_turn_outbox SET state='delivered',claimed_at=NULL,worker_pid=NULL,worker_start_ticks=NULL,turn_json=?,turn_digest=? WHERE turn_id=?").run(stableJson(next), next.turnDigest, turnId);
       return next;
     });
   }
@@ -124,8 +128,25 @@ export class ProjectHumanThreadConversationStore {
       const next = revise(turn, { state, error, updatedAt: this.#now() });
       this.#insertEvent(`turn:${turn.turnId}:${state}`, state, { turn: next }, next.updatedAt);
       this.#update(next);
-      this.#db.prepare('UPDATE project_human_thread_turn_outbox SET state=?,claimed_at=NULL,turn_json=?,turn_digest=? WHERE turn_id=?').run(state, stableJson(next), next.turnDigest, turnId);
+      this.#db.prepare('UPDATE project_human_thread_turn_outbox SET state=?,claimed_at=NULL,worker_pid=NULL,worker_start_ticks=NULL,turn_json=?,turn_digest=? WHERE turn_id=?').run(state, stableJson(next), next.turnDigest, turnId);
       return next;
+    });
+  }
+
+  bindWorker(turnId: string, pid: number, startTicks: string): void {
+    requireId(turnId, 'turn id');
+    if (!Number.isSafeInteger(pid) || pid < 1 || !/^[1-9][0-9]*$/.test(startTicks)) {
+      throw new Error('Project human thread worker identity is invalid.');
+    }
+    this.#transaction(() => {
+      const turn = this.#require(turnId);
+      if (turn.state !== 'running') throw new Error('Project human thread worker turn is not running.');
+      this.#insertEvent(`turn:${turnId}:worker-bound`, 'running', { turn, worker: { pid, startTicks } }, turn.updatedAt);
+      const result = this.#db.prepare(`
+        UPDATE project_human_thread_turn_outbox SET worker_pid=?,worker_start_ticks=?
+        WHERE turn_id=? AND state='sending' AND worker_pid IS NULL AND worker_start_ticks IS NULL
+      `).run(pid, startTicks, turnId);
+      if (Number(result.changes) !== 1) throw new Error('Project human thread worker identity changed.');
     });
   }
 
@@ -161,7 +182,12 @@ export class ProjectHumanThreadConversationStore {
   }
   hasActiveTurn(projectId: string): boolean {
     requireId(projectId, 'project id');
-    return Boolean(this.#db.prepare("SELECT 1 FROM project_human_thread_turns WHERE project_id=? AND state IN ('queued','running') LIMIT 1").get(projectId));
+    if (this.#db.prepare("SELECT 1 FROM project_human_thread_turns WHERE project_id=? AND state IN ('queued','running') LIMIT 1").get(projectId)) return true;
+    const workers = this.#db.prepare(`
+      SELECT worker_pid,worker_start_ticks FROM project_human_thread_turn_outbox
+      WHERE project_id=? AND state='reconciliation-required' AND worker_pid IS NOT NULL
+    `).all(projectId) as unknown as Array<{ worker_pid: number; worker_start_ticks: string }>;
+    return workers.some((worker) => processIdentityMatches(worker.worker_pid, worker.worker_start_ticks));
   }
   pendingOutbox(projectId?: string): ProjectHumanThreadTurn[] {
     const rows = projectId
@@ -179,28 +205,51 @@ export class ProjectHumanThreadConversationStore {
       this.#db.exec('DELETE FROM project_human_thread_turns; DELETE FROM project_human_thread_turn_outbox;');
       for (const row of rows) {
         if (sha256(row.payload_json) !== row.payload_digest) throw new Error('Project human thread turn event digest is invalid.');
-        const payload = JSON.parse(row.payload_json) as { turn: ProjectHumanThreadTurn };
+        const payload = JSON.parse(row.payload_json) as { turn: ProjectHumanThreadTurn; worker?: { pid: number; startTicks: string } };
         const turn = parseProjectHumanThreadTurn(payload.turn);
         this.#upsertProjection(turn);
         if (turn.state === 'queued' || turn.state === 'running') {
           this.#db.prepare('INSERT OR REPLACE INTO project_human_thread_turn_outbox(turn_id,project_id,generation,turn_json,turn_digest,state) VALUES (?,?,?,?,?,?)').run(turn.turnId, turn.projectId, turn.generation, stableJson(turn), turn.turnDigest, turn.state === 'queued' ? 'pending' : 'sending');
+          if (payload.worker) {
+            requireWorkerIdentity(payload.worker.pid, payload.worker.startTicks);
+            this.#db.prepare('UPDATE project_human_thread_turn_outbox SET worker_pid=?,worker_start_ticks=? WHERE turn_id=?')
+              .run(payload.worker.pid, payload.worker.startTicks, turn.turnId);
+          }
         } else if (turn.state === 'completed' || turn.state === 'failed' || turn.state === 'reconciliation-required') {
           this.#db.prepare('INSERT OR REPLACE INTO project_human_thread_turn_outbox(turn_id,project_id,generation,turn_json,turn_digest,state) VALUES (?,?,?,?,?,?)').run(turn.turnId, turn.projectId, turn.generation, stableJson(turn), turn.turnDigest, turn.state === 'completed' ? 'delivered' : turn.state);
+          if (turn.state === 'reconciliation-required' && payload.worker) {
+            requireWorkerIdentity(payload.worker.pid, payload.worker.startTicks);
+            this.#db.prepare('UPDATE project_human_thread_turn_outbox SET worker_pid=?,worker_start_ticks=? WHERE turn_id=?')
+              .run(payload.worker.pid, payload.worker.startTicks, turn.turnId);
+          }
         }
       }
     });
   }
   close(): void { this.#db.close(); }
 
+  #migrateWorkerColumns(): void {
+    const columns = new Set((this.#db.prepare('PRAGMA table_info(project_human_thread_turn_outbox)').all() as unknown as Array<{ name: string }>).map((row) => row.name));
+    if (!columns.has('worker_pid')) this.#db.exec('ALTER TABLE project_human_thread_turn_outbox ADD COLUMN worker_pid INTEGER;');
+    if (!columns.has('worker_start_ticks')) this.#db.exec('ALTER TABLE project_human_thread_turn_outbox ADD COLUMN worker_start_ticks TEXT;');
+  }
+
   #reconcileRunning(): void {
     this.#transaction(() => {
-      const rows = this.#db.prepare("SELECT turn_json FROM project_human_thread_turns WHERE state='running'").all() as unknown as TurnRow[];
+      const rows = this.#db.prepare(`
+        SELECT t.turn_json,o.worker_pid,o.worker_start_ticks
+        FROM project_human_thread_turns t JOIN project_human_thread_turn_outbox o ON o.turn_id=t.turn_id
+        WHERE t.state='running'
+      `).all() as unknown as Array<TurnRow & { worker_pid: number | null; worker_start_ticks: string | null }>;
       for (const row of rows) {
         const turn = parseProjectHumanThreadTurn(JSON.parse(row.turn_json));
         const next = revise(turn, { state: 'reconciliation-required', error: 'The Roadex dispatcher restarted while this turn was running; inspect the exact Codex locator before retrying.', updatedAt: this.#now() });
         const eventId = `turn:${turn.turnId}:reconciliation-required:restart`;
         const existing = this.#db.prepare('SELECT 1 FROM project_human_thread_turn_events WHERE event_id=?').get(eventId);
-        if (!existing) this.#insertEvent(eventId, 'reconciliation-required', { turn: next }, next.updatedAt);
+        const worker = row.worker_pid !== null && row.worker_start_ticks !== null
+          ? { pid: row.worker_pid, startTicks: row.worker_start_ticks }
+          : undefined;
+        if (!existing) this.#insertEvent(eventId, 'reconciliation-required', { turn: next, ...(worker ? { worker } : {}) }, next.updatedAt);
         this.#update(next);
         this.#db.prepare("UPDATE project_human_thread_turn_outbox SET state='reconciliation-required',claimed_at=NULL,turn_json=?,turn_digest=? WHERE turn_id=?").run(stableJson(next), next.turnDigest, turn.turnId);
       }
@@ -253,4 +302,22 @@ function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
   if (value && typeof value === 'object') { const record = value as Record<string, unknown>; return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`; }
   return JSON.stringify(value);
+}
+
+function processIdentityMatches(pid: number, expectedStartTicks: string): boolean {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const end = stat.lastIndexOf(') ');
+    if (end < 0) return false;
+    const fields = stat.slice(end + 2).trim().split(/\s+/);
+    return fields[19] === expectedStartTicks;
+  } catch {
+    return false;
+  }
+}
+
+function requireWorkerIdentity(pid: number, startTicks: string): void {
+  if (!Number.isSafeInteger(pid) || pid < 1 || !/^[1-9][0-9]*$/.test(startTicks)) {
+    throw new Error('Project human thread worker identity is invalid.');
+  }
 }

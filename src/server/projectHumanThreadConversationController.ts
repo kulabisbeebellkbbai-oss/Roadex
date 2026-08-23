@@ -19,12 +19,13 @@ export class ProjectHumanThreadConversationController {
     this.#current = current ?? (() => undefined);
   }
 
-  async read(user: UserProfile, projectId: string): Promise<{ conversationId: string; generation: number; hasEarlierTurns: boolean; turns: Array<ReturnType<typeof publicTurn>> }> {
+  async read(user: UserProfile, projectId: string): Promise<{ canonicalProjectId: string; conversationId: string; generation: number; hasEarlierTurns: boolean; turns: Array<ReturnType<typeof publicTurn>> }> {
     const project = this.#owned(user, projectId);
     const binding = this.#current(project.projectId, project.root) ?? this.#current(project.projectId);
     if (!binding || binding.status !== 'active') throw new Error('Project human thread is unavailable.');
-    const history = this.#store.historyForBinding(project.projectId, binding.conversationId, binding.generation);
+    const history = this.#store.historyForBinding(binding.projectId, binding.conversationId, binding.generation);
     return {
+      canonicalProjectId: binding.projectId,
       conversationId: binding.conversationId,
       generation: binding.generation,
       hasEarlierTurns: history.hasEarlierTurns,

@@ -17,11 +17,18 @@ const second: ProjectHumanThreadCandidate = {
 
 class FakeAuthority {
   available: ProjectHumanThreadCandidate[] = [];
+  proven: ProjectHumanThreadCandidate[] = [];
   created: ProjectHumanThreadCandidate[] = [];
   candidates(projectRoot: string) { return projectRoot === root ? [...this.available] : []; }
+  adoptableCandidates(projectRoot: string) { return projectRoot === root ? [...this.proven] : []; }
   inspect(projectRoot: string, conversationId: string) {
     const value = this.available.find((item) => item.conversationId === conversationId);
     if (!value || projectRoot !== root) throw new Error('unavailable');
+    return value;
+  }
+  inspectAdoptable(projectRoot: string, conversationId: string) {
+    const value = this.proven.find((item) => item.conversationId === conversationId);
+    if (!value || projectRoot !== root) throw new Error('candidate lacks durable human-interaction provenance');
     return value;
   }
   async create(projectRoot: string) {
@@ -67,6 +74,7 @@ describe('ProjectHumanThreadService', () => {
   it('requires explicit adoption when any candidate exists', async () => {
     const { authority, service } = setup();
     authority.available.push(first, second);
+    authority.proven.push(first, second);
     await expect(service.createMissing(request)).resolves.toEqual({
       outcome: 'adoption-required',
       candidates: [first, second],
@@ -125,7 +133,7 @@ describe('ProjectHumanThreadService', () => {
       throw new Error('response lost');
     });
     await expect(service.createMissing(request)).rejects.toThrow(/response lost/);
-    await expect(service.createMissing(request)).resolves.toEqual({ outcome: 'adoption-required', candidates: [first] });
+    await expect(service.createMissing(request)).resolves.toEqual({ outcome: 'reconciliation-required', candidates: [] });
   });
 
   it('never retries an ambiguous replacement create after a restart', async () => {
@@ -156,6 +164,7 @@ describe('ProjectHumanThreadService', () => {
       const value = authority.created.shift();
       if (!value) throw new Error('no controlled candidate');
       authority.available.push(value);
+      authority.proven.push(value);
       return value;
     });
     const replacement = { ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered', idempotencyKey: 'replace:arcade:no-effect' };
@@ -164,7 +173,7 @@ describe('ProjectHumanThreadService', () => {
     expect(create).toHaveBeenCalledTimes(2);
   });
 
-  it('adopts an invisible post-create candidate and never issues a second create', async () => {
+  it('does not silently adopt an unproven candidate after an ambiguous create', async () => {
     const { authority, service } = setup();
     authority.created.push(first, second);
     await service.createMissing(request);
@@ -176,7 +185,7 @@ describe('ProjectHumanThreadService', () => {
     });
     const replacement = { ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered', idempotencyKey: 'replace:arcade:invisible' };
     await expect(service.replace(replacement)).rejects.toThrow(/post-create response lost/);
-    await expect(service.replace(replacement)).resolves.toMatchObject({ outcome: 'replaced', binding: { generation: 2, creationMode: 'adopted' } });
+    await expect(service.replace(replacement)).resolves.toEqual({ outcome: 'reconciliation-required', candidates: [] });
     expect(create).toHaveBeenCalledTimes(1);
   });
 
@@ -237,6 +246,7 @@ describe('ProjectHumanThreadService', () => {
     await service.createMissing(request);
     store.beginReplacement('arcade', 1, 'legacy pending', '2026-08-22T12:01:00.000Z', 'legacy:replacement:1');
     authority.available.push(second);
+    authority.proven.push(second);
     const replacement = { ...request, expectedGeneration: 1, reason: 'New reason', idempotencyKey: 'replace:legacy:new' };
     await expect(service.replace(replacement)).rejects.toThrow(/intent conflict/);
     expect(service.replacementCandidates('arcade', root)).toEqual([second]);

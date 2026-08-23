@@ -16,6 +16,8 @@ export type ProjectHumanThreadTurnPublic = {
   updatedAt: string;
 };
 export type ProjectHumanThreadConversationPublic = {
+  requestedProjectId: string;
+  canonicalProjectId: string;
   conversationId: string;
   generation: number;
   hasEarlierTurns: boolean;
@@ -37,12 +39,13 @@ export async function submitProjectHumanThreadTurn(
   correlationId: string,
   idempotencyKey: string,
 ): Promise<ProjectHumanThreadTurnPublic> {
-  const payload = await requestRoadex<{ ok: true; turn: ProjectHumanThreadTurnPublic }>(
+  const payload = await requestRoadex<{ ok: true; requestedProjectId: string; canonicalProjectId: string; turn: ProjectHumanThreadTurnPublic }>(
     `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread/conversation/messages`,
     { method: 'POST', token, body: { content, correlationId }, headers: { 'idempotency-key': idempotencyKey } },
   );
-  if (!isExactRecord(payload, ['ok', 'turn']) || payload.ok !== true
-    || !isTurn(payload.turn, projectId)
+  if (!isExactRecord(payload, ['ok', 'requestedProjectId', 'canonicalProjectId', 'turn']) || payload.ok !== true
+    || payload.requestedProjectId !== projectId || !isId(payload.canonicalProjectId)
+    || !isTurn(payload.turn, payload.canonicalProjectId)
     || payload.turn.content !== content
     || payload.turn.correlationId !== correlationId
     || payload.turn.idempotencyKey !== idempotencyKey) {
@@ -52,11 +55,12 @@ export async function submitProjectHumanThreadTurn(
 }
 
 function isConversation(value: unknown, projectId: string): value is ProjectHumanThreadConversationPublic & { ok: true } {
-  if (!isExactRecord(value, ['ok', 'conversationId', 'generation', 'hasEarlierTurns', 'turns']) || value.ok !== true) return false;
+  if (!isExactRecord(value, ['ok', 'requestedProjectId', 'canonicalProjectId', 'conversationId', 'generation', 'hasEarlierTurns', 'turns']) || value.ok !== true) return false;
   const record = value as Record<string, unknown>;
-  return isUuid(record.conversationId) && isPositiveInteger(record.generation) && typeof record.hasEarlierTurns === 'boolean'
+  return record.requestedProjectId === projectId && isId(record.canonicalProjectId)
+    && isUuid(record.conversationId) && isPositiveInteger(record.generation) && typeof record.hasEarlierTurns === 'boolean'
     && Array.isArray(record.turns) && record.turns.length <= 500
-    && record.turns.every((turn) => isTurn(turn, projectId, record.conversationId, record.generation));
+    && record.turns.every((turn) => isTurn(turn, record.canonicalProjectId as string, record.conversationId, record.generation));
 }
 function isTurn(value: unknown, projectId: string, conversationId?: unknown, generation?: unknown): value is ProjectHumanThreadTurnPublic {
   if (!isExactRecord(value, [

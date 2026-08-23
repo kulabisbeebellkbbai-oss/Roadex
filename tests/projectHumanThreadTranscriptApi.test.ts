@@ -12,8 +12,8 @@ describe('project human thread transcript client', () => {
       const path = String(input);
       calls.push({ path, init });
       const payload = path.endsWith('/respond')
-        ? { ok: true, response: { responseId: 'response-1', messageId: 'question-1', projectId: 'arcade', conversationId: '11111111-1111-1111-1111-111111111111', generation: 1, content: 'Continue', correlationId: 'corr-1', occurredAt: '2026-08-22T13:00:00.000Z' } }
-        : { ok: true, questions: [] };
+        ? { ok: true, requestedProjectId: 'arcade', canonicalProjectId: 'arcade', response: { responseId: 'response-1', messageId: 'question-1', projectId: 'arcade', conversationId: '11111111-1111-1111-1111-111111111111', generation: 1, content: 'Continue', correlationId: 'corr-1', occurredAt: '2026-08-22T13:00:00.000Z' } }
+        : { ok: true, requestedProjectId: 'arcade', canonicalProjectId: 'arcade', questions: [] };
       return new Response(JSON.stringify(payload), {
         status: 200,
         headers: { 'content-type': 'application/json', 'x-roadex-csrf': 'csrf-transcript-test' },

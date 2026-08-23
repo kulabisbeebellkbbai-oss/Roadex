@@ -36,9 +36,9 @@ describe('Roadex client CSRF contract', () => {
       const path = String(input);
       calls.push({ path, init });
       const payload = path.endsWith('/human-thread')
-        ? { ok: true, current: currentBinding(), candidates: [], replacement: { expectedGeneration: 1, reason: 'Resume safely', createPhase: 'reconcile-required' } }
+        ? { ok: true, requestedProjectId: 'arcade', canonicalProjectId: 'arcade', current: currentBinding(), candidates: [], replacement: { expectedGeneration: 1, reason: 'Resume safely', createPhase: 'reconcile-required' } }
         : path.endsWith('/history')
-          ? { ok: true, history: [] }
+          ? { ok: true, requestedProjectId: 'arcade', canonicalProjectId: 'arcade', history: [] }
           : { ok: true, result: { outcome: 'current' } };
       return new Response(JSON.stringify(payload), {
         status: 200,

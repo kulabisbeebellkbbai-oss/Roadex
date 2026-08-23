@@ -71,13 +71,14 @@ describe('ProjectHumanThreadAuthority', () => {
     const registry = join(fixture.root, 'codex-projects.csv');
     writeFileSync(registry, [
       'conversation_id,label,project,command,launcher,created_at,updated_at,source,notes',
-      `${threadId},Arcade,${fixture.project},${command},${join(launchers, command)},,,,`,
+      `${threadId},This is the dedicated Roadex human interaction thread for the Arcade project. Do,${fixture.project},${command},${join(launchers, command)},,,registry+codex-state,`,
       '',
     ].join('\n'));
     chmodSync(registry, 0o600);
     const authority = new ProjectHumanThreadAuthority({
       stateDatabasePath: fixture.state, registryPath: registry, launcherDirectory: launchers,
       sessionExecutable: '/safe/codex-memory-session', tmuxExecutable: '/usr/bin/tmux',
+      runTmux: () => { throw Object.assign(new Error('absent'), { status: 1, stderr: Buffer.from("can't find session: codex-arcade\n") }); },
     });
     const candidate = authority.inspect(fixture.project, threadId);
     const value = {
@@ -91,8 +92,34 @@ describe('ProjectHumanThreadAuthority', () => {
     };
     const binding: ProjectHumanThreadBinding = { ...value, recordDigest: bindingDigest(value) };
     expect(authority.repair(binding)).toMatchObject({ conversationId: threadId });
-    expect(readFileSync(join(launchers, command), 'utf8')).toContain(`resume ${threadId} --cd`);
+    expect(readFileSync(join(launchers, command), 'utf8')).toContain(`CONVERSATION = ${JSON.stringify(threadId)}`);
+    expect(readFileSync(join(launchers, command), 'utf8')).toContain('fcntl.flock');
+    expect(readFileSync(join(launchers, command), 'utf8')).toContain(`EXPECTED_DEV = ${JSON.stringify(candidate.dev)}`);
+    expect(readFileSync(join(launchers, command), 'utf8')).toContain(`EXPECTED_INO = ${JSON.stringify(candidate.ino)}`);
+    expect(authority.adoptableCandidates(fixture.project)).toEqual([candidate]);
     writeFileSync(join(launchers, command), '#!/bin/sh\nexec false\n');
     expect(() => authority.repair(binding)).toThrow(/launcher/);
+  });
+
+  it('treats exact tmux absence and no-server outcomes as quiescent while other failures remain fail-closed', () => {
+    const fixture = setup();
+    const candidate = new ProjectHumanThreadAuthority({ stateDatabasePath: fixture.state }).inspect(fixture.project, threadId);
+    const value = {
+      schemaVersion: 'roadex.project-human-thread-binding.v1' as const,
+      bindingId: 'project-human-thread:arcade:1', projectId: 'arcade',
+      root: { canonicalPath: fixture.project, dev: candidate.dev, ino: candidate.ino },
+      purpose: 'human-interaction' as const, conversationId: threadId, generation: 1,
+      status: 'active' as const, predecessorGeneration: null, creationMode: 'adopted' as const,
+      provenanceDigest: 'a'.repeat(64), createdAt: '2026-08-22T12:00:00.000Z',
+      updatedAt: '2026-08-22T12:00:00.000Z', retiredAt: null,
+    };
+    const binding: ProjectHumanThreadBinding = { ...value, recordDigest: bindingDigest(value) };
+    const absent = Object.assign(new Error('absent'), { status: 1, stderr: Buffer.from("can't find session: codex-arcade\n") });
+    const noServer = Object.assign(new Error('no server'), { status: 1, stderr: Buffer.from('no server running on /tmp/tmux-1000/default\n') });
+    const unavailable = Object.assign(new Error('denied'), { status: 1, stderr: Buffer.from('permission denied\n') });
+    expect(new ProjectHumanThreadAuthority({ stateDatabasePath: fixture.state, runTmux: () => { throw absent; } }).hasLiveLocator(binding)).toBe(false);
+    expect(new ProjectHumanThreadAuthority({ stateDatabasePath: fixture.state, runTmux: () => { throw noServer; } }).hasLiveLocator(binding)).toBe(false);
+    expect(new ProjectHumanThreadAuthority({ stateDatabasePath: fixture.state, runTmux: () => { throw unavailable; } }).hasLiveLocator(binding)).toBe(true);
+    expect(new ProjectHumanThreadAuthority({ stateDatabasePath: fixture.state, runTmux: () => Buffer.from('') }).hasLiveLocator(binding)).toBe(true);
   });
 });

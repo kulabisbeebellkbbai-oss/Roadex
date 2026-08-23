@@ -137,4 +137,27 @@ describe('ProjectHumanThreadController', () => {
     expect(service.resume).not.toHaveBeenCalled();
     expect(service.reconcile).not.toHaveBeenCalled();
   });
+
+  it('applies alias lifecycle fences to the canonical root binding project id', async () => {
+    const service = {
+      current: vi.fn(() => undefined),
+      currentForRoot: vi.fn(() => binding),
+      history: vi.fn(() => [binding]), historyForRoot: vi.fn(() => [binding]), candidates: vi.fn(() => []),
+      createMissing: vi.fn(), adopt: vi.fn(), recover: vi.fn(), replace: vi.fn(),
+      replacementIntent: vi.fn(() => undefined), replacementCandidates: vi.fn(() => []),
+      resume: vi.fn(), reconcile: vi.fn(),
+    };
+    const checked: string[] = [];
+    const controller = new ProjectHumanThreadController(service, {
+      resolveOwnedProject: (_user, projectId) => projectId === 'arcade-renamed'
+        ? { projectId, root: '/srv/arcade', activeRun: false }
+        : undefined,
+      hasPendingInteraction: (projectId) => { checked.push(projectId); return true; },
+    });
+    await expect(controller.replace(owner, 'arcade-renamed', 'replace-alias-key', {
+      expectedGeneration: 1, reason: 'Replace unavailable thread',
+    })).rejects.toThrow(/pending/i);
+    expect(checked).toEqual(['arcade']);
+    expect(service.replace).not.toHaveBeenCalled();
+  });
 });

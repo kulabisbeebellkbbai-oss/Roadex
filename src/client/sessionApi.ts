@@ -313,9 +313,12 @@ async function hasValidProjectHumanThreadResponse(
   expectedProjectId: string,
   expectedProjectRoot: string,
 ): Promise<boolean> {
-  if (!isPlainRecord(value) || !hasExactKeys(value, ['ok', 'candidates'], ['current', 'replacement'])) return false;
+  if (!isPlainRecord(value) || !hasExactKeys(value, ['ok', 'requestedProjectId', 'canonicalProjectId', 'candidates'], ['current', 'replacement'])) return false;
   const response = value;
   if (response.ok !== true
+    || response.requestedProjectId !== expectedProjectId
+    || typeof response.canonicalProjectId !== 'string'
+    || !projectHumanThreadIdPattern.test(response.canonicalProjectId)
     || !Array.isArray(response.candidates)
     || !response.candidates.every(isProjectHumanThreadCandidate)
     || response.candidates.some((candidate) => candidate.canonicalPath !== expectedProjectRoot)
@@ -326,11 +329,11 @@ async function hasValidProjectHumanThreadResponse(
   const replacement = response.replacement as ProjectHumanThreadReplacementPublic | undefined;
   if (current) {
     if (current.status === 'retired') return false;
-    if (current.projectId !== expectedProjectId || current.root.canonicalPath !== expectedProjectRoot) return false;
+    if (current.projectId !== response.canonicalProjectId || current.root.canonicalPath !== expectedProjectRoot) return false;
     const { recordDigest, ...bindingWithoutDigest } = current;
     if (await sha256(canonicalJson(bindingWithoutDigest)) !== recordDigest) return false;
     if (current.status !== 'replacement-pending' && (response.candidates.length > 0 || replacement)) return false;
-  } else if (replacement) {
+  } else if (replacement || response.canonicalProjectId !== expectedProjectId) {
     return false;
   }
   if (replacement && replacement.expectedGeneration !== current?.generation) return false;
@@ -379,7 +382,7 @@ export async function getProjectHumanThread(
   projectId: string,
   projectRoot: string,
 ): Promise<{ current?: ProjectHumanThreadBinding; candidates: ProjectHumanThreadCandidatePublic[]; replacement?: ProjectHumanThreadReplacementPublic }> {
-  const response = await request<{ ok: true; current?: ProjectHumanThreadBinding; candidates: ProjectHumanThreadCandidatePublic[]; replacement?: ProjectHumanThreadReplacementPublic }>(
+  const response = await request<{ ok: true; requestedProjectId: string; canonicalProjectId: string; current?: ProjectHumanThreadBinding; candidates: ProjectHumanThreadCandidatePublic[]; replacement?: ProjectHumanThreadReplacementPublic }>(
     `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread`, { token },
   );
   if (!await hasValidProjectHumanThreadResponse(response, projectId, projectRoot)) {
@@ -392,14 +395,17 @@ export async function getProjectHumanThreadHistory(
   token: string | undefined,
   projectId: string,
 ): Promise<Array<Omit<ProjectHumanThreadBinding, 'root' | 'provenanceDigest'>>> {
-  const response = await request<{ ok: true; history: Array<Omit<ProjectHumanThreadBinding, 'root' | 'provenanceDigest'>> }>(
+  const response = await request<{ ok: true; requestedProjectId: string; canonicalProjectId: string; history: Array<Omit<ProjectHumanThreadBinding, 'root' | 'provenanceDigest'>> }>(
     `/Roadex/api/projects/${encodeURIComponent(projectId)}/human-thread/history`, { token },
   );
   if (!isPlainRecord(response)
-    || !hasExactKeys(response, ['ok', 'history'])
+    || !hasExactKeys(response, ['ok', 'requestedProjectId', 'canonicalProjectId', 'history'])
     || response.ok !== true
+    || response.requestedProjectId !== projectId
+    || typeof response.canonicalProjectId !== 'string'
+    || !projectHumanThreadIdPattern.test(response.canonicalProjectId)
     || !Array.isArray(response.history)
-    || !response.history.every((binding) => isProjectHumanThreadHistoryBinding(binding, projectId))
+    || !response.history.every((binding) => isProjectHumanThreadHistoryBinding(binding, response.canonicalProjectId))
     || response.history.some((binding, index) => index > 0 && binding.generation <= response.history[index - 1]!.generation)) {
     throw new Error('Project human thread history response is invalid.');
   }

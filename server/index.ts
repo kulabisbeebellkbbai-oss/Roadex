@@ -175,9 +175,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const controller = getProjectHumanThreadController();
     try {
       if (req.method === 'GET') {
+        const canonicalProjectId = controller.canonicalProjectId(auth.user, projectId);
         sendJson(res, 200, action === 'history'
-          ? { ok: true, history: controller.history(auth.user, projectId) }
-          : { ok: true, ...controller.read(auth.user, projectId) });
+          ? { ok: true, requestedProjectId: projectId, canonicalProjectId, history: controller.history(auth.user, projectId) }
+          : { ok: true, requestedProjectId: projectId, canonicalProjectId, ...controller.read(auth.user, projectId) });
         return;
       }
       if (!isJsonRequest(req)) {
@@ -209,7 +210,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       const reconciliationRequired = typeof result === 'object' && result !== null
         && 'outcome' in result
         && (result.outcome === 'adoption-required' || result.outcome === 'reconciliation-required');
-      sendJson(res, reconciliationRequired ? 409 : 200, { ok: !reconciliationRequired, result });
+      sendJson(res, reconciliationRequired ? 409 : 200, {
+        ok: !reconciliationRequired,
+        requestedProjectId: projectId,
+        canonicalProjectId: controller.canonicalProjectId(auth.user, projectId),
+        result,
+      });
       if (!reconciliationRequired) scheduleProjectHumanThreadRelay();
       return;
     } catch (error) {
@@ -245,7 +251,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const controller = getProjectHumanThreadConversationController();
     try {
       if (req.method === 'GET') {
-        sendJson(res, 200, { ok: true, ...(await controller.read(auth.user, projectId)) });
+        sendJson(res, 200, { ok: true, requestedProjectId: projectId, ...(await controller.read(auth.user, projectId)) });
         return;
       }
       if (!isJsonRequest(req)) { sendJson(res, 415, { error: { code: 'unsupported_media_type', message: 'JSON content type is required.' } }); return; }
@@ -253,7 +259,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       const idempotency = req.headers['idempotency-key'];
       if (typeof idempotency !== 'string') { sendJson(res, 400, { error: { code: 'idempotency_required', message: 'A valid idempotency key is required.' } }); return; }
       const turn = await controller.enqueue(auth.user, projectId, idempotency, await readJson<unknown>(req, 8_192));
-      sendJson(res, 202, { ok: true, turn });
+      sendJson(res, 202, { ok: true, requestedProjectId: projectId, canonicalProjectId: turn.projectId, turn });
       scheduleProjectHumanThreadConversationDispatch();
       return;
     } catch (error) {
@@ -278,7 +284,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const controller = getProjectHumanThreadTranscriptController();
     try {
       if (req.method === 'GET') {
-        sendJson(res, 200, { ok: true, questions: action === 'history' ? controller.history(auth.user, projectId) : controller.pending(auth.user, projectId) });
+        sendJson(res, 200, {
+          ok: true,
+          requestedProjectId: projectId,
+          canonicalProjectId: controller.canonicalProjectId(auth.user, projectId),
+          questions: action === 'history' ? controller.history(auth.user, projectId) : controller.pending(auth.user, projectId),
+        });
         return;
       }
       if (!validProjectHumanThreadCsrf(req.headers['x-roadex-csrf'])) {
@@ -295,7 +306,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         return;
       }
       const response = controller.submit(auth.user, projectId, match[3], idempotency, await readJson<unknown>(req, 8_192));
-      sendJson(res, 200, { ok: true, response });
+      sendJson(res, 200, { ok: true, requestedProjectId: projectId, canonicalProjectId: response.projectId, response });
       scheduleProjectHumanThreadRelay();
       return;
     } catch (error) {
@@ -1088,11 +1099,16 @@ async function startRoadexApi(): Promise<void> {
           rejectClose(new Error('approval_workflow_host_close_failed'));
           return;
         }
-        projectHumanThreadStore?.close();
-        projectHumanThreadConversationStore?.close();
-        projectHumanThreadTranscriptStore?.close();
-        projectHumanThreadRelay?.close();
-        resolveClose();
+        void (async () => {
+          // The dispatcher owns child writers and must close them before its
+          // durable store. Otherwise shutdown can orphan a writer and the next
+          // process could activate a replacement generation concurrently.
+          await projectHumanThreadConversationDispatcher?.shutdown();
+          projectHumanThreadStore?.close();
+          projectHumanThreadConversationStore?.close();
+          projectHumanThreadTranscriptStore?.close();
+          projectHumanThreadRelay?.close();
+        })().then(resolveClose, () => rejectClose(new Error('project_human_thread_shutdown_failed')));
       });
     }),
     revokeOutstandingGrants: () => workflowRuntime.revokeOutstanding(),
