@@ -1,9 +1,6 @@
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import {
-  parseProjectHumanThreadBinding,
-  type ProjectHumanThreadBinding,
-} from '../shared/projectHumanThreadContracts.js';
+import type { ProjectHumanThreadBinding } from '../shared/projectHumanThreadContracts.js';
 import {
   parseProjectHumanThreadTurn,
   turnDigest,
