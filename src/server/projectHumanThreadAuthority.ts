@@ -3,6 +3,7 @@ import {
   readFileSync, realpathSync, unlinkSync, writeSync,
 } from 'node:fs';
 import { basename, isAbsolute, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { parse } from 'csv-parse/sync';
 import { bootstrapControlledThread } from './projectThreadRegistrar.js';
@@ -112,6 +113,34 @@ export class ProjectHumanThreadAuthority {
     );
     this.#ensureLauncher(launcher, content);
     return candidate;
+  }
+
+  /**
+   * A dedicated Roadex dispatcher may write only when the exact managed tmux
+   * locator is not already live. Any inability to prove that fact is treated
+   * as live so a second writer can never be started accidentally.
+   */
+  hasLiveLocator(binding: ProjectHumanThreadBinding): boolean {
+    if (binding.status !== 'active') return true;
+    const command = `codex-${slugify(basename(binding.root.canonicalPath))}-${binding.conversationId.slice(0, 8)}`;
+    try {
+      execFileSync(this.#tmuxExecutable, ['has-session', '-t', `=${command}`], {
+        stdio: 'ignore', timeout: 2_000,
+      });
+      return true;
+    } catch {
+      // tmux exits non-zero when the exact session is absent. Distinguish a
+      // missing session from an unavailable tmux proof; in the latter case,
+      // fail closed by reporting a live writer.
+      try {
+        execFileSync(this.#tmuxExecutable, ['list-sessions', '-F', '#{session_name}'], {
+          stdio: ['ignore', 'pipe', 'ignore'], timeout: 2_000,
+        });
+        return false;
+      } catch {
+        return true;
+      }
+    }
   }
 
   #readRegistry(): Array<Record<string, string>> {

@@ -811,6 +811,70 @@ a:focus-visible {
   background: #f7fbfe;
 }
 
+.human-thread-turn-composer {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #b6cde0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.human-thread-turn-composer > p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.human-thread-turn-composer form,
+.human-thread-turn-composer form label {
+  display: grid;
+  gap: 8px;
+}
+
+.human-thread-turn-composer textarea {
+  width: 100%;
+  min-height: 80px;
+  padding: 9px 10px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  background: #ffffff;
+}
+
+.human-thread-turn-history {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.human-thread-turn-history li {
+  display: grid;
+  gap: 5px;
+  padding: 9px;
+  border: 1px solid #d5e0e7;
+  border-radius: 6px;
+  background: #f7fbfe;
+}
+
+.human-thread-turn-history li > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.human-thread-turn-history li span {
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 800;
+  text-transform: capitalize;
+}
+
+.human-thread-turn-history li p { margin: 0; line-height: 1.4; }
+
 .human-thread-inbox .human-thread-history-heading > span {
   color: #2f526d;
   border-color: #bfd4e2;
@@ -1902,9 +1966,12 @@ a:focus-visible {
   }
 
   .human-thread-choice-list .secondary-action,
-  .human-thread-response-form .primary-action {
+  .human-thread-response-form .primary-action,
+  .human-thread-turn-composer .primary-action {
     width: 100%;
   }
+
+  .human-thread-turn-history li > div { align-items: flex-start; flex-direction: column; gap: 3px; }
 
   .app-shell {
     display: block;

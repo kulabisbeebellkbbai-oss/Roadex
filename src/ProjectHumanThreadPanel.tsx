@@ -14,6 +14,11 @@ import {
   submitProjectHumanThreadResponse,
   type ProjectHumanThreadPublicQuestion,
 } from './client/projectHumanThreadTranscriptApi';
+import {
+  getProjectHumanThreadConversation,
+  submitProjectHumanThreadTurn,
+  type ProjectHumanThreadConversationPublic,
+} from './client/projectHumanThreadConversationApi';
 import type { ProjectHumanThreadBinding } from './shared/projectHumanThreadContracts';
 import type { WorkspaceRef } from './shared/sessionContracts';
 import {
@@ -59,6 +64,11 @@ type ProjectHumanThreadPanelViewProps = {
   transcriptError?: string;
   onResponseDraft?: (messageId: string, content: string) => void;
   onRespond?: (messageId: string, content: string) => void;
+  conversation?: ProjectHumanThreadConversationPublic;
+  turnDraft?: string;
+  turnSending?: boolean;
+  onTurnDraft?: (content: string) => void;
+  onSendTurn?: (content: string) => void;
 };
 
 const emptySnapshot: ProjectHumanThreadSnapshot = { candidates: [], history: [] };
@@ -77,8 +87,12 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
   const [transcriptError, setTranscriptError] = useState('');
   const [responseDrafts, setResponseDrafts] = useState<Record<string, string>>({});
   const [respondingMessageId, setRespondingMessageId] = useState('');
+  const [conversation, setConversation] = useState<ProjectHumanThreadConversationPublic>();
+  const [turnDraft, setTurnDraft] = useState('');
+  const [turnSending, setTurnSending] = useState(false);
   const refreshFence = useRef(new ProjectHumanThreadRefreshFence());
   const transcriptRefreshFence = useRef(new ProjectHumanThreadRefreshFence());
+  const transcriptEnabledRef = useRef(false);
   const activeProjectIdentityRef = useRef<ProjectHumanThreadProjectIdentity | undefined>(undefined);
   const activeProjectId = project?.id;
   const activeProjectRoot = project?.root;
@@ -94,18 +108,20 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
   }, [activeProjectId, activeProjectRoot, activeAuthEpoch]);
 
   async function refreshTranscript(): Promise<void> {
-    if (!project) return;
+    if (!project || !transcriptEnabledRef.current) return;
     const selectedProject = { id: project.id, root: project.root, authEpoch: token ?? '' };
     const refreshToken = transcriptRefreshFence.current.beginIfCurrent(selectedProject, activeProjectIdentityRef.current);
     if (!refreshToken) return;
     try {
-      const [pending, history] = await Promise.all([
+      const [pending, history, currentConversation] = await Promise.all([
         getProjectHumanThreadTranscript(token, selectedProject.id, 'pending'),
         getProjectHumanThreadTranscript(token, selectedProject.id, 'history'),
+        getProjectHumanThreadConversation(token, selectedProject.id),
       ]);
       if (!transcriptRefreshFence.current.isCurrent(refreshToken, activeProjectIdentityRef.current)) return;
       setPendingQuestions(pending);
       setTranscriptHistory(history);
+      setConversation(currentConversation);
       setTranscriptError('');
     } catch (cause) {
       if (!transcriptRefreshFence.current.isCurrent(refreshToken, activeProjectIdentityRef.current)) return;
@@ -129,7 +145,16 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
       setSnapshot({ current: thread.current, candidates: thread.candidates, history, replacement: thread.replacement });
       setLifecycleValidated(true);
       setError('');
-      await refreshTranscript();
+      if (thread.current?.status === 'active') {
+        transcriptEnabledRef.current = true;
+        await refreshTranscript();
+      } else {
+        transcriptEnabledRef.current = false;
+        setPendingQuestions([]);
+        setTranscriptHistory([]);
+        setConversation(undefined);
+        setTranscriptError('');
+      }
     } catch (cause) {
       if (!refreshFence.current.isCurrent(refreshToken, activeProjectIdentityRef.current)) return;
       setLifecycleValidated(false);
@@ -152,9 +177,22 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
     setReplaceReason('');
     setPendingQuestions([]);
     setTranscriptHistory([]);
+    setConversation(undefined);
+    setTurnDraft('');
+    setTurnSending(false);
     setTranscriptError('');
+    transcriptEnabledRef.current = false;
     void refresh();
   // refresh intentionally tracks project identity and token only.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id, project?.root, token]);
+
+  useEffect(() => {
+    if (!project) return undefined;
+    const interval = setInterval(() => { void refreshTranscript(); }, 3_000);
+    return () => clearInterval(interval);
+  // The poll follows the selected project/auth identity; refreshTranscript
+  // intentionally reads the current fenced refs.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.id, project?.root, token]);
 
@@ -224,6 +262,9 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
       responseDrafts={responseDrafts}
       respondingMessageId={respondingMessageId}
       transcriptError={transcriptError}
+      conversation={conversation}
+      turnDraft={turnDraft}
+      turnSending={turnSending}
       onResponseDraft={(messageId, content) => setResponseDrafts((current) => ({ ...current, [messageId]: content }))}
       onRespond={(messageId, content) => {
         if (!project || !content.trim()) return;
@@ -244,6 +285,24 @@ export function ProjectHumanThreadPanel({ token, project }: ProjectHumanThreadPa
           .finally(() => {
             if (sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) setRespondingMessageId('');
           });
+      }}
+      onTurnDraft={setTurnDraft}
+      onSendTurn={(content) => {
+        if (!project || !content.trim() || turnSending) return;
+        const selectedProject = { id: project.id, root: project.root, authEpoch: token ?? '' };
+        if (!sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) return;
+        setTurnSending(true);
+        void submitProjectHumanThreadTurn(token, project.id, content.trim(), `roadex-human-${Date.now()}`, makeIdempotencyKey('turn'))
+          .then((turn) => {
+            if (!sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) return;
+            setConversation((current) => current ? { ...current, turns: [...current.turns, turn] } : current);
+            setTurnDraft('');
+            return refreshTranscript();
+          })
+          .catch((cause) => {
+            if (sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) setTranscriptError(cause instanceof Error ? cause.message : 'Project message could not be sent.');
+          })
+          .finally(() => { if (sameProjectHumanThreadIdentity(selectedProject, activeProjectIdentityRef.current)) setTurnSending(false); });
       }}
     />
   );
@@ -274,6 +333,11 @@ export function ProjectHumanThreadPanelView({
   transcriptError,
   onResponseDraft,
   onRespond,
+  conversation,
+  turnDraft = '',
+  turnSending = false,
+  onTurnDraft,
+  onSendTurn,
 }: ProjectHumanThreadPanelViewProps) {
   const current = snapshot.current;
   const canReplace = lifecycleValidated && !loading && Boolean(current) && current?.status !== 'replacement-pending' && !busyAction;
@@ -460,6 +524,18 @@ export function ProjectHumanThreadPanelView({
           </details>
         ) : null}
       </section>
+
+      {current?.status === 'active' && lifecycleValidated && !error ? (
+        <section className="human-thread-turn-composer" aria-label="Send a message to the project thread" data-testid="project-human-thread-turn-composer">
+          <div className="human-thread-history-heading"><div><MessageSquare size={17} /><strong>Message the project thread</strong></div><span>Dedicated writer</span></div>
+          <p>Send a normal conversation message to this project’s dedicated Roadex thread. Overseer approvals remain separate.</p>
+          <form onSubmit={(event) => { event.preventDefault(); onSendTurn?.(turnDraft); }}>
+            <label><span>Your message</span><textarea aria-label="Message the project thread" value={turnDraft} onChange={(event) => onTurnDraft?.(event.target.value)} /></label>
+            <button className="primary-action" disabled={!turnDraft.trim() || turnSending} type="submit">{turnSending ? 'Sending…' : 'Send message'}</button>
+          </form>
+          {conversation?.turns.length ? <ol className="human-thread-turn-history">{conversation.turns.map((turn) => <li key={turn.turnId} data-testid={`project-human-thread-turn-${turn.turnId}`}><div><strong>{turn.content}</strong><span>{turn.state}</span></div>{turn.assistantOutput ? <p>{turn.assistantOutput}</p> : null}{turn.error ? <p className="human-thread-transcript-error">{turn.error}</p> : null}</li>)}</ol> : <p>No direct Roadex messages have been sent in this conversation.</p>}
+        </section>
+      ) : null}
 
       <div className="human-thread-history" data-testid="project-human-thread-history">
         <div className="human-thread-history-heading">

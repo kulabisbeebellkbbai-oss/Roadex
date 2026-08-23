@@ -77,6 +77,10 @@ import { ProjectHumanThreadQuestionReceiver } from '../src/server/projectHumanTh
 import { ProjectHumanThreadTranscriptRelayCoordinator } from '../src/server/projectHumanThreadTranscriptRelay.js';
 import { resolveWorkspaceForUser } from '../src/server/workspacePolicy.js';
 import { ProjectHumanThreadRelay, ProjectHumanThreadRelayCoordinator } from '../src/server/projectHumanThreadRelay.js';
+import { ProjectHumanThreadConversationStore } from '../src/server/projectHumanThreadConversationStore.js';
+import { ProjectHumanThreadConversationController } from '../src/server/projectHumanThreadConversationController.js';
+import { ProjectHumanThreadConversationDispatcher } from '../src/server/projectHumanThreadConversationDispatcher.js';
+import { isAvailableProjectHumanThreadConversationRoute, validProjectHumanThreadConversationCsrf } from '../src/server/projectHumanThreadConversationPolicy.js';
 
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8780);
@@ -86,6 +90,7 @@ let projectCreationBroker: ProjectCreationBroker | undefined;
 let projectCreationWorker: ProjectCreationWorker | undefined;
 let appPublicationRequester: AppPublicationRequester | undefined;
 let projectHumanThreadStore: ProjectHumanThreadStore | undefined;
+let projectHumanThreadAuthority: ProjectHumanThreadAuthority | undefined;
 let projectHumanThreadService: ProjectHumanThreadService | undefined;
 let projectHumanThreadController: ProjectHumanThreadController | undefined;
 let projectHumanThreadRelay: ProjectHumanThreadRelay | undefined;
@@ -94,6 +99,10 @@ let projectHumanThreadTranscriptStore: ProjectHumanThreadTranscriptStore | undef
 let projectHumanThreadTranscriptController: ProjectHumanThreadTranscriptController | undefined;
 let projectHumanThreadQuestionReceiver: ProjectHumanThreadQuestionReceiver | undefined;
 let projectHumanThreadTranscriptRelayCoordinator: ProjectHumanThreadTranscriptRelayCoordinator | undefined;
+let projectHumanThreadConversationStore: ProjectHumanThreadConversationStore | undefined;
+let projectHumanThreadConversationController: ProjectHumanThreadConversationController | undefined;
+let projectHumanThreadConversationDispatcher: ProjectHumanThreadConversationDispatcher | undefined;
+let projectHumanThreadConversationDispatchRunning = false;
 state.resolveControlledRunnerGrant = (context) =>
   getProjectCreationBroker().resolveControlledRunnerGrant({
     userId: context.userId,
@@ -224,6 +233,35 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.end(response.body);
     if (response.status === 202) scheduleProjectHumanThreadRelay();
     return;
+  }
+
+  if (url.search === '' && isAvailableProjectHumanThreadConversationRoute(req.method, url.pathname)) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    const match = url.pathname.match(/^\/api\/projects\/([A-Za-z0-9][A-Za-z0-9._:-]{0,159})\/human-thread\/conversation(?:\/messages)?$/);
+    if (!match) { sendJson(res, 404, { error: { code: 'not_found', message: 'Route not found.' } }); return; }
+    const projectId = match[1];
+    const controller = getProjectHumanThreadConversationController();
+    try {
+      if (req.method === 'GET') {
+        sendJson(res, 200, { ok: true, ...(await controller.read(auth.user, projectId)) });
+        return;
+      }
+      if (!isJsonRequest(req)) { sendJson(res, 415, { error: { code: 'unsupported_media_type', message: 'JSON content type is required.' } }); return; }
+      if (!validProjectHumanThreadConversationCsrf(req.headers['x-roadex-csrf'])) { sendJson(res, 403, { error: { code: 'csrf_required', message: 'Gateway CSRF validation is required.' } }); return; }
+      const idempotency = req.headers['idempotency-key'];
+      if (typeof idempotency !== 'string') { sendJson(res, 400, { error: { code: 'idempotency_required', message: 'A valid idempotency key is required.' } }); return; }
+      const turn = await controller.enqueue(auth.user, projectId, idempotency, await readJson<unknown>(req, 8_192));
+      sendJson(res, 202, { ok: true, turn });
+      scheduleProjectHumanThreadConversationDispatch();
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Project human thread conversation request failed.';
+      const notFound = /not found|missing/i.test(message);
+      const conflict = /conflict|queued|running|unavailable|reconciliation|required|live writer|generation/i.test(message);
+      sendJson(res, notFound ? 404 : conflict ? 409 : 400, { error: { code: notFound ? 'not_found' : conflict ? 'thread_conflict' : 'invalid_request', message } });
+      return;
+    }
   }
 
   if (url.search === '' && isAvailableProjectHumanThreadTranscriptRoute(req.method, url.pathname)) {
@@ -763,7 +801,8 @@ function getAppPublicationRequester(): AppPublicationRequester {
 function getProjectHumanThreadController(): ProjectHumanThreadController {
   if (projectHumanThreadController) return projectHumanThreadController;
   projectHumanThreadStore = new ProjectHumanThreadStore();
-  projectHumanThreadService = new ProjectHumanThreadService(projectHumanThreadStore, new ProjectHumanThreadAuthority());
+  projectHumanThreadAuthority = new ProjectHumanThreadAuthority();
+  projectHumanThreadService = new ProjectHumanThreadService(projectHumanThreadStore, projectHumanThreadAuthority);
   state.isProjectHumanThreadConversation = (conversationId) => (
     projectHumanThreadService?.isBoundConversation(conversationId) ?? false
   );
@@ -798,6 +837,39 @@ function getProjectHumanThreadController(): ProjectHumanThreadController {
     },
   });
   return projectHumanThreadController;
+}
+
+function getProjectHumanThreadConversationController(): ProjectHumanThreadConversationController {
+  if (projectHumanThreadConversationController) return projectHumanThreadConversationController;
+  getProjectHumanThreadController();
+  projectHumanThreadConversationStore = new ProjectHumanThreadConversationStore(
+    (projectId) => projectHumanThreadService?.current(projectId),
+  );
+  projectHumanThreadConversationController = new ProjectHumanThreadConversationController(projectHumanThreadConversationStore, {
+    resolveOwnedProject(user, projectId) {
+      const decision = resolveWorkspaceForUser(user, projectId);
+      return decision.ok ? { projectId: decision.workspace.id } : undefined;
+    },
+  }, (projectId) => projectHumanThreadService?.current(projectId));
+  projectHumanThreadConversationDispatcher = new ProjectHumanThreadConversationDispatcher(
+    projectHumanThreadConversationStore,
+    {
+      current: (projectId) => projectHumanThreadService?.current(projectId),
+      hasLiveLocator: (binding) => projectHumanThreadAuthority!.hasLiveLocator(binding),
+    },
+  );
+  return projectHumanThreadConversationController;
+}
+
+function scheduleProjectHumanThreadConversationDispatch(): void {
+  if (process.env.ROADEX_PROJECT_HUMAN_THREAD_ENABLED !== 'true' || projectHumanThreadConversationDispatchRunning) return;
+  projectHumanThreadConversationDispatchRunning = true;
+  queueMicrotask(() => {
+    getProjectHumanThreadConversationController();
+    void projectHumanThreadConversationDispatcher?.dispatchPending().catch(() => {
+      // Turn state records remain durable and expose failed/reconciliation-required status.
+    }).finally(() => { projectHumanThreadConversationDispatchRunning = false; });
+  });
 }
 
 function getProjectHumanThreadTranscriptController(): ProjectHumanThreadTranscriptController {
@@ -977,6 +1049,8 @@ async function startRoadexApi(): Promise<void> {
   getProjectHumanThreadController();
   if (process.env.ROADEX_PROJECT_HUMAN_THREAD_ENABLED === 'true') {
     scheduleProjectHumanThreadRelay();
+    getProjectHumanThreadConversationController();
+    scheduleProjectHumanThreadConversationDispatch();
   }
 
   const poller = startApprovalPoller(
@@ -992,6 +1066,7 @@ async function startRoadexApi(): Promise<void> {
           return;
         }
         projectHumanThreadStore?.close();
+        projectHumanThreadConversationStore?.close();
         projectHumanThreadTranscriptStore?.close();
         projectHumanThreadRelay?.close();
         resolveClose();
