@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -180,6 +180,9 @@ describe('ProjectHumanThreadAuthority', () => {
       updatedAt: '2026-08-22T12:00:01.000Z', retiredAt: null,
     };
     const binding: ProjectHumanThreadBinding = { ...value, recordDigest: bindingDigest(value) };
+    const previousRoot = `${fixture.project}-previous`;
+    renameSync(fixture.project, previousRoot);
+    mkdirSync(fixture.project);
     expect(() => authority.prepareReplacement(binding)).not.toThrow();
     expect(() => authority.prepareReplacement(binding)).not.toThrow();
     expect(readFileSync(launcher, 'utf8')).toContain('retired Roadex human interaction thread');

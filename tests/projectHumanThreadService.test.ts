@@ -16,11 +16,16 @@ const second: ProjectHumanThreadCandidate = {
 };
 
 class FakeAuthority {
+  root = { canonicalPath: root, dev: first.dev, ino: first.ino };
   available: ProjectHumanThreadCandidate[] = [];
   proven: ProjectHumanThreadCandidate[] = [];
   created: ProjectHumanThreadCandidate[] = [];
   receipts = new Map<string, ProjectHumanThreadCandidate>();
   preparedReplacements: string[] = [];
+  rootIdentity(projectRoot: string) {
+    if (projectRoot !== root) throw new Error('wrong root');
+    return { ...this.root };
+  }
   candidates(projectRoot: string) { return projectRoot === root ? [...this.available] : []; }
   adoptableCandidates(projectRoot: string) { return projectRoot === root ? [...this.proven] : []; }
   inspect(projectRoot: string, conversationId: string) {
@@ -190,6 +195,31 @@ describe('ProjectHumanThreadService', () => {
     expect(bootstrap).not.toHaveBeenCalled();
   });
 
+  it('rejects receipt recovery after the prepared project root inode is substituted', async () => {
+    const { authority, service, store } = setup();
+    store.beginCreationIntent('arcade', request.idempotencyKey, {
+      projectRoot: root, provenanceDigest: request.provenanceDigest,
+    }, { canonicalPath: root, dev: first.dev, ino: first.ino });
+    store.markCreationStarted('arcade', request.idempotencyKey);
+    authority.root = { canonicalPath: root, dev: first.dev, ino: '99999' };
+    authority.receipts.set(request.idempotencyKey, { ...first, ino: '99999' });
+    await expect(service.createMissing(request)).rejects.toThrow(/root identity conflict/);
+    expect(store.current('arcade')).toBeUndefined();
+    expect(store.creationIntent('arcade')).toMatchObject({
+      createPhase: 'creating', root: { dev: first.dev, ino: first.ino },
+    });
+  });
+
+  it('rejects a same-call root substitution before persisting the created candidate', async () => {
+    const { authority, service, store } = setup();
+    authority.created.push({ ...first, ino: '99999' });
+    await expect(service.createMissing(request)).rejects.toThrow(/root identity conflict/);
+    expect(store.current('arcade')).toBeUndefined();
+    expect(store.creationIntent('arcade')).toMatchObject({
+      createPhase: 'reconcile-required', root: { dev: first.dev, ino: first.ino },
+    });
+  });
+
   it('persists the exact bootstrapped identity before registration and resumes that registration', async () => {
     const { authority, service, store } = setup();
     authority.created.push(first);
@@ -254,6 +284,38 @@ describe('ProjectHumanThreadService', () => {
       outcome: 'replaced', binding: { conversationId: second.conversationId, creationMode: 'created' },
     });
     expect(bootstrap).not.toHaveBeenCalled();
+  });
+
+  it('rejects a replacement candidate whose root identity differs from the predecessor intent', async () => {
+    const { authority, service, store } = setup();
+    authority.created.push(first);
+    await service.createMissing(request);
+    authority.created.push({ ...second, ino: '99999' });
+    const replacement = {
+      ...request, expectedGeneration: 1, reason: 'Thread cannot be recovered',
+      idempotencyKey: 'replace:arcade:root-substitution',
+    };
+    await expect(service.replace(replacement)).rejects.toThrow(/root identity conflict/);
+    expect(store.current('arcade')).toMatchObject({
+      status: 'replacement-pending', root: { canonicalPath: root, dev: first.dev, ino: first.ino },
+    });
+    expect(store.replacementIntent('arcade')).toMatchObject({ createPhase: 'reconcile-required' });
+  });
+
+  it('replaces a thread after an explicit same-path project root recreation', async () => {
+    const { authority, service } = setup();
+    authority.created.push(first);
+    await service.createMissing(request);
+    authority.root = { canonicalPath: root, dev: first.dev, ino: '99999' };
+    authority.created.push({ ...second, ino: '99999' });
+    const replacement = {
+      ...request, expectedGeneration: 1, reason: 'Project root was repaired and requires a new thread',
+      idempotencyKey: 'replace:arcade:recreated-root',
+    };
+    await expect(service.replace(replacement)).resolves.toMatchObject({
+      outcome: 'replaced',
+      binding: { generation: 2, conversationId: second.conversationId, root: { dev: first.dev, ino: '99999' } },
+    });
   });
 
   it('offers explicit adoption when an ambiguous create left one verifiable candidate', async () => {

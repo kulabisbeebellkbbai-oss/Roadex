@@ -193,24 +193,31 @@ export class ProjectHumanThreadAuthority {
    */
   prepareReplacement(binding: ProjectHumanThreadBinding): void {
     if (binding.status !== 'replacement-pending') throw new Error('Project human thread replacement handoff is unavailable.');
-    const candidate = this.inspect(binding.root.canonicalPath, binding.conversationId);
-    if (candidate.dev !== binding.root.dev || candidate.ino !== binding.root.ino) {
-      throw new Error('Project human thread root identity changed.');
-    }
-    const command = locatorCommand(candidate.canonicalPath, candidate.conversationId);
+    this.#requireConversationPath(binding.root.canonicalPath, binding.conversationId);
+    const command = locatorCommand(binding.root.canonicalPath, binding.conversationId);
     const launcher = join(this.#launcherDirectory, command);
     const rows = this.#readRegistry();
-    const exact = rows.filter((row) => row.conversation_id === candidate.conversationId);
-    if (exact.length !== 1 || exact[0].project !== candidate.canonicalPath
+    const exact = rows.filter((row) => row.conversation_id === binding.conversationId);
+    if (exact.length !== 1 || exact[0].project !== binding.root.canonicalPath
       || exact[0].command !== command || exact[0].launcher !== launcher) {
       throw new Error('Project human thread predecessor locator authority is unavailable.');
     }
-    const retired = retiredLauncherContent(candidate.conversationId);
+    const retired = retiredLauncherContent(binding.conversationId);
     this.#retireControlledThread(binding);
     if (this.#secureLauncherContent(launcher) !== retired) {
       throw new Error('Project human thread predecessor launcher retirement is unavailable.');
     }
-    this.#ensureRetiredTombstone(command, `${candidate.conversationId}:${binding.generation}`);
+    this.#ensureRetiredTombstone(command, `${binding.conversationId}:${binding.generation}`);
+  }
+
+  #requireConversationPath(projectRoot: string, conversationId: string): void {
+    const db = new DatabaseSync(this.#stateDatabasePath, { readOnly: true });
+    try {
+      const row = db.prepare('SELECT id,cwd,archived,created_at FROM threads WHERE id=?').get(conversationId) as ThreadRow | undefined;
+      if (!row || row.archived !== 0 || row.cwd !== projectRoot) {
+        throw new Error('Project human thread predecessor does not bind the recorded project path.');
+      }
+    } finally { db.close(); }
   }
 
   /**

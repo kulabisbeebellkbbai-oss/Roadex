@@ -187,18 +187,27 @@ export class ProjectHumanThreadStore {
   creationIntent(projectId: string): {
     state: 'prepared' | 'completed'; eventId: string; conversationId: string | null;
     createPhase: 'not-started' | 'creating' | 'reconcile-required' | 'created';
+    root: ProjectRootIdentity;
     createdCandidate?: ProjectHumanThreadCandidate;
   } | undefined {
     const row = this.#db.prepare(`
-      SELECT state,event_id,conversation_id,create_phase,created_candidate_json
+      SELECT state,event_id,conversation_id,create_phase,created_candidate_json,
+             root_canonical_path,root_dev,root_ino
       FROM project_human_thread_creation_intents WHERE project_id=?
     `).get(projectId) as {
       state: 'prepared' | 'completed'; event_id: string; conversation_id: string | null;
       create_phase: 'not-started' | 'creating' | 'reconcile-required' | 'created'; created_candidate_json: string | null;
+      root_canonical_path: string | null; root_dev: string | null; root_ino: string | null;
     } | undefined;
+    if (row && (!row.root_canonical_path || !row.root_dev || !row.root_ino)) {
+      throw new Error('Project human thread creation root identity is missing.');
+    }
     return row ? {
       state: row.state, eventId: row.event_id, conversationId: row.conversation_id,
       createPhase: row.create_phase,
+      root: {
+        canonicalPath: row.root_canonical_path!, dev: row.root_dev!, ino: row.root_ino!,
+      },
       ...(row.created_candidate_json ? { createdCandidate: JSON.parse(row.created_candidate_json) as ProjectHumanThreadCandidate } : {}),
     } : undefined;
   }
@@ -298,7 +307,7 @@ export class ProjectHumanThreadStore {
       if (prior.status !== 'active' && prior.status !== 'unavailable') throw new Error('Project human thread cannot be replaced.');
       if (intent) {
         const identity = root ?? prior.root;
-        if (stableRoot(identity) !== stableRoot(prior.root)) throw new Error('Project human thread replacement root conflict.');
+        if (identity.canonicalPath !== prior.root.canonicalPath) throw new Error('Project human thread replacement root conflict.');
         const request = {
           idempotencyKey: intent.idempotencyKey,
           expectedGeneration: intent.expectedGeneration,
@@ -434,7 +443,7 @@ export class ProjectHumanThreadStore {
         || next.status !== 'active'
         || next.generation !== expectedGeneration + 1
         || next.predecessorGeneration !== expectedGeneration
-        || stableRoot(prior.root) !== stableRoot(next.root)) {
+        || prior.root.canonicalPath !== next.root.canonicalPath) {
         throw new Error('Replacement project human thread binding is invalid.');
       }
       const retired = revised(prior, {
@@ -769,7 +778,6 @@ function revised(
   return parseProjectHumanThreadBinding({ ...withoutDigest, recordDigest: bindingDigest(withoutDigest) });
 }
 
-function stableRoot(value: ProjectHumanThreadBinding['root']): string { return stableJson(value); }
 function laterTimestamp(candidate: string, prior: string): string {
   const candidateTime = Date.parse(candidate);
   const priorTime = Date.parse(prior);

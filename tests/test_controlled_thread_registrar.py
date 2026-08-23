@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+import os
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -205,6 +206,28 @@ class ControlledThreadRegistrarTests(unittest.TestCase):
         self.assertEqual(launcher.read_text(encoding="utf-8"), tombstone)
         with self.assertRaisesRegex(RuntimeError, "retired"):
             manager.start_resume_tmux(rows[self.thread_id], attach=False)
+
+    def test_retirement_accepts_only_the_exact_prior_launcher_after_root_recreation(self):
+        self.register()
+        with self.paths.registry.open(encoding="utf-8") as handle:
+            row = next(csv.DictReader(handle))
+        launcher = Path(row["launcher"])
+        prior_content = launcher.read_text(encoding="utf-8")
+        previous = self.project.with_name(f"{self.project.name}-previous")
+        os.rename(self.project, previous)
+        self.project.mkdir()
+        result = manager.retire_controlled_thread(
+            self.retirement_request(), paths=self.paths, enabled=True,
+            hmac_key=self.key, audit_hmac_key=self.audit_key,
+        )
+        self.assertTrue(result["retired"])
+        self.assertNotEqual(prior_content, manager._project_human_thread_launcher_content(
+            manager._read_registry_from(self.paths.registry, self.paths.link_dir)[self.thread_id]
+        ))
+        self.assertEqual(
+            launcher.read_text(encoding="utf-8"),
+            f"# retired Roadex human interaction thread {self.thread_id}\n",
+        )
 
     def test_sync_never_reactivates_a_retired_row_after_tombstone_loss(self):
         self.register()

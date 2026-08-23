@@ -1,8 +1,8 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
-  openSync, readFileSync, realpathSync, writeSync,
+  openSync, readFileSync, realpathSync, unlinkSync, writeSync,
 } from 'node:fs';
 import path from 'node:path';
 import { buildCodexExecArgs, parseCodexJsonlStream } from './codexRunner.js';
@@ -118,14 +118,20 @@ os.execv(TMUX, [TMUX, "new-session", "-A", "-s", COMMAND, "-c", ROOT, WORKER])
 const CODEX_BIN = '/home/god/.local/bin/codex';
 const PYTHON_BIN = '/usr/bin/python3';
 const REGISTRAR = '/home/god/codex_project_manager.py';
+const RENAME_NOREPLACE = `import ctypes, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.renameat2(-100, os.fsencode(sys.argv[1]), -100, os.fsencode(sys.argv[2]), 1) != 0:
+    raise OSError(ctypes.get_errno(), "renameat2 failed")
+`;
 const BOOTSTRAP_PROMPT = [
   'Initialize this already-approved Roadex project thread.',
   'Read AGENTS.md and the existing docs/a-team-summary.md and docs/a-team-plan.md.',
   'Do not replace or expand those approved documents and do not perform repository or remote operations.',
   'Confirm readiness for the next assigned implementation step.',
 ].join(' ');
-const ROOT_LOCKED_BOOTSTRAP = `import fcntl, os, sys
-root, expected_dev, expected_ino, executable, *args = sys.argv[1:]
+const ROOT_LOCKED_BOOTSTRAP = `import ctypes, fcntl, hashlib, hmac, json, os, re, subprocess, sys, uuid
+root, expected_dev, expected_ino, receipt_path, operation_id, executable, *args = sys.argv[1:]
+receipt_key = os.environ.pop("ROADEX_BOOTSTRAP_RECEIPT_KEY", "-")
 fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 st = os.fstat(fd)
 if str(st.st_dev) != expected_dev or str(st.st_ino) != expected_ino:
@@ -136,7 +142,98 @@ except BlockingIOError:
     raise SystemExit("project root already has a writer")
 os.set_inheritable(fd, True)
 os.chdir(root)
-os.execve(executable, [executable, *args], os.environ)
+
+def thread_id(value):
+    if not isinstance(value, dict):
+        return None
+    for key in ("thread_id", "threadId", "conversation_id", "conversationId"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9_-]{8,128}", candidate):
+            return candidate
+    return thread_id(value.get("item"))
+
+def publish_receipt(candidate):
+    if receipt_path == "-":
+        return
+    record = {
+        "schemaVersion": "roadex.project-human-thread-bootstrap-receipt.v2",
+        "operationId": operation_id,
+        "projectRoot": root,
+        "rootDev": expected_dev,
+        "rootIno": expected_ino,
+        "threadId": candidate,
+    }
+    payload = json.dumps(record, separators=(",", ":"), ensure_ascii=False)
+    record["receiptDigest"] = hmac.new(receipt_key.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    content = json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode()
+    publish_bytes(receipt_path, content)
+
+def publish_bytes(destination, content):
+    temporary = os.path.join(os.path.dirname(destination), "." + hashlib.sha256(operation_id.encode()).hexdigest() + "." + str(uuid.uuid4()) + ".pending")
+    temp_fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    try:
+        offset = 0
+        while offset < len(content):
+            offset += os.write(temp_fd, content[offset:])
+        os.fsync(temp_fd)
+        os.fchmod(temp_fd, 0o600)
+    finally:
+        os.close(temp_fd)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.renameat2(-100, os.fsencode(temporary), -100, os.fsencode(destination), 1) != 0:
+            raise OSError(ctypes.get_errno(), "renameat2 failed")
+        parent_fd = os.open(os.path.dirname(receipt_path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+child = subprocess.Popen(
+    [executable, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+    stderr=None, env=os.environ, pass_fds=(fd,),
+)
+observed_candidate = None
+output = []
+output_bytes = 0
+assert child.stdout is not None
+try:
+    for line in child.stdout:
+        output_bytes += len(line)
+        if output_bytes > 64000:
+            raise RuntimeError("bootstrap output too large")
+        try:
+            candidate = thread_id(json.loads(line))
+        except Exception:
+            candidate = None
+        if candidate:
+            if observed_candidate and candidate != observed_candidate:
+                conflict = json.dumps({
+                    "schemaVersion": "roadex.project-human-thread-bootstrap-conflict.v1",
+                    "operationId": operation_id,
+                    "firstThreadId": observed_candidate,
+                    "conflictingThreadId": candidate,
+                }, separators=(",", ":"), ensure_ascii=False).encode()
+                publish_bytes(receipt_path + ".conflict", conflict)
+                raise RuntimeError("bootstrap emitted conflicting thread identities")
+            observed_candidate = candidate
+        output.append(line)
+    exit_code = child.wait()
+    if observed_candidate:
+        publish_receipt(observed_candidate)
+    for line in output:
+        sys.stdout.buffer.write(line)
+        sys.stdout.buffer.flush()
+except BaseException:
+    child.kill()
+    child.wait()
+    raise
+raise SystemExit(exit_code)
 `;
 
 type RegistrationDto = {
@@ -215,16 +312,27 @@ export async function bootstrapControlledThread(
   projectRoot: string,
   env: NodeJS.ProcessEnv,
   operationId?: string,
+  executable = CODEX_BIN,
+  timeoutMs = 120_000,
 ): Promise<string> {
   const rootStat = await import('node:fs').then(({ statSync }) => statSync(projectRoot));
+  const receiptPath = operationId ? bootstrapReceiptPath(operationId, env) : '-';
+  const receiptKey = operationId ? (env.ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY ?? '') : '-';
+  if (operationId && Buffer.byteLength(receiptKey) < 32) {
+    throw new Error('project_human_thread_bootstrap_receipt_key_invalid');
+  }
   const child = spawn(PYTHON_BIN, [
     '-I', '-S', '-c', ROOT_LOCKED_BOOTSTRAP,
-    projectRoot, String(rootStat.dev), String(rootStat.ino), CODEX_BIN,
+    projectRoot, String(rootStat.dev), String(rootStat.ino), receiptPath, operationId ?? '-', executable,
     ...controlledBootstrapArgs(projectRoot),
   ], {
     cwd: projectRoot,
-    env: controlledBootstrapEnvironment(env),
+    env: {
+      ...controlledBootstrapEnvironment(env),
+      ...(operationId ? { ROADEX_BOOTSTRAP_RECEIPT_KEY: receiptKey } : {}),
+    },
     shell: false,
+    detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const completion = new Promise<number | null>((resolve, reject) => {
@@ -239,7 +347,12 @@ export async function bootstrapControlledThread(
   child.stderr.on('data', (chunk: Buffer) => {
     if (Buffer.byteLength(stderr) < 4_096) stderr += String(chunk).slice(0, 4_096 - Buffer.byteLength(stderr));
   });
-  const timer = setTimeout(() => child.kill('SIGKILL'), 120_000);
+  const killGroup = () => {
+    try {
+      if (child.pid) process.kill(-child.pid, 'SIGKILL');
+    } catch { child.kill('SIGKILL'); }
+  };
+  const timer = setTimeout(killGroup, timeoutMs);
   try {
     for await (const chunk of child.stdout) {
       bytes += (chunk as Buffer).byteLength;
@@ -248,19 +361,17 @@ export async function bootstrapControlledThread(
       buffer = parsed.remainder;
       if (parsed.codexThreadId && parsed.codexThreadId !== threadId) {
         threadId = parsed.codexThreadId;
-        if (operationId) persistBootstrapReceipt(operationId, projectRoot, threadId, env);
       }
     }
     if (buffer.trim()) {
       const parsedThreadId = parseCodexJsonlStream(`${buffer}\n`).codexThreadId;
       if (parsedThreadId && parsedThreadId !== threadId) {
         threadId = parsedThreadId;
-        if (operationId) persistBootstrapReceipt(operationId, projectRoot, threadId, env);
       }
     }
     exitCode = await completion;
   } catch (error) {
-    child.kill('SIGKILL');
+    killGroup();
     await completion.catch(() => undefined);
     throw error;
   } finally {
@@ -271,6 +382,9 @@ export async function bootstrapControlledThread(
     if (stderr.includes('project root already has a writer')) error.createEffect = 'none';
     throw error;
   }
+  if (operationId && readBootstrapReceipt(operationId, projectRoot, env) !== threadId) {
+    throw new Error('controlled_bootstrap_receipt_conflict');
+  }
   return threadId;
 }
 
@@ -280,8 +394,15 @@ export async function resolveControlledBootstrap(
   env: NodeJS.ProcessEnv,
   bootstrap: typeof bootstrapControlledThread = bootstrapControlledThread,
 ): Promise<string> {
-  return readBootstrapReceipt(operationId, projectRoot, env)
-    ?? await bootstrap(projectRoot, env, operationId);
+  const recovered = readBootstrapReceipt(operationId, projectRoot, env);
+  if (recovered) return recovered;
+  try {
+    return await bootstrap(projectRoot, env, operationId);
+  } catch (error) {
+    const published = readBootstrapReceipt(operationId, projectRoot, env);
+    if (published) return published;
+    throw error;
+  }
 }
 
 export function readBootstrapReceipt(
@@ -290,6 +411,7 @@ export function readBootstrapReceipt(
   env: NodeJS.ProcessEnv,
 ): string | undefined {
   const receiptPath = bootstrapReceiptPath(operationId, env);
+  requireNoBootstrapConflict(receiptPath);
   let lexical;
   try { lexical = lstatSync(receiptPath); } catch { return undefined; }
   if (!lexical.isFile() || lexical.isSymbolicLink() || lexical.nlink !== 1
@@ -303,13 +425,19 @@ export function readBootstrapReceipt(
     const value = JSON.parse(readFileSync(fd, 'utf8')) as unknown;
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('project_human_thread_bootstrap_receipt_invalid');
     const record = value as Record<string, unknown>;
-    if (Object.keys(record).sort().join(',') !== 'operationId,projectRoot,receiptDigest,schemaVersion,threadId'
-      || record.schemaVersion !== 'roadex.project-human-thread-bootstrap-receipt.v1'
+    if (Object.keys(record).sort().join(',') !== 'operationId,projectRoot,receiptDigest,rootDev,rootIno,schemaVersion,threadId'
+      || record.schemaVersion !== 'roadex.project-human-thread-bootstrap-receipt.v2'
       || record.operationId !== operationId || record.projectRoot !== projectRoot
+      || typeof record.rootDev !== 'string' || !/^\d+$/.test(record.rootDev)
+      || typeof record.rootIno !== 'string' || !/^\d+$/.test(record.rootIno)
       || typeof record.threadId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(record.threadId)
       || typeof record.receiptDigest !== 'string' || !/^[a-f0-9]{64}$/.test(record.receiptDigest)
       || !validBootstrapReceiptDigest(record, env)) {
       throw new Error('project_human_thread_bootstrap_receipt_invalid');
+    }
+    const root = secureRootIdentity(projectRoot);
+    if (record.rootDev !== root.dev || record.rootIno !== root.ino) {
+      throw new Error('project_human_thread_bootstrap_receipt_root_changed');
     }
     const finalOpened = fstatSync(fd);
     const finalLexical = lstatSync(receiptPath);
@@ -318,6 +446,20 @@ export function readBootstrapReceipt(
     }
     return record.threadId;
   } finally { closeSync(fd); }
+}
+
+function requireNoBootstrapConflict(receiptPath: string): void {
+  const conflictPath = `${receiptPath}.conflict`;
+  let lexical;
+  try { lexical = lstatSync(conflictPath); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  if (!lexical.isFile() || lexical.isSymbolicLink() || lexical.nlink !== 1
+    || lexical.uid !== process.getuid?.() || (lexical.mode & 0o777) !== 0o600 || lexical.size > 8_192) {
+    throw new Error('project_human_thread_bootstrap_conflict_invalid');
+  }
+  throw new Error('project_human_thread_bootstrap_conflicted');
 }
 
 function sameReceiptStat(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof fstatSync>): boolean {
@@ -333,18 +475,23 @@ export function persistBootstrapReceipt(
   env: NodeJS.ProcessEnv,
 ): void {
   const receiptPath = bootstrapReceiptPath(operationId, env);
+  const root = secureRootIdentity(projectRoot);
   const receipt = {
-    schemaVersion: 'roadex.project-human-thread-bootstrap-receipt.v1',
+    schemaVersion: 'roadex.project-human-thread-bootstrap-receipt.v2',
     operationId,
     projectRoot,
+    rootDev: root.dev,
+    rootIno: root.ino,
     threadId,
   };
   const content = JSON.stringify({
     ...receipt,
     receiptDigest: bootstrapReceiptDigest(receipt, env),
   });
+  const temporary = joinPrivateReceiptTemporary(receiptPath, operationId);
+  let published = false;
   try {
-    const fd = openSync(receiptPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
     try {
       const bytes = Buffer.from(content);
       let offset = 0;
@@ -352,16 +499,24 @@ export function persistBootstrapReceipt(
       fsyncSync(fd);
       fchmodSync(fd, 0o600);
     } finally { closeSync(fd); }
+    execFileSync(PYTHON_BIN, ['-I', '-S', '-c', RENAME_NOREPLACE, temporary, receiptPath], {
+      env: {}, stdio: ['ignore', 'ignore', 'ignore'], timeout: 5_000,
+    });
+    published = true;
     const parentFd = openSync(path.dirname(receiptPath), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     try { fsyncSync(parentFd); } finally { closeSync(parentFd); }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST'
-      || readBootstrapReceipt(operationId, projectRoot, env) !== threadId) throw error;
-  }
+    if (published || readBootstrapReceipt(operationId, projectRoot, env) !== threadId) throw error;
+  } finally { try { unlinkSync(temporary); } catch { /* renamed or best-effort inert cleanup */ } }
+}
+
+function joinPrivateReceiptTemporary(receiptPath: string, operationId: string): string {
+  const prefix = createHash('sha256').update(operationId).digest('hex');
+  return path.join(path.dirname(receiptPath), `.${prefix}.${randomUUID()}.pending`);
 }
 
 function bootstrapReceiptDigest(
-  receipt: { schemaVersion: string; operationId: string; projectRoot: string; threadId: string },
+  receipt: { schemaVersion: string; operationId: string; projectRoot: string; rootDev: string; rootIno: string; threadId: string },
   env: NodeJS.ProcessEnv,
 ): string {
   const key = env.ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY ?? '';
@@ -374,9 +529,20 @@ function validBootstrapReceiptDigest(record: Record<string, unknown>, env: NodeJ
     schemaVersion: String(record.schemaVersion),
     operationId: String(record.operationId),
     projectRoot: String(record.projectRoot),
+    rootDev: String(record.rootDev),
+    rootIno: String(record.rootIno),
     threadId: String(record.threadId),
   }, env);
   return timingSafeEqual(Buffer.from(expected, 'ascii'), Buffer.from(String(record.receiptDigest), 'ascii'));
+}
+
+function secureRootIdentity(projectRoot: string): { dev: string; ino: string } {
+  const fd = openSync(projectRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(fd);
+    if (realpathSync(projectRoot) !== projectRoot) throw new Error('project_human_thread_bootstrap_root_invalid');
+    return { dev: String(opened.dev), ino: String(opened.ino) };
+  } finally { closeSync(fd); }
 }
 
 function bootstrapReceiptPath(operationId: string, env: NodeJS.ProcessEnv): string {

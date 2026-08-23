@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   controlledBootstrapArgs,
   controlledBootstrapEnvironment,
+  bootstrapControlledThread,
   createProjectThreadFinalizer,
   projectHumanThreadLocator,
   persistBootstrapReceipt,
@@ -95,7 +96,7 @@ describe('controlled project thread finalizer', () => {
       ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY: 'k'.repeat(32),
     };
     const operationId = 'human-thread:arcade:create-1';
-    const projectRoot = '/workspace/Arcade';
+    const projectRoot = mkdtempSync(join(tmpdir(), 'roadex-bootstrap-root-Ω-'));
     const threadId = '01a01569-7874-7f72-bca9-9c91bb869846';
     persistBootstrapReceipt(operationId, projectRoot, threadId, env);
     persistBootstrapReceipt(operationId, projectRoot, threadId, env);
@@ -116,6 +117,85 @@ describe('controlled project thread finalizer', () => {
     expect(() => readBootstrapReceipt(tamperOperationId, projectRoot, env)).toThrow(/receipt_invalid/);
   });
 
+  it('ignores an abandoned partial receipt and publishes the complete record atomically', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'roadex-bootstrap-partial-'));
+    const projectRoot = mkdtempSync(join(tmpdir(), 'roadex-bootstrap-root-'));
+    const env = {
+      ROADEX_PROJECT_HUMAN_THREAD_BOOTSTRAP_RECEIPT_DIR: directory,
+      ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY: 'k'.repeat(32),
+    };
+    const operationId = 'human-thread:arcade:partial-receipt';
+    const threadId = '01a01569-7874-7f72-bca9-9c91bb869846';
+    writeFileSync(join(directory, `.${createHash('sha256').update(operationId).digest('hex')}.crashed.pending`), '{', { mode: 0o600 });
+    persistBootstrapReceipt(operationId, projectRoot, threadId, env);
+    expect(readBootstrapReceipt(operationId, projectRoot, env)).toBe(threadId);
+  });
+
+  it('publishes the external bootstrap receipt only after the child identity stream is terminal', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'roadex-bootstrap-external-'));
+    const projectRoot = mkdtempSync(join(tmpdir(), 'roadex-bootstrap-root-Ω-'));
+    const executable = join(directory, 'fake-codex');
+    const operationId = 'human-thread:arcade:external-receipt';
+    const threadId = '01a01569-7874-7f72-bca9-9c91bb869846';
+    const env = {
+      PATH: '/usr/bin:/bin',
+      ROADEX_PROJECT_HUMAN_THREAD_BOOTSTRAP_RECEIPT_DIR: directory,
+      ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY: 'k'.repeat(32),
+    };
+    writeFileSync(executable, `#!/usr/bin/python3\nimport json, time\nprint(json.dumps({"thread_id": ${JSON.stringify(threadId)}}), flush=True)\ntime.sleep(0.5)\n`, { mode: 0o755 });
+    const completion = bootstrapControlledThread(projectRoot, env, operationId, executable);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(readBootstrapReceipt(operationId, projectRoot, env)).toBeUndefined();
+    await expect(completion).resolves.toBe(threadId);
+    expect(readBootstrapReceipt(operationId, projectRoot, env)).toBe(threadId);
+  });
+
+  it('rejects a bootstrap that emits two distinct conversation identities', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'roadex-bootstrap-conflict-'));
+    const projectRoot = mkdtempSync(join(tmpdir(), 'roadex-bootstrap-root-'));
+    const executable = join(directory, 'fake-codex');
+    const operationId = 'human-thread:arcade:conflicting-receipt';
+    const firstId = '01a01569-7874-7f72-bca9-9c91bb869846';
+    const secondId = '01a01569-7874-7f72-bca9-9c91bb869847';
+    const env = {
+      PATH: '/usr/bin:/bin',
+      ROADEX_PROJECT_HUMAN_THREAD_BOOTSTRAP_RECEIPT_DIR: directory,
+      ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY: 'k'.repeat(32),
+    };
+    writeFileSync(executable, `#!/usr/bin/python3\nimport json, time\nprint(json.dumps({"thread_id": ${JSON.stringify(firstId)}}), flush=True)\ntime.sleep(0.2)\nprint(json.dumps({"thread_id": ${JSON.stringify(secondId)}}), flush=True)\n`, { mode: 0o755 });
+    const resolution = resolveControlledBootstrap(
+      projectRoot, operationId, env,
+      (root, runtimeEnv, id) => bootstrapControlledThread(root, runtimeEnv, id, executable),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(readBootstrapReceipt(operationId, projectRoot, env)).toBeUndefined();
+    await expect(resolution).rejects.toThrow(/bootstrap_conflicted/);
+    expect(() => readBootstrapReceipt(operationId, projectRoot, env)).toThrow(/bootstrap_conflicted/);
+  });
+
+  it('kills the complete external bootstrap process group on timeout', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'roadex-bootstrap-timeout-'));
+    const projectRoot = mkdtempSync(join(tmpdir(), 'roadex-bootstrap-root-'));
+    const executable = join(directory, 'fake-codex');
+    const pidPath = join(directory, 'grandchild.pid');
+    const env = {
+      PATH: '/usr/bin:/bin',
+      ROADEX_PROJECT_HUMAN_THREAD_BOOTSTRAP_RECEIPT_DIR: directory,
+      ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY: 'k'.repeat(32),
+    };
+    writeFileSync(executable, `#!/usr/bin/python3\nimport os, time\nopen(${JSON.stringify(pidPath)}, "w").write(str(os.getpid()))\ntime.sleep(5)\n`, { mode: 0o755 });
+    await expect(bootstrapControlledThread(
+      projectRoot, env, 'human-thread:arcade:timeout', executable, 2_000,
+    )).rejects.toThrow(/controlled_bootstrap_failed/);
+    const childPid = Number(readFileSync(pidPath, 'utf8'));
+    let alive = true;
+    for (let attempt = 0; attempt < 50 && alive; attempt += 1) {
+      try { process.kill(childPid, 0); } catch { alive = false; }
+      if (alive) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(alive).toBe(false);
+  });
+
   it('resumes project finalization from the exact receipt without a second bootstrap', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'roadex-finalizer-receipts-'));
     const env = {
@@ -123,7 +203,7 @@ describe('controlled project thread finalizer', () => {
       ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY: 'k'.repeat(32),
     };
     const operationId = 'project-operation-finalizer-retry';
-    const projectRoot = '/workspace/Imported';
+    const projectRoot = mkdtempSync(join(tmpdir(), 'roadex-finalizer-root-'));
     const threadId = '01a01569-7874-7f72-bca9-9c91bb869848';
     persistBootstrapReceipt(operationId, projectRoot, threadId, env);
     let bootstraps = 0;
@@ -131,5 +211,22 @@ describe('controlled project thread finalizer', () => {
       projectRoot, operationId, env, async () => { bootstraps += 1; return 'unexpected'; },
     )).resolves.toBe(threadId);
     expect(bootstraps).toBe(0);
+  });
+
+  it('recovers the exact externally published receipt after a later bootstrap failure', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'roadex-finalizer-failed-'));
+    const projectRoot = mkdtempSync(join(tmpdir(), 'roadex-finalizer-root-'));
+    const env = {
+      ROADEX_PROJECT_HUMAN_THREAD_BOOTSTRAP_RECEIPT_DIR: directory,
+      ROADEX_CODEX_THREAD_REGISTRAR_HMAC_KEY: 'k'.repeat(32),
+    };
+    const operationId = 'project-operation-finalizer-failed-after-receipt';
+    const threadId = '01a01569-7874-7f72-bca9-9c91bb869848';
+    await expect(resolveControlledBootstrap(
+      projectRoot, operationId, env, async () => {
+        persistBootstrapReceipt(operationId, projectRoot, threadId, env);
+        throw new Error('response lost after receipt');
+      },
+    )).resolves.toBe(threadId);
   });
 });
