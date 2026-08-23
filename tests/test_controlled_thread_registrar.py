@@ -440,6 +440,7 @@ class ControlledThreadRegistrarTests(unittest.TestCase):
         self.register()
         before = self.paths.registry.read_bytes()
         rows = manager._read_registry_from(self.paths.registry, self.paths.link_dir)
+        rows[self.thread_id].notes += ";sync-fixture-change"
         with mock.patch.multiple(
             manager,
             REGISTRY=self.paths.registry,
