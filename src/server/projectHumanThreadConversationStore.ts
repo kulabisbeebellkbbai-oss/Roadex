@@ -97,7 +97,7 @@ export class ProjectHumanThreadConversationStore {
       if (turn.state === 'running') return turn;
       if (turn.state !== 'queued') throw new Error('Project human thread turn is not queued.');
       const next = revise(turn, { state: 'running', updatedAt: this.#now() });
-      this.#insertEvent(`turn:${turn.turnId}:running`, 'running', { turn: next }, next.updatedAt);
+      this.#insertEvent(this.#nextTransitionEventId(turn.turnId, 'running', next.turnDigest), 'running', { turn: next }, next.updatedAt);
       this.#update(next);
       const result = this.#db.prepare("UPDATE project_human_thread_turn_outbox SET state='sending',attempts=attempts+1,claimed_at=? WHERE turn_id=? AND state='pending'").run(next.updatedAt, turnId);
       if (Number(result.changes) !== 1) throw new Error('Project human thread turn outbox claim changed.');
@@ -114,7 +114,7 @@ export class ProjectHumanThreadConversationStore {
       if (turn.state !== 'running') throw new Error('Project human thread turn is not running.');
       if (returnedConversationId !== turn.conversationId) throw new Error('Project human thread returned conversation identity does not match the active binding.');
       const next = revise(turn, { state: 'completed', assistantOutput, updatedAt: this.#now() });
-      this.#insertEvent(`turn:${turn.turnId}:completed`, 'completed', { turn: next }, next.updatedAt);
+      this.#insertEvent(this.#nextTransitionEventId(turn.turnId, 'completed', next.turnDigest), 'completed', { turn: next }, next.updatedAt);
       this.#update(next);
       this.#db.prepare("UPDATE project_human_thread_turn_outbox SET state='delivered',claimed_at=NULL,worker_pid=NULL,worker_start_ticks=NULL,turn_json=?,turn_digest=? WHERE turn_id=?").run(stableJson(next), next.turnDigest, turnId);
       return next;
@@ -132,7 +132,7 @@ export class ProjectHumanThreadConversationStore {
       // A turn may legitimately enter reconciliation more than once across a
       // durable recovery workflow. Bind the event identity to the exact next
       // projection instead of treating the state name as globally unique.
-      this.#insertEvent(`turn:${turn.turnId}:${state}:${next.turnDigest}`, state, { turn: next }, next.updatedAt);
+      this.#insertEvent(this.#nextTransitionEventId(turn.turnId, state, next.turnDigest), state, { turn: next }, next.updatedAt);
       this.#update(next);
       this.#db.prepare('UPDATE project_human_thread_turn_outbox SET state=?,claimed_at=NULL,worker_pid=NULL,worker_start_ticks=NULL,turn_json=?,turn_digest=? WHERE turn_id=?').run(state, stableJson(next), next.turnDigest, turnId);
       return next;
@@ -147,7 +147,7 @@ export class ProjectHumanThreadConversationStore {
     this.#transaction(() => {
       const turn = this.#require(turnId);
       if (turn.state !== 'running') throw new Error('Project human thread worker turn is not running.');
-      this.#insertEvent(`turn:${turnId}:worker-bound`, 'running', { turn, worker: { pid, startTicks } }, turn.updatedAt);
+      this.#insertEvent(this.#nextTransitionEventId(turnId, 'worker-bound', `${turn.turnDigest}:${pid}:${startTicks}`), 'running', { turn, worker: { pid, startTicks } }, turn.updatedAt);
       const result = this.#db.prepare(`
         UPDATE project_human_thread_turn_outbox SET worker_pid=?,worker_start_ticks=?
         WHERE turn_id=? AND state='sending' AND worker_pid IS NULL AND worker_start_ticks IS NULL
@@ -359,6 +359,11 @@ export class ProjectHumanThreadConversationStore {
   #insertEvent(eventId: string, type: TurnState, payload: Record<string, unknown>, occurredAt: string): void {
     const payloadJson = stableJson(payload);
     this.#db.prepare('INSERT INTO project_human_thread_turn_events(event_id,type,payload_json,payload_digest,occurred_at) VALUES (?,?,?,?,?)').run(eventId, type, payloadJson, sha256(payloadJson), occurredAt);
+  }
+  #nextTransitionEventId(turnId: string, transition: string, binding: string): string {
+    const row = this.#db.prepare('SELECT COALESCE(MAX(sequence),0)+1 AS next_sequence FROM project_human_thread_turn_events').get() as { next_sequence: number };
+    if (!Number.isSafeInteger(row.next_sequence) || row.next_sequence < 1) throw new Error('Project human thread event sequence is invalid.');
+    return `turn:${turnId}:${transition}:${row.next_sequence}:${binding}`;
   }
   #transaction<T>(action: () => T): T {
     this.#db.exec('BEGIN IMMEDIATE');

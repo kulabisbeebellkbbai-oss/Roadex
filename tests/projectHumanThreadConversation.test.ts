@@ -264,7 +264,7 @@ describe('project human conversation turns', () => {
     store.close();
   });
 
-  it('requeues only an exact operator-verified undelivered turn after handoff completion', () => {
+  it('requeues and completes only an exact operator-verified undelivered turn after handoff completion', async () => {
     const activeBinding = runtimeBinding();
     const path = join(mkdtempSync(join(tmpdir(), 'roadex-human-turn-')), 'turns.sqlite');
     const store = new ProjectHumanThreadConversationStore(() => activeBinding, { databasePath: path, now: () => now });
@@ -280,6 +280,22 @@ describe('project human conversation turns', () => {
     });
     expect(store.pendingOutbox()).toEqual([expect.objectContaining({ turnId: turn.turnId })]);
     expect(() => store.requeueVerifiedUndelivered(turn.turnId, failed.turnDigest)).toThrow(/does not bind/i);
+    const dispatcher = new ProjectHumanThreadConversationDispatcher(store, {
+      current: () => activeBinding,
+      hasLiveLocator: () => false,
+    }, {
+      spawnProcess: () => {
+        const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; stdin: { write: () => boolean; end: () => void }; exitCode: number | null; pid: number };
+        child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = { write: () => true, end: () => undefined }; child.exitCode = null; child.pid = process.pid;
+        queueMicrotask(() => {
+          child.stdout.emit('data', `{"thread_id":"${activeBinding.conversationId}","type":"assistant_message","message":"recovered"}\n`);
+          child.exitCode = 0; child.emit('close', 0);
+        });
+        return child as never;
+      },
+      executable: '/codex',
+    });
+    await expect(dispatcher.dispatch(turn.turnId)).resolves.toMatchObject({ state: 'completed', assistantOutput: 'recovered' });
     store.close();
   });
 
