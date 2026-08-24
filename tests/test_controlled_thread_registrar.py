@@ -507,6 +507,51 @@ class ControlledThreadRegistrarTests(unittest.TestCase):
                 self.paths.registry, rows, [item]
             )
 
+    def test_sync_never_rebinds_controlled_launcher_to_recreated_root(self):
+        self.register()
+        rows = manager._read_registry_from(self.paths.registry, self.paths.link_dir)
+        item = rows[self.thread_id]
+        before = item.launcher.read_bytes()
+        displaced = self.project.with_name("Project Alpha old")
+        self.project.rename(displaced)
+        self.project.mkdir()
+
+        with mock.patch.multiple(
+            manager,
+            REGISTRY=self.paths.registry,
+            LINK_DIR=self.paths.link_dir,
+            merge_conversations=mock.Mock(return_value=rows),
+        ):
+            manager.sync_registry_and_launchers()
+
+        self.assertEqual(item.launcher.read_bytes(), before)
+
+    def test_discovered_cwd_drift_cannot_downgrade_controlled_row(self):
+        self.register()
+        registered = manager._read_registry_from(
+            self.paths.registry, self.paths.link_dir
+        )
+        renamed = self.workspace / "Renamed Alpha"
+        renamed.mkdir()
+        found = manager.Conversation(
+            conversation_id=self.thread_id,
+            label=self.thread_id,
+            project=renamed,
+            command=manager.command_for(renamed, self.thread_id),
+            launcher=self.paths.link_dir / manager.command_for(renamed, self.thread_id),
+            created_at="",
+            updated_at="2026-08-24T00:00:00+00:00",
+            source="codex-state",
+            notes="",
+        )
+        with mock.patch.object(manager, "read_registry", return_value=registered), mock.patch.object(
+            manager, "discover_threads", return_value={self.thread_id: found}
+        ):
+            merged = manager.merge_conversations()
+
+        self.assertEqual(merged[self.thread_id].project, self.project)
+        self.assertTrue(manager._is_project_human_thread(merged[self.thread_id]))
+
 
 if __name__ == "__main__":
     unittest.main()
