@@ -568,7 +568,11 @@ class ControlledThreadRegistrarTests(unittest.TestCase):
             source="registry+codex-state",
             notes="",
         )
-        self.assertTrue(manager._is_project_human_thread(item))
+        with mock.patch.object(manager, "LINK_DIR", self.paths.link_dir):
+            self.assertTrue(manager._is_project_human_thread(item))
+        item.command = f"{command}-other"
+        with mock.patch.object(manager, "LINK_DIR", self.paths.link_dir):
+            self.assertFalse(manager._is_project_human_thread(item))
 
 
 if __name__ == "__main__":
