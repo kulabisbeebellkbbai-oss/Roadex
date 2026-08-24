@@ -68,7 +68,7 @@ describe('ProjectHumanThreadAuthority', () => {
   it('recreates only the exact same-ID derived launcher from verified registry and state', () => {
     const fixture = setup();
     const launchers = join(fixture.root, 'bin'); mkdirSync(launchers); chmodSync(launchers, 0o700);
-    const command = `codex-arcade-${threadId.slice(0, 8)}`;
+    const command = `codex-arcade-${threadId}`;
     const candidate = new ProjectHumanThreadAuthority({ stateDatabasePath: fixture.state }).inspect(fixture.project, threadId);
     const locator = projectHumanThreadLocator({
       projectName: 'Arcade', projectRoot: fixture.project, conversationId: threadId,
@@ -110,6 +110,14 @@ describe('ProjectHumanThreadAuthority', () => {
   it('treats exact tmux absence and no-server outcomes as quiescent while other failures remain fail-closed', () => {
     const fixture = setup();
     const candidate = new ProjectHumanThreadAuthority({ stateDatabasePath: fixture.state }).inspect(fixture.project, threadId);
+    const launchers = join(fixture.root, 'bin'); mkdirSync(launchers); chmodSync(launchers, 0o700);
+    const command = `codex-arcade-${threadId}`;
+    const registry = join(fixture.root, 'codex-projects.csv');
+    writeFileSync(registry, [
+      'conversation_id,label,project,command,launcher,created_at,updated_at,source,notes',
+      `${threadId},Human interaction,${fixture.project},${command},${join(launchers, command)},,,registry+codex-state,`,
+    ].join('\n'));
+    chmodSync(registry, 0o600);
     const value = {
       schemaVersion: 'roadex.project-human-thread-binding.v1' as const,
       bindingId: 'project-human-thread:arcade:1', projectId: 'arcade',
@@ -123,10 +131,11 @@ describe('ProjectHumanThreadAuthority', () => {
     const absent = Object.assign(new Error('absent'), { status: 1, stderr: Buffer.from("can't find session: codex-arcade\n") });
     const noServer = Object.assign(new Error('no server'), { status: 1, stderr: Buffer.from('no server running on /tmp/tmux-1000/default\n') });
     const unavailable = Object.assign(new Error('denied'), { status: 1, stderr: Buffer.from('permission denied\n') });
-    expect(new ProjectHumanThreadAuthority({ stateDatabasePath: fixture.state, runTmux: () => { throw absent; } }).hasLiveLocator(binding)).toBe(false);
-    expect(new ProjectHumanThreadAuthority({ stateDatabasePath: fixture.state, runTmux: () => { throw noServer; } }).hasLiveLocator(binding)).toBe(false);
-    expect(new ProjectHumanThreadAuthority({ stateDatabasePath: fixture.state, runTmux: () => { throw unavailable; } }).hasLiveLocator(binding)).toBe(true);
-    expect(new ProjectHumanThreadAuthority({ stateDatabasePath: fixture.state, runTmux: () => Buffer.from('') }).hasLiveLocator(binding)).toBe(true);
+    const options = { stateDatabasePath: fixture.state, registryPath: registry, launcherDirectory: launchers };
+    expect(new ProjectHumanThreadAuthority({ ...options, runTmux: () => { throw absent; } }).hasLiveLocator(binding)).toBe(false);
+    expect(new ProjectHumanThreadAuthority({ ...options, runTmux: () => { throw noServer; } }).hasLiveLocator(binding)).toBe(false);
+    expect(new ProjectHumanThreadAuthority({ ...options, runTmux: () => { throw unavailable; } }).hasLiveLocator(binding)).toBe(true);
+    expect(new ProjectHumanThreadAuthority({ ...options, runTmux: () => Buffer.from('') }).hasLiveLocator(binding)).toBe(true);
   });
 
   it('durably retires the exact legacy locator and drains its writer before replacement', () => {

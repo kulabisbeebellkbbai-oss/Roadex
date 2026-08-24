@@ -17,10 +17,11 @@ import {
 
 describe('controlled project thread finalizer', () => {
   it('publishes one exact locator contract shared by bootstrap registration and recovery', () => {
+    const conversationId = '01a01569-7874-7f72-bca9-9c91bb869846';
     const locator = projectHumanThreadLocator({
       projectName: 'Arcade',
       projectRoot: '/tmp/Arcade',
-      conversationId: '01a01569-7874-7f72-bca9-9c91bb869846',
+      conversationId,
       dev: '8',
       ino: '42',
       launcherDirectory: '/tmp/bin',
@@ -30,8 +31,8 @@ describe('controlled project thread finalizer', () => {
     expect(locator).toMatchObject({
       label: 'This is the dedicated Roadex human interaction thread for the Arcade project. Do not use another thread for human interaction.',
       source: PROJECT_HUMAN_THREAD_SOURCE,
-      command: 'codex-arcade-01a01569',
-      launcher: '/tmp/bin/codex-arcade-01a01569',
+      command: `codex-arcade-${conversationId}`,
+      launcher: `/tmp/bin/codex-arcade-${conversationId}`,
     });
     expect(locator.content).toContain('#!/usr/bin/python3');
     expect(locator.content).toContain('fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)');

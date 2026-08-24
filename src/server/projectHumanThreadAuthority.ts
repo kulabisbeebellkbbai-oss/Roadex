@@ -194,7 +194,7 @@ export class ProjectHumanThreadAuthority {
   prepareReplacement(binding: ProjectHumanThreadBinding): void {
     if (binding.status !== 'replacement-pending') throw new Error('Project human thread replacement handoff is unavailable.');
     this.#requireConversationPath(binding.root.canonicalPath, binding.conversationId);
-    const command = locatorCommand(binding.root.canonicalPath, binding.conversationId);
+    const command = this.#bindingCommand(binding);
     const launcher = join(this.#launcherDirectory, command);
     const rows = this.#readRegistry();
     const exact = rows.filter((row) => row.conversation_id === binding.conversationId);
@@ -227,8 +227,25 @@ export class ProjectHumanThreadAuthority {
    */
   hasLiveLocator(binding: ProjectHumanThreadBinding): boolean {
     if (binding.status !== 'active') return true;
-    const command = locatorCommand(binding.root.canonicalPath, binding.conversationId);
+    const command = this.#bindingCommand(binding);
     return this.#locatorIsLive(command);
+  }
+
+  #bindingCommand(binding: ProjectHumanThreadBinding): string {
+    const rows = this.#readRegistry();
+    const exact = rows.filter((row) => row.conversation_id === binding.conversationId);
+    if (exact.length !== 1 || exact[0].project !== binding.root.canonicalPath) {
+      throw new Error('Project human thread locator authority is unavailable.');
+    }
+    const full = locatorCommand(binding.root.canonicalPath, binding.conversationId);
+    const legacy = legacyLocatorCommand(binding.root.canonicalPath, binding.conversationId);
+    if (exact[0].command !== full && exact[0].command !== legacy) {
+      throw new Error('Project human thread locator authority is unavailable.');
+    }
+    if (exact[0].launcher !== join(this.#launcherDirectory, exact[0].command)) {
+      throw new Error('Project human thread locator authority is unavailable.');
+    }
+    return exact[0].command;
   }
 
   #locatorIsLive(command: string): boolean {
@@ -442,6 +459,9 @@ function slugify(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'codex';
 }
 function locatorCommand(projectRoot: string, conversationId: string): string {
+  return `codex-${slugify(basename(projectRoot))}-${conversationId}`;
+}
+function legacyLocatorCommand(projectRoot: string, conversationId: string): string {
   return `codex-${slugify(basename(projectRoot))}-${conversationId.slice(0, 8)}`;
 }
 function retiredLauncherContent(conversationId: string): string {

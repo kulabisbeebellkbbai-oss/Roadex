@@ -51,7 +51,7 @@ export function projectHumanThreadLocator(input: ProjectHumanThreadLocatorInput)
   if (!/^\d+$/.test(input.dev) || !/^\d+$/.test(input.ino)) {
     throw new Error('project_human_thread_root_identity_invalid');
   }
-  const command = `codex-${slugify(input.projectName)}-${input.conversationId.slice(0, 8)}`;
+  const command = `codex-${slugify(input.projectName)}-${input.conversationId}`;
   const launcherDirectory = input.launcherDirectory ?? '/home/god/.local/bin';
   const launcher = `${launcherDirectory}/${command}`;
   return {

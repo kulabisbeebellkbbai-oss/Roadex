@@ -472,6 +472,41 @@ class ControlledThreadRegistrarTests(unittest.TestCase):
             row = next(csv.DictReader(handle))
         self.assertTrue(Path(row["launcher"]).is_file())
 
+    def test_launcher_migration_adopts_exact_orphan_after_crash(self):
+        self.register()
+        rows = manager._read_registry_from(self.paths.registry, self.paths.link_dir)
+        item = rows[self.thread_id]
+        item.command = f"{item.command}-migrated"
+        item.launcher = self.paths.link_dir / item.command
+        item.launcher.write_text(manager._launcher_content(item), encoding="utf-8")
+        item.launcher.chmod(0o755)
+
+        manager._commit_launcher_migration(
+            self.paths.registry, rows, [item]
+        )
+
+        recovered = manager._read_registry_from(
+            self.paths.registry, self.paths.link_dir
+        )[self.thread_id]
+        self.assertEqual(recovered.command, item.command)
+        self.assertEqual(recovered.launcher, item.launcher)
+
+    def test_launcher_migration_rejects_changed_orphan(self):
+        self.register()
+        rows = manager._read_registry_from(self.paths.registry, self.paths.link_dir)
+        item = rows[self.thread_id]
+        item.command = f"{item.command}-migrated"
+        item.launcher = self.paths.link_dir / item.command
+        item.launcher.write_text("untrusted\n", encoding="utf-8")
+        item.launcher.chmod(0o755)
+
+        with self.assertRaisesRegex(
+            ValueError, "launcher_migration_target_conflict"
+        ):
+            manager._commit_launcher_migration(
+                self.paths.registry, rows, [item]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
