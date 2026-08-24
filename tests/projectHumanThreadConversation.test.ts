@@ -142,6 +142,31 @@ describe('project human conversation turns', () => {
     store.close();
   });
 
+  it('uses an absolute Codex executable with the execv writer wrapper by default', async () => {
+    const activeBinding = runtimeBinding();
+    const path = join(mkdtempSync(join(tmpdir(), 'roadex-human-turn-')), 'turns.sqlite');
+    const store = new ProjectHumanThreadConversationStore(() => activeBinding, { databasePath: path, now: () => now });
+    const dispatcher = new ProjectHumanThreadConversationDispatcher(store, {
+      current: () => activeBinding,
+      hasLiveLocator: () => false,
+    }, {
+      spawnProcess: (_executable, args) => {
+        expect(args[4]).toBe('/home/god/.local/bin/codex');
+        const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; stdin: { write: () => boolean; end: () => void }; exitCode: number | null; pid: number };
+        child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = { write: () => true, end: () => undefined }; child.exitCode = null; child.pid = process.pid;
+        queueMicrotask(() => {
+          child.stdout.emit('data', `{"thread_id":"${activeBinding.conversationId}","type":"assistant_message","message":"pong"}\n`);
+          child.exitCode = 0; child.emit('close', 0);
+        });
+        return child as never;
+      },
+    });
+    const turn = store.enqueue(owner.id, activeBinding, 'ping', 'turn-key-default-codex', 'corr-default-codex').turn;
+
+    await expect(dispatcher.dispatch(turn.turnId)).resolves.toMatchObject({ state: 'completed' });
+    store.close();
+  });
+
   it('hands the exact live locator to Roadex before dispatching the same conversation', async () => {
     const activeBinding = runtimeBinding();
     const path = join(mkdtempSync(join(tmpdir(), 'roadex-human-turn-')), 'turns.sqlite');

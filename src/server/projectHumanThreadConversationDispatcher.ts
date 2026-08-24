@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import { buildCodexExecArgs, parseCodexJsonlEvents, parseCodexJsonlStream } from './codexRunner.js';
 import type { ProjectHumanThreadBinding } from '../shared/projectHumanThreadContracts.js';
 import type { ProjectHumanThreadTurn } from '../shared/projectHumanThreadConversationContracts.js';
@@ -18,6 +19,7 @@ try: fcntl.flock(3, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError: raise SystemExit(73)
 os.set_inheritable(3, True)
 os.execv(sys.argv[1], sys.argv[1:])`;
+const DEFAULT_CODEX_EXECUTABLE = '/home/god/.local/bin/codex';
 
 export class ProjectHumanThreadConversationDispatcher {
   readonly #store: ProjectHumanThreadConversationStore;
@@ -32,7 +34,8 @@ export class ProjectHumanThreadConversationDispatcher {
 
   constructor(store: ProjectHumanThreadConversationStore, authority: Authority, options: Options = {}) {
     this.#store = store; this.#authority = authority;
-    this.#executable = options.executable ?? process.env.ROADEX_CODEX_BIN ?? 'codex';
+    this.#executable = options.executable ?? process.env.ROADEX_CODEX_BIN ?? DEFAULT_CODEX_EXECUTABLE;
+    if (!isAbsolute(this.#executable)) throw new Error('Project human thread Codex executable must be absolute.');
     this.#spawn = options.spawnProcess ?? spawn;
     this.#pythonExecutable = options.pythonExecutable ?? '/usr/bin/python3';
     this.#timeoutMs = options.timeoutMs ?? 120_000;
