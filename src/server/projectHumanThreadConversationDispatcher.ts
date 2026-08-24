@@ -20,6 +20,11 @@ except BlockingIOError: raise SystemExit(73)
 os.set_inheritable(3, True)
 os.execv(sys.argv[1], sys.argv[1:])`;
 const DEFAULT_CODEX_EXECUTABLE = '/home/god/.local/bin/codex';
+// Resumed Codex JSONL streams include a bounded copy of the current instruction
+// envelope before assistant events. Keep a hard process-output ceiling while
+// allowing that legitimate envelope; the public assistant result remains
+// independently capped by the conversation store.
+const MAX_CODEX_STREAM_BYTES = 4 * 1024 * 1024;
 
 export class ProjectHumanThreadConversationDispatcher {
   readonly #store: ProjectHumanThreadConversationStore;
@@ -166,7 +171,7 @@ export class ProjectHumanThreadConversationDispatcher {
       timer.unref();
       const consume = (chunk: string): void => {
         bytes += Buffer.byteLength(chunk, 'utf8');
-        if (bytes > 64_000) {
+        if (bytes > MAX_CODEX_STREAM_BYTES) {
           terminalError = new Error('Codex conversation output is too large.');
           clearTimeout(timer);
           try { child.kill('SIGKILL'); } catch { /* best effort */ }

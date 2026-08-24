@@ -167,6 +167,32 @@ describe('project human conversation turns', () => {
     store.close();
   });
 
+  it('accepts a bounded resumed-context envelope larger than the legacy stream cap', async () => {
+    const activeBinding = runtimeBinding();
+    const path = join(mkdtempSync(join(tmpdir(), 'roadex-human-turn-')), 'turns.sqlite');
+    const store = new ProjectHumanThreadConversationStore(() => activeBinding, { databasePath: path, now: () => now });
+    const dispatcher = new ProjectHumanThreadConversationDispatcher(store, {
+      current: () => activeBinding,
+      hasLiveLocator: () => false,
+    }, {
+      spawnProcess: () => {
+        const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; stdin: { write: () => boolean; end: () => void }; exitCode: number | null; pid: number; kill: () => boolean };
+        child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = { write: () => true, end: () => undefined }; child.exitCode = null; child.pid = process.pid; child.kill = () => true;
+        queueMicrotask(() => {
+          child.stdout.emit('data', `${JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'x'.repeat(70_000) }] } })}\n`);
+          child.stdout.emit('data', `{"thread_id":"${activeBinding.conversationId}","type":"assistant_message","message":"bounded response"}\n`);
+          child.exitCode = 0; child.emit('close', 0);
+        });
+        return child as never;
+      },
+      executable: '/codex',
+    });
+    const turn = store.enqueue(owner.id, activeBinding, 'ping', 'turn-key-large-context', 'corr-large-context').turn;
+
+    await expect(dispatcher.dispatch(turn.turnId)).resolves.toMatchObject({ state: 'completed', assistantOutput: 'bounded response' });
+    store.close();
+  });
+
   it('hands the exact live locator to Roadex before dispatching the same conversation', async () => {
     const activeBinding = runtimeBinding();
     const path = join(mkdtempSync(join(tmpdir(), 'roadex-human-turn-')), 'turns.sqlite');
