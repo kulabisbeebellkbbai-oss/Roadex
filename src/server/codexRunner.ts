@@ -17,6 +17,7 @@ import { createStreamEvent } from './mockRunner.js';
 import { isApprovalWorkflowToken } from './approvalWorkflowGrantBroker.js';
 import {
   CONTROLLED_RUNNER_CONFIG_OVERRIDES,
+  PROJECT_HUMAN_THREAD_CONFIG_OVERRIDES,
   CONTROLLED_OPERATION_TOKEN_DIRECTORY,
   APPROVAL_WORKFLOW_TOKEN_DIRECTORY,
   approvalWorkflowConfigOverrides,
@@ -324,21 +325,23 @@ export function buildCodexExecArgs(
   const effectivePrompt = operationOverrides.length
     ? controlledOperationPrompt(prompt)
     : prompt;
+  const isolatedProfile = capabilityProfile.mode !== 'restricted';
+  const profileOverrides = capabilityProfile.mode === 'controlled-project-manager'
+    ? [...CONTROLLED_RUNNER_CONFIG_OVERRIDES, ...operationOverrides, ...workflowOverrides]
+    : capabilityProfile.mode === 'project-human-thread'
+      ? [...PROJECT_HUMAN_THREAD_CONFIG_OVERRIDES]
+      : [];
   const base = [
     'exec',
     '--json',
     // A Roadex-managed project is intentionally usable during its planning
     // phase, before the approved bootstrap workflow creates its Git repository.
     '--skip-git-repo-check',
-    ...(capabilityProfile.mode === 'controlled-project-manager'
+    ...(isolatedProfile
       ? [
           '--ignore-user-config',
-            '--ignore-rules',
-          ...[
-            ...CONTROLLED_RUNNER_CONFIG_OVERRIDES,
-            ...operationOverrides,
-            ...workflowOverrides,
-          ].flatMap((override) => ['--config', override]),
+          ...(capabilityProfile.mode === 'controlled-project-manager' ? ['--ignore-rules'] : []),
+          ...profileOverrides.flatMap((override) => ['--config', override]),
         ]
       : []),
     '--sandbox',

@@ -64,6 +64,33 @@ describe('createCodexRunner', () => {
     ]);
   });
 
+  it('uses a bounded project human-thread profile without suppressing project rules', () => {
+    const args = buildCodexExecArgs(
+      '/tmp/workspace',
+      'continue safely',
+      'thread-123',
+      {
+        mode: 'project-human-thread',
+        profile: 'roadex-project-human-thread',
+      },
+    );
+
+    expect(args).toContain('--ignore-user-config');
+    expect(args).not.toContain('--ignore-rules');
+    expect(args).toContain('approval_policy="never"');
+    expect(args).toContain('sandbox_mode="workspace-write"');
+    expect(args).toContain('sandbox_workspace_write.network_access=false');
+    expect(args).toContain('mcp_servers.superpowers.required=true');
+    expect(args).toContain(
+      'mcp_servers.superpowers.enabled_tools=["superpowers_status","list_superpowers_skills","read_superpowers_skill","read_superpowers_reference","search_superpowers_skills"]',
+    );
+    expect(args).toContain('mcp_servers.superpowers.default_tools_approval_mode="approve"');
+    expect(args).toContain('mcp_servers.overseer.required=true');
+    expect(args).toContain('mcp_servers.overseer.default_tools_approval_mode="approve"');
+    expect(args).not.toContain('mcp_servers.the-a-team.required=true');
+    expect(args).not.toContain('sandbox_mode="danger-full-access"');
+  });
+
   it('loads only the source-controlled capability profile when selected', () => {
     expect(buildCodexExecArgs(
       '/tmp/workspace',

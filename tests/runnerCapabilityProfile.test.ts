@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CONTROLLED_RUNNER_PROFILE,
+  PROJECT_HUMAN_THREAD_CONFIG_OVERRIDES,
   APPROVAL_WORKFLOW_MCP,
   APPROVAL_WORKFLOW_SOCKET,
   APPROVAL_WORKFLOW_TOKEN_DIRECTORY,
@@ -19,6 +20,17 @@ function controlledEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 }
 
 describe('resolveRunnerCapabilityProfile', () => {
+  it('gives dedicated project conversations only bounded coordination and methodology MCP tools', () => {
+    expect(PROJECT_HUMAN_THREAD_CONFIG_OVERRIDES).toContain(
+      'mcp_servers.superpowers.enabled_tools=["superpowers_status","list_superpowers_skills","read_superpowers_skill","read_superpowers_reference","search_superpowers_skills"]',
+    );
+    expect(PROJECT_HUMAN_THREAD_CONFIG_OVERRIDES).toContain(
+      'mcp_servers.overseer.enabled_tools=["service_status","remote_testing_status","record_crew_message","get_crew_request","list_crew_requests","resubmit_crew_request"]',
+    );
+    expect(PROJECT_HUMAN_THREAD_CONFIG_OVERRIDES.join('\n')).not.toContain('the-a-team');
+    expect(PROJECT_HUMAN_THREAD_CONFIG_OVERRIDES.join('\n')).not.toContain('danger-full-access');
+  });
+
   it('always equips managed project turns with a bounded required Playwright MCP', () => {
     expect(CONTROLLED_RUNNER_CONFIG_OVERRIDES).toContain(
       'mcp_servers.playwright.required=true',

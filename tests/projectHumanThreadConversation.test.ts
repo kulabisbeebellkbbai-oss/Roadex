@@ -122,6 +122,12 @@ describe('project human conversation turns', () => {
         expect(executable).toBe('/usr/bin/python3');
         expect(args.slice(0, 3)).toEqual(['-I', '-S', '-c']);
         expect(args).toEqual(expect.arrayContaining(['/codex', 'exec', '--json', 'resume', activeBinding.conversationId, 'ping']));
+        expect(args).toEqual(expect.arrayContaining([
+          '--ignore-user-config',
+          'mcp_servers.superpowers.default_tools_approval_mode="approve"',
+          'mcp_servers.overseer.default_tools_approval_mode="approve"',
+        ]));
+        expect(args).not.toContain('--ignore-rules');
         expect(Array.isArray(options?.stdio)).toBe(true);
         expect((options?.stdio as unknown[])[3]).toEqual(expect.any(Number));
         calls.push(args);

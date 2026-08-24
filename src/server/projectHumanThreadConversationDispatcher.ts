@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { buildCodexExecArgs, parseCodexJsonlEvents, parseCodexJsonlStream } from './codexRunner.js';
+import { PROJECT_HUMAN_THREAD_PROFILE } from './runnerCapabilityProfile.js';
 import type { ProjectHumanThreadBinding } from '../shared/projectHumanThreadContracts.js';
 import type { ProjectHumanThreadTurn } from '../shared/projectHumanThreadConversationContracts.js';
 import { CONTROLLED_WRITER_HANDOFF_ERROR, LIVE_WRITER_HANDOFF_ERROR, type ProjectHumanThreadConversationStore } from './projectHumanThreadConversationStore.js';
@@ -129,7 +130,12 @@ export class ProjectHumanThreadConversationDispatcher {
 
   async #run(turn: ProjectHumanThreadTurn, binding: ProjectHumanThreadBinding): Promise<{ returnedConversationId: string; assistantOutput: string }> {
     const projectRoot = binding.root.canonicalPath;
-    const args = buildCodexExecArgs(projectRoot, turn.content, turn.conversationId);
+    const args = buildCodexExecArgs(
+      projectRoot,
+      turn.content,
+      turn.conversationId,
+      { mode: 'project-human-thread', profile: PROJECT_HUMAN_THREAD_PROFILE },
+    );
     const rootFd = openBoundProjectRoot(binding);
     let child: ReturnType<typeof spawn>;
     try {

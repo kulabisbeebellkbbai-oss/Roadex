@@ -1,4 +1,5 @@
 export const CONTROLLED_RUNNER_PROFILE = 'roadex-controlled-project-manager';
+export const PROJECT_HUMAN_THREAD_PROFILE = 'roadex-project-human-thread';
 export const CONTROLLED_OVERSEER_MCP = '/home/god/Documents/Codex Workspace/Roadex/dist-server/src/server/overseerMcp.js';
 export const CONTROLLED_OPERATIONS_MCP = '/home/god/Documents/Codex Workspace/Roadex/dist-server/src/server/controlledOperationsMcp.js';
 export const CONTROLLED_OPERATIONS_SOCKET = '/run/user/1000/roadex-controlled-operations.sock';
@@ -34,6 +35,25 @@ export const CONTROLLED_RUNNER_CONFIG_OVERRIDES = [
   'mcp_servers.playwright.default_tools_approval_mode="approve"',
 ] as const;
 
+export const PROJECT_HUMAN_THREAD_CONFIG_OVERRIDES = [
+  'approval_policy="never"',
+  'sandbox_mode="workspace-write"',
+  'sandbox_workspace_write.network_access=false',
+  'mcp_servers.superpowers.url="http://127.0.0.1:8793/mcp"',
+  'mcp_servers.superpowers.required=true',
+  'mcp_servers.superpowers.enabled_tools=["superpowers_status","list_superpowers_skills","read_superpowers_skill","read_superpowers_reference","search_superpowers_skills"]',
+  'mcp_servers.superpowers.default_tools_approval_mode="approve"',
+  'mcp_servers.skiller.url="http://127.0.0.1:8794/mcp"',
+  'mcp_servers.skiller.required=true',
+  'mcp_servers.skiller.enabled_tools=["capture_work_product","recommend_skills","record_skill_run"]',
+  'mcp_servers.skiller.default_tools_approval_mode="approve"',
+  'mcp_servers.overseer.command="node"',
+  `mcp_servers.overseer.args=["${CONTROLLED_OVERSEER_MCP}"]`,
+  'mcp_servers.overseer.required=true',
+  'mcp_servers.overseer.enabled_tools=["service_status","remote_testing_status","record_crew_message","get_crew_request","list_crew_requests","resubmit_crew_request"]',
+  'mcp_servers.overseer.default_tools_approval_mode="approve"',
+] as const;
+
 export function controlledOperationConfigOverrides(tokenFile: string | undefined): string[] {
   if (
     !tokenFile
@@ -65,6 +85,10 @@ export function approvalWorkflowConfigOverrides(tokenFile: string | undefined): 
 
 export type RunnerCapabilitySelection =
   | { mode: 'restricted' }
+  | {
+      mode: 'project-human-thread';
+      profile: typeof PROJECT_HUMAN_THREAD_PROFILE;
+    }
   | {
       mode: 'controlled-project-manager';
       profile: typeof CONTROLLED_RUNNER_PROFILE;
