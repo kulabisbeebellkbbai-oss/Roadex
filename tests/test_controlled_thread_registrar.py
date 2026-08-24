@@ -552,6 +552,24 @@ class ControlledThreadRegistrarTests(unittest.TestCase):
         self.assertEqual(merged[self.thread_id].project, self.project)
         self.assertTrue(manager._is_project_human_thread(merged[self.thread_id]))
 
+    def test_legacy_truncated_human_label_remains_reserved(self):
+        command = f"codex-project-alpha-{self.thread_id[:8]}"
+        item = manager.Conversation(
+            conversation_id=self.thread_id,
+            label=(
+                "This is the dedicated Roadex human interaction thread for "
+                "the Project Alpha project. Do"
+            ),
+            project=self.project,
+            command=command,
+            launcher=self.paths.link_dir / command,
+            created_at="",
+            updated_at="",
+            source="registry+codex-state",
+            notes="",
+        )
+        self.assertTrue(manager._is_project_human_thread(item))
+
 
 if __name__ == "__main__":
     unittest.main()
