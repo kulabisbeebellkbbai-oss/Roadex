@@ -193,6 +193,16 @@ export class ProjectHumanThreadAuthority {
    */
   prepareReplacement(binding: ProjectHumanThreadBinding): void {
     if (binding.status !== 'replacement-pending') throw new Error('Project human thread replacement handoff is unavailable.');
+    this.#retireLocator(binding);
+  }
+
+  /** Transfer the exact active conversation from its managed tmux writer to Roadex. */
+  handoffToRoadex(binding: ProjectHumanThreadBinding): void {
+    if (binding.status !== 'active') throw new Error('Project human thread writer handoff is unavailable.');
+    this.#retireLocator(binding);
+  }
+
+  #retireLocator(binding: ProjectHumanThreadBinding): void {
     this.#requireConversationPath(binding.root.canonicalPath, binding.conversationId);
     const command = this.#bindingCommand(binding);
     const launcher = join(this.#launcherDirectory, command);
@@ -228,6 +238,7 @@ export class ProjectHumanThreadAuthority {
   hasLiveLocator(binding: ProjectHumanThreadBinding): boolean {
     if (binding.status !== 'active') return true;
     const command = this.#bindingCommand(binding);
+    if (this.#retiredTombstoneMatches(command, `${binding.conversationId}:${binding.generation}`)) return false;
     return this.#locatorIsLive(command);
   }
 

@@ -14,6 +14,8 @@ type EventRow = { event_id: string; type: string; payload_json: string; payload_
 
 export type ConversationStoreOptions = { databasePath?: string; now?: () => string };
 export type ConversationEnqueueResult = { outcome: 'queued' | 'replayed'; turn: ProjectHumanThreadTurn };
+export const LIVE_WRITER_HANDOFF_ERROR = 'A live writer already owns the exact project-thread locator. Roadex must complete the controlled same-thread handoff before dispatch.';
+const LEGACY_LIVE_WRITER_HANDOFF_ERROR = 'A live writer already owns the exact project-thread locator. Use controlled handoff or Replace binding; Roadex will not terminate it or create a second writer.';
 
 export class ProjectHumanThreadConversationStore {
   readonly #db: DatabaseSync;
@@ -189,6 +191,62 @@ export class ProjectHumanThreadConversationStore {
     `).all(projectId) as unknown as Array<{ worker_pid: number; worker_start_ticks: string }>;
     return workers.some((worker) => processIdentityMatches(worker.worker_pid, worker.worker_start_ticks));
   }
+  requireHandoff(turnId: string): ProjectHumanThreadTurn {
+    requireId(turnId, 'turn id');
+    return this.#transaction(() => {
+      const turn = this.#require(turnId);
+      if (turn.state !== 'queued') throw new Error('Project human thread handoff turn is not queued.');
+      if (turn.writerHandoff === 'required') return turn;
+      if (turn.writerHandoff === 'completed') throw new Error('Project human thread writer handoff is already complete.');
+      const next = revise(turn, { writerHandoff: 'required', updatedAt: this.#now() });
+      this.#insertEvent(`turn:${turn.turnId}:handoff-required`, 'queued', { turn: next }, next.updatedAt);
+      this.#update(next);
+      this.#db.prepare('UPDATE project_human_thread_turn_outbox SET turn_json=?,turn_digest=? WHERE turn_id=? AND state=?')
+        .run(stableJson(next), next.turnDigest, turnId, 'pending');
+      return next;
+    });
+  }
+  completeHandoff(turnId: string): ProjectHumanThreadTurn {
+    requireId(turnId, 'turn id');
+    return this.#transaction(() => {
+      const turn = this.#require(turnId);
+      if (turn.state !== 'queued' || turn.writerHandoff !== 'required') throw new Error('Project human thread writer handoff is not required.');
+      const next = revise(turn, { writerHandoff: 'completed', updatedAt: this.#now() });
+      this.#insertEvent(`turn:${turn.turnId}:handoff-completed`, 'queued', { turn: next }, next.updatedAt);
+      this.#update(next);
+      this.#db.prepare('UPDATE project_human_thread_turn_outbox SET turn_json=?,turn_digest=? WHERE turn_id=? AND state=?')
+        .run(stableJson(next), next.turnDigest, turnId, 'pending');
+      return next;
+    });
+  }
+  requeueHandoffRequired(): ProjectHumanThreadTurn[] {
+    return this.#transaction(() => {
+      const rows = this.#db.prepare(`
+        SELECT t.turn_json FROM project_human_thread_turns t
+        JOIN project_human_thread_turn_outbox o ON o.turn_id=t.turn_id
+        WHERE t.state='reconciliation-required' AND o.state='reconciliation-required'
+          AND o.attempts=0 AND o.worker_pid IS NULL AND o.worker_start_ticks IS NULL
+        ORDER BY t.rowid
+      `).all() as unknown as TurnRow[];
+      const recovered: ProjectHumanThreadTurn[] = [];
+      for (const row of rows) {
+        const turn = parseProjectHumanThreadTurn(JSON.parse(row.turn_json));
+        if (turn.error !== LIVE_WRITER_HANDOFF_ERROR && turn.error !== LEGACY_LIVE_WRITER_HANDOFF_ERROR) continue;
+        const next = revise(turn, {
+          state: 'queued', error: undefined, writerHandoff: 'required', updatedAt: this.#now(),
+        });
+        const eventId = `turn:${turn.turnId}:handoff-requeued`;
+        if (!this.#db.prepare('SELECT 1 FROM project_human_thread_turn_events WHERE event_id=?').get(eventId)) {
+          this.#insertEvent(eventId, 'queued', { turn: next }, next.updatedAt);
+        }
+        this.#update(next);
+        this.#db.prepare("UPDATE project_human_thread_turn_outbox SET state='pending',claimed_at=NULL,worker_pid=NULL,worker_start_ticks=NULL,turn_json=?,turn_digest=? WHERE turn_id=?")
+          .run(stableJson(next), next.turnDigest, turn.turnId);
+        recovered.push(next);
+      }
+      return recovered;
+    });
+  }
   pendingOutbox(projectId?: string): ProjectHumanThreadTurn[] {
     const rows = projectId
       ? this.#db.prepare("SELECT turn_json,turn_digest FROM project_human_thread_turn_outbox WHERE project_id=? AND state='pending' ORDER BY rowid").all(projectId)
@@ -291,9 +349,12 @@ function makeTurn(actorId: string, binding: ProjectHumanThreadBinding, content: 
   };
   return parseProjectHumanThreadTurn({ ...base, turnDigest: turnDigest.record(base) });
 }
-function revise(turn: ProjectHumanThreadTurn, changes: Partial<Pick<ProjectHumanThreadTurn, 'state' | 'assistantOutput' | 'error' | 'updatedAt'>>): ProjectHumanThreadTurn {
+function revise(turn: ProjectHumanThreadTurn, changes: Partial<Pick<ProjectHumanThreadTurn, 'state' | 'writerHandoff' | 'assistantOutput' | 'error' | 'updatedAt'>>): ProjectHumanThreadTurn {
   const base = { ...turn, ...changes };
   delete (base as Partial<ProjectHumanThreadTurn>).turnDigest;
+  for (const key of Object.keys(base) as Array<keyof typeof base>) {
+    if (base[key] === undefined) delete base[key];
+  }
   return parseProjectHumanThreadTurn({ ...base, turnDigest: turnDigest.record(base) });
 }
 function requireId(value: string, label: string): void { if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(value)) throw new Error(`Project human thread ${label} is invalid.`); }

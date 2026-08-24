@@ -363,7 +363,11 @@ export function ProjectHumanThreadPanelView({
     && conversation.generation === current.generation
     && !transcriptError);
   const conversationBlocked = Boolean(conversation?.turns.some((turn) => (
-    turn.state === 'queued' || turn.state === 'running' || turn.state === 'reconciliation-required'
+    turn.state === 'queued' || turn.state === 'running'
+  )));
+  const conversationNeedsAttention = Boolean(conversation?.turns.some((turn) => turn.state === 'reconciliation-required'));
+  const conversationHandoffRequired = Boolean(conversation?.turns.some((turn) => (
+    turn.state === 'reconciliation-required' && isWriterHandoffError(turn.error)
   )));
   return (
     <section className="section-card human-thread-panel" aria-label="Project Roadex human interaction thread" data-testid="project-human-thread-panel">
@@ -394,10 +398,11 @@ export function ProjectHumanThreadPanelView({
             <div className="panel-heading">
               <div><span className="section-label">Active stream</span><h2>Transcript</h2></div>
               <span className={`status-dot${conversationBlocked ? ' working' : ''}`} role="status">
-                {conversationBlocked ? 'Working' : 'Ready'}
+                {conversationBlocked ? 'Working' : conversationHandoffRequired ? 'Handoff required' : conversationNeedsAttention ? 'Needs attention' : 'Ready'}
               </span>
             </div>
             {!conversationReady ? <p className="human-thread-transcript-error">A complete current conversation snapshot is required before sending.</p> : null}
+            {conversationHandoffRequired ? <p className="human-thread-transcript-error">The original conversation remains bound; Roadex will not create a replacement thread.</p> : null}
             <div aria-label="Conversation history" aria-live="polite" className="transcript" tabIndex={0}>
               {conversation?.turns.flatMap((turn) => [
                 <div className="message user" key={`${turn.turnId}:user`}><p>{turn.content}</p><UserRound size={18} /></div>,
@@ -611,6 +616,13 @@ export function ProjectHumanThreadPanelView({
       <div className="human-thread-note"><ShieldCheck size={16} /><span>Only the project binding lifecycle is available here. Overseer approvals are never created or changed by this panel.</span></div>
     </section>
   );
+}
+
+function isWriterHandoffError(error: string | undefined): boolean {
+  return Boolean(error && (
+    error.startsWith('A live writer already owns the exact project-thread locator.')
+    || error.startsWith('Controlled same-thread writer handoff')
+  ));
 }
 
 function sameProjectHumanThreadIdentity(

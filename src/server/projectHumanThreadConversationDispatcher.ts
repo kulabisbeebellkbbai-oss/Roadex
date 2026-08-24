@@ -3,9 +3,13 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } fr
 import { buildCodexExecArgs, parseCodexJsonlEvents, parseCodexJsonlStream } from './codexRunner.js';
 import type { ProjectHumanThreadBinding } from '../shared/projectHumanThreadContracts.js';
 import type { ProjectHumanThreadTurn } from '../shared/projectHumanThreadConversationContracts.js';
-import type { ProjectHumanThreadConversationStore } from './projectHumanThreadConversationStore.js';
+import { LIVE_WRITER_HANDOFF_ERROR, type ProjectHumanThreadConversationStore } from './projectHumanThreadConversationStore.js';
 
-type Authority = { current(projectId: string): ProjectHumanThreadBinding | undefined; hasLiveLocator(binding: ProjectHumanThreadBinding): boolean };
+type Authority = {
+  current(projectId: string): ProjectHumanThreadBinding | undefined;
+  hasLiveLocator(binding: ProjectHumanThreadBinding): boolean;
+  handoffToRoadex?(binding: ProjectHumanThreadBinding): void;
+};
 type Options = { executable?: string; pythonExecutable?: string; spawnProcess?: typeof spawn; timeoutMs?: number };
 
 const WRITER_HELPER = `import fcntl,os,sys
@@ -48,7 +52,7 @@ export class ProjectHumanThreadConversationDispatcher {
   }
 
   async #dispatchOne(turnId: string): Promise<ProjectHumanThreadTurn> {
-    const queued = this.#store.get(turnId);
+    let queued = this.#store.get(turnId);
     if (!queued) throw new Error('Project human thread turn is missing.');
     const binding = this.#authority.current(queued.projectId);
     if (!binding || binding.status !== 'active' || binding.generation !== queued.generation || binding.conversationId !== queued.conversationId) {
@@ -56,9 +60,20 @@ export class ProjectHumanThreadConversationDispatcher {
       throw new Error(`Project human thread turn is reconciliation-required: ${failed.error}`);
     }
     try {
-      if (this.#authority.hasLiveLocator(binding)) {
-        const failed = this.#store.fail(turnId, 'A live writer already owns the exact project-thread locator. Use controlled handoff or Replace binding; Roadex will not terminate it or create a second writer.', true);
-        throw new Error(`Project human thread turn is reconciliation-required: ${failed.error}`);
+      if (queued.writerHandoff === 'required' || this.#authority.hasLiveLocator(binding)) {
+        if (!this.#authority.handoffToRoadex) {
+          const failed = this.#store.fail(turnId, LIVE_WRITER_HANDOFF_ERROR, true);
+          throw new Error(`Project human thread turn is reconciliation-required: ${failed.error}`);
+        }
+        if (queued.writerHandoff !== 'required') queued = this.#store.requireHandoff(turnId);
+        try {
+          this.#authority.handoffToRoadex(binding);
+          if (this.#authority.hasLiveLocator(binding)) throw new Error('Project human thread locator remains live after handoff.');
+          queued = this.#store.completeHandoff(turnId);
+        } catch {
+          const failed = this.#store.fail(turnId, 'Controlled same-thread writer handoff could not be verified; manual reconciliation is required.', true);
+          throw new Error(`Project human thread turn is reconciliation-required: ${failed.error}`);
+        }
       }
       const running = this.#store.claim(turnId);
       try {
@@ -79,6 +94,7 @@ export class ProjectHumanThreadConversationDispatcher {
   async dispatchPending(): Promise<{ completed: number; failed: number }> {
     let completed = 0; let failed = 0;
     if (this.#shuttingDown) return { completed, failed };
+    this.#store.requeueHandoffRequired();
     for (const turn of this.#store.pendingOutbox()) {
       try { await this.dispatch(turn.turnId); completed += 1; } catch { failed += 1; }
     }

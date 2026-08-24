@@ -231,4 +231,51 @@ describe('project human thread UI', () => {
     expect(html).toContain('The dedicated project conversation is ready.');
     expect(html).not.toContain('Create new thread');
   });
+
+  it('shows a same-thread handoff state instead of claiming reconciliation is working forever', () => {
+    const html = view({
+      snapshot: snapshot({ current: binding }),
+      conversation: {
+        conversationId: binding.conversationId,
+        generation: binding.generation,
+        turns: [{
+          turnId: 'turn-handoff', projectId: binding.projectId, conversationId: binding.conversationId,
+          generation: binding.generation, content: 'project status', correlationId: 'corr-handoff',
+          idempotencyKey: 'key-handoff', state: 'reconciliation-required',
+          error: 'A live writer already owns the exact project-thread locator. Roadex must complete the controlled same-thread handoff before dispatch.',
+          createdAt: '2026-08-24T17:00:00.000Z', updatedAt: '2026-08-24T17:00:01.000Z',
+        }],
+        hasEarlierTurns: false,
+      },
+      turnDraft: '',
+      onTurnDraft: vi.fn(),
+      onSendTurn: vi.fn(),
+    });
+
+    expect(html).toContain('Handoff required');
+    expect(html).not.toContain('>Working<');
+    expect(html).toContain('The original conversation remains bound; Roadex will not create a replacement thread.');
+  });
+
+  it('does not mislabel an unrelated reconciliation failure as a writer handoff', () => {
+    const html = view({
+      snapshot: snapshot({ current: binding }),
+      conversation: {
+        conversationId: binding.conversationId,
+        generation: binding.generation,
+        turns: [{
+          turnId: 'turn-timeout', projectId: binding.projectId, conversationId: binding.conversationId,
+          generation: binding.generation, content: 'project status', correlationId: 'corr-timeout',
+          idempotencyKey: 'key-timeout', state: 'reconciliation-required',
+          error: 'Codex conversation dispatch timed out; exact reconciliation is required.',
+          createdAt: '2026-08-24T17:00:00.000Z', updatedAt: '2026-08-24T17:00:01.000Z',
+        }],
+        hasEarlierTurns: false,
+      },
+    });
+
+    expect(html).toContain('Needs attention');
+    expect(html).not.toContain('Handoff required');
+    expect(html).not.toContain('The original conversation remains bound; Roadex will not create a replacement thread.');
+  });
 });

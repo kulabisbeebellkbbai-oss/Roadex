@@ -138,6 +138,59 @@ describe('ProjectHumanThreadAuthority', () => {
     expect(new ProjectHumanThreadAuthority({ ...options, runTmux: () => Buffer.from('') }).hasLiveLocator(binding)).toBe(true);
   });
 
+  it('hands an active binding to Roadex once and treats its exact tombstone as quiescent', () => {
+    const fixture = setup();
+    const launchers = join(fixture.root, 'bin'); mkdirSync(launchers); chmodSync(launchers, 0o700);
+    const command = `codex-arcade-${threadId}`;
+    const launcher = join(launchers, command);
+    const registry = join(fixture.root, 'codex-projects.csv');
+    writeFileSync(registry, [
+      'conversation_id,label,project,command,launcher,created_at,updated_at,source,notes',
+      `${threadId},Human interaction,${fixture.project},${command},${launcher},,,registry+codex-state,`,
+    ].join('\n'));
+    chmodSync(registry, 0o600);
+    writeFileSync(launcher, '# controlled launcher\n'); chmodSync(launcher, 0o755);
+    let live = true; let marker = ''; let processName = 'codex'; let kills = 0;
+    const authority = new ProjectHumanThreadAuthority({
+      stateDatabasePath: fixture.state, registryPath: registry, launcherDirectory: launchers,
+      runTmux: ((_file: string, args: string[]) => {
+        if (args[0] === 'kill-session') { live = false; kills += 1; return Buffer.from(''); }
+        if (args[0] === 'new-session') { live = true; processName = 'sleep'; return Buffer.from(''); }
+        if (args[0] === 'set-option') { marker = args.at(-1) ?? ''; return Buffer.from(''); }
+        if (args[0] === 'show-options') {
+          if (live && marker) return Buffer.from(`${marker}\n`);
+          throw Object.assign(new Error('missing'), { status: 1, stderr: Buffer.from('unknown option\n') });
+        }
+        if (args[0] === 'list-panes') return Buffer.from(`${processName}\n`);
+        if (args[0] === 'has-session' && live) return Buffer.from('');
+        throw Object.assign(new Error('absent'), { status: 1, stderr: Buffer.from(`can't find session: ${command}\n`) });
+      }) as typeof import('node:child_process').execFileSync,
+      retireControlledThread: () => {
+        if (readFileSync(launcher, 'utf8') !== `# retired Roadex human interaction thread ${threadId}\n`) {
+          writeFileSync(launcher, `# retired Roadex human interaction thread ${threadId}\n`); chmodSync(launcher, 0o444);
+        }
+      },
+    });
+    const candidate = authority.inspect(fixture.project, threadId);
+    const value = {
+      schemaVersion: 'roadex.project-human-thread-binding.v1' as const,
+      bindingId: 'project-human-thread:arcade:1', projectId: 'arcade',
+      root: { canonicalPath: fixture.project, dev: candidate.dev, ino: candidate.ino },
+      purpose: 'human-interaction' as const, conversationId: threadId, generation: 1,
+      status: 'active' as const, predecessorGeneration: null, creationMode: 'adopted' as const,
+      provenanceDigest: 'a'.repeat(64), createdAt: '2026-08-22T12:00:00.000Z',
+      updatedAt: '2026-08-22T12:00:00.000Z', retiredAt: null,
+    };
+    const binding: ProjectHumanThreadBinding = { ...value, recordDigest: bindingDigest(value) };
+
+    expect(authority.hasLiveLocator(binding)).toBe(true);
+    expect(() => authority.handoffToRoadex(binding)).not.toThrow();
+    expect(() => authority.handoffToRoadex(binding)).not.toThrow();
+    expect(authority.hasLiveLocator(binding)).toBe(false);
+    expect(kills).toBe(1);
+    expect(readFileSync(launcher, 'utf8')).toBe(`# retired Roadex human interaction thread ${threadId}\n`);
+  });
+
   it('durably retires the exact legacy locator and drains its writer before replacement', () => {
     const fixture = setup();
     const launchers = join(fixture.root, 'bin'); mkdirSync(launchers); chmodSync(launchers, 0o700);

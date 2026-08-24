@@ -19,6 +19,7 @@ const turnShape = {
   correlationId: ID,
   idempotencyKey: ID,
   state: z.enum(['queued', 'running', 'completed', 'failed', 'reconciliation-required']),
+  writerHandoff: z.enum(['required', 'completed']).optional(),
   assistantOutput: z.string().max(32_768).optional(),
   error: z.string().max(1_000).optional(),
   createdAt: TIMESTAMP,

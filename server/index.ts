@@ -876,6 +876,7 @@ function getProjectHumanThreadConversationController(): ProjectHumanThreadConver
     {
       current: (projectId) => projectHumanThreadService?.current(projectId),
       hasLiveLocator: (binding) => projectHumanThreadAuthority!.hasLiveLocator(binding),
+      handoffToRoadex: (binding) => projectHumanThreadAuthority!.handoffToRoadex(binding),
     },
   );
   return projectHumanThreadConversationController;

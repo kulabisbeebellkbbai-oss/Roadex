@@ -142,17 +142,48 @@ describe('project human conversation turns', () => {
     store.close();
   });
 
-  it('durably fails with reconciliation-required when the exact locator is live', async () => {
-    const { store } = setup();
+  it('hands the exact live locator to Roadex before dispatching the same conversation', async () => {
+    const activeBinding = runtimeBinding();
+    const path = join(mkdtempSync(join(tmpdir(), 'roadex-human-turn-')), 'turns.sqlite');
+    const store = new ProjectHumanThreadConversationStore(() => activeBinding, { databasePath: path, now: () => now });
+    let live = true;
+    const handoffs: ProjectHumanThreadBinding[] = [];
     const dispatcher = new ProjectHumanThreadConversationDispatcher(store, {
-      current: () => binding,
-      hasLiveLocator: () => true,
-      spawnProcess: () => { throw new Error('must not spawn'); },
-      now: () => now,
+      current: () => activeBinding,
+      hasLiveLocator: () => live,
+      handoffToRoadex: (value) => { handoffs.push(value); live = false; },
+    }, {
+      spawnProcess: () => {
+        const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; stdin: { write: () => boolean; end: () => void }; exitCode: number | null; pid: number };
+        child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = { write: () => true, end: () => undefined }; child.exitCode = null; child.pid = process.pid;
+        queueMicrotask(() => {
+          child.stdout.emit('data', `{"thread_id":"${activeBinding.conversationId}","type":"assistant_message","message":"pong"}\n`);
+          child.exitCode = 0; child.emit('close', 0);
+        });
+        return child as never;
+      },
+      executable: '/codex',
     });
-    const turn = store.enqueue(owner.id, binding, 'ping', 'turn-key-1', 'corr-1').turn;
-    await expect(dispatcher.dispatch(turn.turnId)).rejects.toThrow(/reconciliation-required/i);
-    expect(store.history(binding.projectId)[0]).toMatchObject({ state: 'reconciliation-required' });
+    const turn = store.enqueue(owner.id, activeBinding, 'ping', 'turn-key-1', 'corr-1').turn;
+    await expect(dispatcher.dispatch(turn.turnId)).resolves.toMatchObject({ state: 'completed', assistantOutput: 'pong' });
+    expect(handoffs).toEqual([activeBinding]);
+    store.close();
+  });
+
+  it('requeues only a never-dispatched live-writer conflict for crash-safe same-thread handoff', () => {
+    const { store } = setup();
+    const turn = store.enqueue(owner.id, binding, 'ping', 'turn-key-handoff', 'corr-handoff').turn;
+    store.fail(turn.turnId, 'A live writer already owns the exact project-thread locator. Use controlled handoff or Replace binding; Roadex will not terminate it or create a second writer.', true);
+
+    expect(store.requeueHandoffRequired()).toEqual([expect.objectContaining({
+      turnId: turn.turnId,
+      state: 'queued',
+      writerHandoff: 'required',
+    })]);
+    expect(store.pendingOutbox()).toEqual([expect.objectContaining({ turnId: turn.turnId })]);
+    expect(store.requeueHandoffRequired()).toEqual([]);
+    store.rebuild();
+    expect(store.get(turn.turnId)).toMatchObject({ state: 'queued', writerHandoff: 'required' });
     store.close();
   });
 
