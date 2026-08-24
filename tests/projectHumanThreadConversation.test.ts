@@ -187,6 +187,27 @@ describe('project human conversation turns', () => {
     store.close();
   });
 
+  it('records a later handoff failure after recovering a legacy reconciliation event', async () => {
+    const { store } = setup();
+    const turn = store.enqueue(owner.id, binding, 'ping', 'turn-key-handoff-failure', 'corr-handoff-failure').turn;
+    store.fail(turn.turnId, 'A live writer already owns the exact project-thread locator. Use controlled handoff or Replace binding; Roadex will not terminate it or create a second writer.', true);
+    store.requeueHandoffRequired();
+    const dispatcher = new ProjectHumanThreadConversationDispatcher(store, {
+      current: () => binding,
+      hasLiveLocator: () => true,
+      handoffToRoadex: () => { throw new Error('retirement unavailable'); },
+    });
+
+    await expect(dispatcher.dispatch(turn.turnId)).rejects.toThrow(/reconciliation-required/i);
+    expect(store.get(turn.turnId)).toMatchObject({
+      state: 'reconciliation-required',
+      writerHandoff: 'required',
+      error: 'Controlled same-thread writer handoff could not be verified; manual reconciliation is required.',
+    });
+    expect(store.pendingOutbox()).toEqual([]);
+    store.close();
+  });
+
   it('stores a stable public failure instead of raw noisy Codex stderr', async () => {
     const activeBinding = runtimeBinding();
     const path = join(mkdtempSync(join(tmpdir(), 'roadex-human-turn-')), 'turns.sqlite');

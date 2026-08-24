@@ -128,7 +128,10 @@ export class ProjectHumanThreadConversationStore {
       if (!['queued', 'running'].includes(turn.state)) return turn;
       const state: TurnState = reconciliationRequired ? 'reconciliation-required' : 'failed';
       const next = revise(turn, { state, error, updatedAt: this.#now() });
-      this.#insertEvent(`turn:${turn.turnId}:${state}`, state, { turn: next }, next.updatedAt);
+      // A turn may legitimately enter reconciliation more than once across a
+      // durable recovery workflow. Bind the event identity to the exact next
+      // projection instead of treating the state name as globally unique.
+      this.#insertEvent(`turn:${turn.turnId}:${state}:${next.turnDigest}`, state, { turn: next }, next.updatedAt);
       this.#update(next);
       this.#db.prepare('UPDATE project_human_thread_turn_outbox SET state=?,claimed_at=NULL,worker_pid=NULL,worker_start_ticks=NULL,turn_json=?,turn_digest=? WHERE turn_id=?').run(state, stableJson(next), next.turnDigest, turnId);
       return next;
