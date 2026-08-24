@@ -38,6 +38,7 @@ import { hasSerialRuntimeVerification, verifySerialRuntime } from './client/seri
 import { allowsUsbOperation } from './shared/usbDeviceProfileContracts';
 import type { RoadexPolicyExceptionDisplay, WaitingApprovalSummary } from './shared/approvalWorkflowContracts';
 import { ProjectHumanThreadPanel } from './ProjectHumanThreadPanel';
+import { resolveProjectWorkspace } from './projectWorkspaceSelection';
 
 function App() {
   const roadex = useRoadexSession();
@@ -84,8 +85,10 @@ function App() {
   const usbDeviceProfile = roadex.usbDeviceProfiles.find(
     (profile) => profile.workspaceId === session?.workspace.id,
   );
-  const selectedProject = roadex.workspaces.find(
-    (workspace) => workspace.id === (selectedProjectId || session?.workspace.id),
+  const selectedProject = resolveProjectWorkspace(
+    roadex.workspaces,
+    selectedProjectId,
+    session,
   );
   const selectedProjectHasDeviceProfile = Boolean(selectedProject) && [
     roadex.serialVerificationProfiles,

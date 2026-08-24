@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, CheckCircle2, History, Link2, MessageSquare, Plus, RefreshCw, RotateCcw, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Bot, CheckCircle2, ChevronRight, History, Link2, MessageSquare, Plus, RefreshCw, RotateCcw, ShieldCheck, TerminalSquare, UserRound } from 'lucide-react';
 import {
   getProjectHumanThread,
   getProjectHumanThreadHistory,
@@ -388,6 +388,47 @@ export function ProjectHumanThreadPanelView({
         <div className="human-thread-alert" role="alert"><AlertTriangle size={18} /><span>{error}</span></div>
       ) : null}
 
+      {current?.status === 'active' && lifecycleValidated && !error ? (
+        <section className="dashboard-grid live-grid dedicated-human-thread-dashboard" aria-label="Roadex project conversation" data-testid="project-human-thread-turn-composer">
+          <article className="codex-panel">
+            <div className="panel-heading">
+              <div><span className="section-label">Active stream</span><h2>Transcript</h2></div>
+              <span className={`status-dot${conversationBlocked ? ' working' : ''}`} role="status">
+                {conversationBlocked ? 'Working' : 'Ready'}
+              </span>
+            </div>
+            {!conversationReady ? <p className="human-thread-transcript-error">A complete current conversation snapshot is required before sending.</p> : null}
+            <div aria-label="Conversation history" aria-live="polite" className="transcript" tabIndex={0}>
+              {conversation?.turns.flatMap((turn) => [
+                <div className="message user" key={`${turn.turnId}:user`}><p>{turn.content}</p><UserRound size={18} /></div>,
+                turn.assistantOutput
+                  ? <div className="message assistant" key={`${turn.turnId}:assistant`}><Bot size={18} /><p>{turn.assistantOutput}</p></div>
+                  : null,
+                turn.error
+                  ? <div className="message system" key={`${turn.turnId}:error`}><TerminalSquare size={18} /><p>{turn.error}</p></div>
+                  : null,
+              ])}
+              {!conversation?.turns.length && conversationReady ? (
+                <div className="message system"><TerminalSquare size={18} /><p>The dedicated project conversation is ready. Send a message below.</p></div>
+              ) : null}
+            </div>
+            <form className="prompt-row" onSubmit={(event) => { event.preventDefault(); if (conversationReady && !conversationBlocked) onSendTurn?.(turnDraft); }}>
+              <label className="sr-only" htmlFor={`project-human-thread-prompt-${project.id}`}>Prompt</label>
+              <input
+                disabled={!conversationReady || conversationBlocked || turnSending}
+                id={`project-human-thread-prompt-${project.id}`}
+                onChange={(event) => onTurnDraft?.(event.target.value)}
+                placeholder={conversationBlocked ? 'Waiting for the project thread…' : 'Send a message to the project thread'}
+                type="text"
+                value={turnDraft}
+              />
+              <button aria-label="Send message" disabled={!conversationReady || conversationBlocked || !turnDraft.trim() || turnSending} type="submit"><ChevronRight size={20} /></button>
+            </form>
+            {conversation?.hasEarlierTurns ? <p className="human-thread-paging-note">Earlier turns remain in durable history; this view shows the most recent 500.</p> : null}
+          </article>
+        </section>
+      ) : null}
+
       {!lifecycleValidated ? (
         <div className="human-thread-missing" data-testid="project-human-thread-validating">
           <div className="human-thread-status-title">
@@ -548,20 +589,6 @@ export function ProjectHumanThreadPanelView({
           </details>
         ) : null}
       </section>
-
-      {current?.status === 'active' && lifecycleValidated && !error ? (
-        <section className="human-thread-turn-composer" aria-label="Send a message to the project thread" data-testid="project-human-thread-turn-composer">
-          <div className="human-thread-history-heading"><div><MessageSquare size={17} /><strong>Message the project thread</strong></div><span>Dedicated writer</span></div>
-          <p>Send a normal conversation message to this project’s dedicated Roadex thread. Overseer approvals remain separate.</p>
-          {!conversationReady ? <p className="human-thread-transcript-error">A complete current conversation snapshot is required before sending.</p> : null}
-          <form onSubmit={(event) => { event.preventDefault(); if (conversationReady && !conversationBlocked) onSendTurn?.(turnDraft); }}>
-            <label><span>Your message</span><textarea aria-label="Message the project thread" value={turnDraft} onChange={(event) => onTurnDraft?.(event.target.value)} /></label>
-            <button className="primary-action" disabled={!conversationReady || conversationBlocked || !turnDraft.trim() || turnSending} type="submit">{turnSending ? 'Sending…' : conversationBlocked ? 'Conversation requires completion or reconciliation' : 'Send message'}</button>
-          </form>
-          {conversation?.hasEarlierTurns ? <p className="human-thread-paging-note">Earlier turns remain in durable history; this view shows the most recent 500.</p> : null}
-          {conversation?.turns.length ? <ol className="human-thread-turn-history">{conversation.turns.map((turn) => <li key={turn.turnId} data-testid={`project-human-thread-turn-${turn.turnId}`}><div><strong>{turn.content}</strong><span>{turn.state}</span></div>{turn.assistantOutput ? <p>{turn.assistantOutput}</p> : null}{turn.error ? <p className="human-thread-transcript-error">{turn.error}</p> : null}</li>)}</ol> : <p>No direct Roadex messages have been sent in this conversation.</p>}
-        </section>
-      ) : null}
 
       <div className="human-thread-history" data-testid="project-human-thread-history">
         <div className="human-thread-history-heading">

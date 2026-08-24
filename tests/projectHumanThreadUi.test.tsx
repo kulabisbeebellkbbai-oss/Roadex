@@ -210,4 +210,25 @@ describe('project human thread UI', () => {
     expect(html).toContain('data-testid="project-human-thread-question-question-choice"');
     expect(html).not.toContain('Approve');
   });
+
+  it('uses the familiar transcript and prompt interaction for the single designated thread', () => {
+    const html = view({
+      snapshot: snapshot({ current: binding }),
+      conversation: {
+        conversationId: binding.conversationId,
+        generation: binding.generation,
+        turns: [],
+        hasEarlierTurns: false,
+      },
+      turnDraft: '',
+      onTurnDraft: vi.fn(),
+      onSendTurn: vi.fn(),
+    });
+    expect(html).toContain('Active stream');
+    expect(html).toContain('Transcript');
+    expect(html).toContain('Conversation history');
+    expect(html).toContain('Send a message to the project thread');
+    expect(html).toContain('The dedicated project conversation is ready.');
+    expect(html).not.toContain('Create new thread');
+  });
 });
