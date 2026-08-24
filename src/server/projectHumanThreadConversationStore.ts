@@ -251,6 +251,30 @@ export class ProjectHumanThreadConversationStore {
       return recovered;
     });
   }
+  requeueVerifiedUndelivered(turnId: string, expectedTurnDigest: string): ProjectHumanThreadTurn {
+    requireId(turnId, 'turn id');
+    if (!/^[a-f0-9]{64}$/.test(expectedTurnDigest)) throw new Error('Project human thread recovery digest is invalid.');
+    return this.#transaction(() => {
+      const turn = this.#require(turnId);
+      if (turn.turnDigest !== expectedTurnDigest || turn.state !== 'reconciliation-required'
+        || turn.writerHandoff !== 'completed') {
+        throw new Error('Project human thread verified-undelivered recovery does not bind the current turn.');
+      }
+      const outbox = this.#db.prepare(`
+        SELECT state,attempts,worker_pid,worker_start_ticks FROM project_human_thread_turn_outbox WHERE turn_id=?
+      `).get(turnId) as { state: string; attempts: number; worker_pid: number | null; worker_start_ticks: string | null } | undefined;
+      if (!outbox || outbox.state !== 'reconciliation-required' || outbox.attempts < 1
+        || outbox.worker_pid !== null || outbox.worker_start_ticks !== null) {
+        throw new Error('Project human thread verified-undelivered recovery is unsafe.');
+      }
+      const next = revise(turn, { state: 'queued', error: undefined, updatedAt: this.#now() });
+      this.#insertEvent(`turn:${turn.turnId}:verified-undelivered:${expectedTurnDigest}`, 'queued', { turn: next }, next.updatedAt);
+      this.#update(next);
+      this.#db.prepare("UPDATE project_human_thread_turn_outbox SET state='pending',claimed_at=NULL,turn_json=?,turn_digest=? WHERE turn_id=?")
+        .run(stableJson(next), next.turnDigest, turnId);
+      return next;
+    });
+  }
   pendingOutbox(projectId?: string): ProjectHumanThreadTurn[] {
     const rows = projectId
       ? this.#db.prepare("SELECT turn_json,turn_digest FROM project_human_thread_turn_outbox WHERE project_id=? AND state='pending' ORDER BY rowid").all(projectId)

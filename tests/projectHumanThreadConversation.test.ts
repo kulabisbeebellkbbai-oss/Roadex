@@ -264,6 +264,25 @@ describe('project human conversation turns', () => {
     store.close();
   });
 
+  it('requeues only an exact operator-verified undelivered turn after handoff completion', () => {
+    const activeBinding = runtimeBinding();
+    const path = join(mkdtempSync(join(tmpdir(), 'roadex-human-turn-')), 'turns.sqlite');
+    const store = new ProjectHumanThreadConversationStore(() => activeBinding, { databasePath: path, now: () => now });
+    const turn = store.enqueue(owner.id, activeBinding, 'ping', 'turn-key-verified-undelivered', 'corr-verified-undelivered').turn;
+    store.requireHandoff(turn.turnId);
+    store.completeHandoff(turn.turnId);
+    store.claim(turn.turnId);
+    const failed = store.fail(turn.turnId, 'Codex conversation dispatch failed; inspect the private server audit before retrying.', true);
+
+    expect(() => store.requeueVerifiedUndelivered(turn.turnId, '0'.repeat(64))).toThrow(/does not bind/i);
+    expect(store.requeueVerifiedUndelivered(turn.turnId, failed.turnDigest)).toMatchObject({
+      state: 'queued', writerHandoff: 'completed',
+    });
+    expect(store.pendingOutbox()).toEqual([expect.objectContaining({ turnId: turn.turnId })]);
+    expect(() => store.requeueVerifiedUndelivered(turn.turnId, failed.turnDigest)).toThrow(/does not bind/i);
+    store.close();
+  });
+
   it('terminates and awaits every owned writer before shutdown completes', async () => {
     const activeBinding = runtimeBinding();
     const path = join(mkdtempSync(join(tmpdir(), 'roadex-human-turn-')), 'turns.sqlite');
