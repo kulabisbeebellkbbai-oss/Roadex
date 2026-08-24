@@ -20,6 +20,7 @@ except BlockingIOError: raise SystemExit(73)
 os.set_inheritable(3, True)
 os.execv(sys.argv[1], sys.argv[1:])`;
 const DEFAULT_CODEX_EXECUTABLE = '/home/god/.local/bin/codex';
+const DEFAULT_CONVERSATION_TIMEOUT_MS = 10 * 60 * 1_000;
 // Resumed Codex JSONL streams include a bounded copy of the current instruction
 // envelope before assistant events. Keep a hard process-output ceiling while
 // allowing that legitimate envelope; the public assistant result remains
@@ -43,7 +44,7 @@ export class ProjectHumanThreadConversationDispatcher {
     if (!isAbsolute(this.#executable)) throw new Error('Project human thread Codex executable must be absolute.');
     this.#spawn = options.spawnProcess ?? spawn;
     this.#pythonExecutable = options.pythonExecutable ?? '/usr/bin/python3';
-    this.#timeoutMs = options.timeoutMs ?? 120_000;
+    this.#timeoutMs = options.timeoutMs ?? DEFAULT_CONVERSATION_TIMEOUT_MS;
   }
 
   async dispatch(turnId: string): Promise<ProjectHumanThreadTurn> {
