@@ -408,7 +408,11 @@ export class ProjectHumanThreadAuthority {
         continue;
       }
       this.#runTmux(this.#tmuxExecutable, [
-        'set-option', '-t', `=${command}`, '@roadex-human-thread-retired', marker,
+        // tmux's exact-match '=' prefix is valid for pane targets but is not
+        // accepted by the session-option commands in supported tmux builds.
+        // The command is a fully derived, validated session name; tmux prefers
+        // an exact name over prefix matching when that name exists.
+        'set-option', '-t', command, '@roadex-human-thread-retired', marker,
       ], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 2_000 });
       if (this.#retiredTombstoneMatches(command, marker)) return;
       this.#killLocator(command);
@@ -419,7 +423,7 @@ export class ProjectHumanThreadAuthority {
   #retiredTombstoneMatches(command: string, marker: string): boolean {
     try {
       const value = String(this.#runTmux(this.#tmuxExecutable, [
-        'show-options', '-v', '-t', `=${command}`, '@roadex-human-thread-retired',
+        'show-options', '-v', '-t', command, '@roadex-human-thread-retired',
       ], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 2_000 })).trim();
       const processName = String(this.#runTmux(this.#tmuxExecutable, [
         'list-panes', '-t', `=${command}`, '-F', '#{pane_current_command}',

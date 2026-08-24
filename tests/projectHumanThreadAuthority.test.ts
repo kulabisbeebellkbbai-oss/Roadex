@@ -156,8 +156,13 @@ describe('ProjectHumanThreadAuthority', () => {
       runTmux: ((_file: string, args: string[]) => {
         if (args[0] === 'kill-session') { live = false; kills += 1; return Buffer.from(''); }
         if (args[0] === 'new-session') { live = true; processName = 'sleep'; return Buffer.from(''); }
-        if (args[0] === 'set-option') { marker = args.at(-1) ?? ''; return Buffer.from(''); }
+        if (args[0] === 'set-option') {
+          if (args[2]?.startsWith('=')) throw new Error('tmux session-option target is invalid');
+          marker = args.at(-1) ?? '';
+          return Buffer.from('');
+        }
         if (args[0] === 'show-options') {
+          if (args[2]?.startsWith('=')) throw new Error('tmux session-option target is invalid');
           if (live && marker) return Buffer.from(`${marker}\n`);
           throw Object.assign(new Error('missing'), { status: 1, stderr: Buffer.from('unknown option\n') });
         }

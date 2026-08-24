@@ -205,6 +205,11 @@ describe('project human conversation turns', () => {
       error: 'Controlled same-thread writer handoff could not be verified; manual reconciliation is required.',
     });
     expect(store.pendingOutbox()).toEqual([]);
+    expect(store.requeueHandoffRequired()).toEqual([expect.objectContaining({
+      turnId: turn.turnId,
+      state: 'queued',
+      writerHandoff: 'required',
+    })]);
     store.close();
   });
 

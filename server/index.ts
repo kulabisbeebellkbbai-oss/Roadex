@@ -127,8 +127,8 @@ const server = createServer(async (req, res) => {
   }
 });
 
-void startRoadexApi().catch(() => {
-  console.error('Roadex API startup failed.');
+void startRoadexApi().catch((error: unknown) => {
+  console.error('Roadex API startup failed.', error instanceof Error ? error.message : 'unknown_startup_error');
   process.exitCode = 1;
 });
 

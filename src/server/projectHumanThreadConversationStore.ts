@@ -15,6 +15,7 @@ type EventRow = { event_id: string; type: string; payload_json: string; payload_
 export type ConversationStoreOptions = { databasePath?: string; now?: () => string };
 export type ConversationEnqueueResult = { outcome: 'queued' | 'replayed'; turn: ProjectHumanThreadTurn };
 export const LIVE_WRITER_HANDOFF_ERROR = 'A live writer already owns the exact project-thread locator. Roadex must complete the controlled same-thread handoff before dispatch.';
+export const CONTROLLED_WRITER_HANDOFF_ERROR = 'Controlled same-thread writer handoff could not be verified; manual reconciliation is required.';
 const LEGACY_LIVE_WRITER_HANDOFF_ERROR = 'A live writer already owns the exact project-thread locator. Use controlled handoff or Replace binding; Roadex will not terminate it or create a second writer.';
 
 export class ProjectHumanThreadConversationStore {
@@ -234,7 +235,7 @@ export class ProjectHumanThreadConversationStore {
       const recovered: ProjectHumanThreadTurn[] = [];
       for (const row of rows) {
         const turn = parseProjectHumanThreadTurn(JSON.parse(row.turn_json));
-        if (turn.error !== LIVE_WRITER_HANDOFF_ERROR && turn.error !== LEGACY_LIVE_WRITER_HANDOFF_ERROR) continue;
+        if (![LIVE_WRITER_HANDOFF_ERROR, CONTROLLED_WRITER_HANDOFF_ERROR, LEGACY_LIVE_WRITER_HANDOFF_ERROR].includes(turn.error ?? '')) continue;
         const next = revise(turn, {
           state: 'queued', error: undefined, writerHandoff: 'required', updatedAt: this.#now(),
         });

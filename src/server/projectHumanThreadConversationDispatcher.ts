@@ -3,7 +3,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } fr
 import { buildCodexExecArgs, parseCodexJsonlEvents, parseCodexJsonlStream } from './codexRunner.js';
 import type { ProjectHumanThreadBinding } from '../shared/projectHumanThreadContracts.js';
 import type { ProjectHumanThreadTurn } from '../shared/projectHumanThreadConversationContracts.js';
-import { LIVE_WRITER_HANDOFF_ERROR, type ProjectHumanThreadConversationStore } from './projectHumanThreadConversationStore.js';
+import { CONTROLLED_WRITER_HANDOFF_ERROR, LIVE_WRITER_HANDOFF_ERROR, type ProjectHumanThreadConversationStore } from './projectHumanThreadConversationStore.js';
 
 type Authority = {
   current(projectId: string): ProjectHumanThreadBinding | undefined;
@@ -71,7 +71,7 @@ export class ProjectHumanThreadConversationDispatcher {
           if (this.#authority.hasLiveLocator(binding)) throw new Error('Project human thread locator remains live after handoff.');
           queued = this.#store.completeHandoff(turnId);
         } catch {
-          const failed = this.#store.fail(turnId, 'Controlled same-thread writer handoff could not be verified; manual reconciliation is required.', true);
+          const failed = this.#store.fail(turnId, CONTROLLED_WRITER_HANDOFF_ERROR, true);
           throw new Error(`Project human thread turn is reconciliation-required: ${failed.error}`);
         }
       }
